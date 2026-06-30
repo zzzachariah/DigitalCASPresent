@@ -347,9 +347,18 @@ export default function VisitorExperience({
         <div className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-black/45 to-transparent" />
         <div className="pointer-events-none absolute inset-x-0 bottom-0 h-2/5 bg-gradient-to-t from-black/65 to-transparent" />
 
-        {/* top bar: name + status + language */}
+        {/* top bar: avatar + name + status + language */}
         <div className="absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-4">
-          <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="h-11 w-11 shrink-0 overflow-hidden rounded-full bg-white/20 shadow ring-2 ring-white/70">
+              {person.photoUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={person.photoUrl} alt={person.name} className="h-full w-full object-cover" />
+              ) : (
+                <div className="grid h-full w-full place-items-center text-lg">🙂</div>
+              )}
+            </div>
+            <div className="min-w-0">
             <h1 className="truncate text-lg font-semibold text-white drop-shadow-sm">{person.name}</h1>
             {person.subtitle && (
               <p className="truncate text-xs text-white/80 drop-shadow-sm">{person.subtitle}</p>
@@ -365,6 +374,7 @@ export default function VisitorExperience({
                 }`}
               />
               {statusText}
+            </div>
             </div>
           </div>
           <button

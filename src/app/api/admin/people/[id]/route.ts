@@ -25,6 +25,7 @@ export async function PUT(
   const body = (await req.json().catch(() => ({}))) as {
     name?: string;
     subtitle?: string;
+    gender?: string;
     script?: string;
     sections?: Partial<Section>[];
     language?: string;
@@ -33,6 +34,8 @@ export async function PUT(
   const patch: Record<string, unknown> = {};
   if (typeof body.name === "string") patch.name = body.name.trim();
   if (typeof body.subtitle === "string") patch.subtitle = body.subtitle.trim() || undefined;
+  if (body.gender === "male" || body.gender === "female") patch.gender = body.gender;
+  else if (body.gender === "" || body.gender === null) patch.gender = undefined;
   if (typeof body.script === "string") patch.script = body.script.trim();
   if (Array.isArray(body.sections)) {
     patch.sections = body.sections.map((s) => ({

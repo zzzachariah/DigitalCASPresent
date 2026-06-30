@@ -46,6 +46,8 @@ export interface AvatarRequest {
   lang: "en" | "zh";
   /** Absolute, publicly reachable photo URL (required for video providers). */
   photoPublicUrl?: string;
+  /** Person's voice gender (picks the TTS voice). */
+  gender?: "male" | "female";
 }
 
 function isPublicUrl(url: string): boolean {
@@ -64,7 +66,7 @@ export async function createAvatar(req: AvatarRequest): Promise<AvatarCreateResu
   // A2E talking-photo (domestic, China-friendly lip-sync video).
   if (PROVIDER === "a2e" && a2eConfigured() && req.photoPublicUrl) {
     try {
-      const id = await a2eCreateTalkingPhoto(req.text, req.photoPublicUrl);
+      const id = await a2eCreateTalkingPhoto(req.text, req.photoPublicUrl, req.gender);
       return { kind: "video-pending", id, text: req.text };
     } catch (err) {
       console.error("[avatar] A2E failed, falling back to TTS:", err);

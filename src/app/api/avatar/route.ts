@@ -38,6 +38,7 @@ export async function POST(req: NextRequest) {
     text: body.text,
     lang: body.lang || "en",
     photoPublicUrl,
+    gender: person.gender,
   });
 
   return NextResponse.json({ avatar: result });

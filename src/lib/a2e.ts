@@ -60,8 +60,15 @@ export function findUrl(obj: unknown, hint?: RegExp): string | null {
   return urls[0]?.url ?? null;
 }
 
-// Default voice (Andrew Multilingual — speaks zh + en). Override with A2E_TTS_ID.
-const TTS_ID = process.env.A2E_TTS_ID || "66d3fb1bc051cfb134c60f20";
+// Multilingual (zh + en) default voices, per gender. Override via env.
+const VOICE_MALE = process.env.A2E_TTS_ID_MALE || "66d3fb1bc051cfb134c60f20"; // Andrew Multilingual
+const VOICE_FEMALE = process.env.A2E_TTS_ID_FEMALE || "66d3fb89357648b14c4f4f26"; // Emma Multilingual
+
+function voiceFor(gender?: "male" | "female"): string {
+  if (gender === "female") return VOICE_FEMALE;
+  if (gender === "male") return VOICE_MALE;
+  return process.env.A2E_TTS_ID || VOICE_MALE;
+}
 
 // Cache the A2E-hosted copy of each photo so we upload it only once per source.
 const imageCache = new Map<string, string>();
@@ -76,10 +83,14 @@ async function a2eHostedImage(srcUrl: string): Promise<string> {
 
 /** Create a talking-photo (lip-sync) task: TTS the text, then animate the photo.
  *  Returns the A2E task id. */
-export async function a2eCreateTalkingPhoto(text: string, srcPhotoUrl: string): Promise<string> {
+export async function a2eCreateTalkingPhoto(
+  text: string,
+  srcPhotoUrl: string,
+  gender?: "male" | "female"
+): Promise<string> {
   const image_url = await a2eHostedImage(srcPhotoUrl);
 
-  const tts = await a2e("/api/v1/video/send_tts", "POST", { msg: text, tts_id: TTS_ID });
+  const tts = await a2e("/api/v1/video/send_tts", "POST", { msg: text, tts_id: voiceFor(gender) });
   const audio_url = typeof tts.json?.data === "string" ? tts.json.data : findUrl(tts.json);
   if (!audio_url) throw new Error("send_tts returned no audio: " + JSON.stringify(tts.json).slice(0, 200));
 

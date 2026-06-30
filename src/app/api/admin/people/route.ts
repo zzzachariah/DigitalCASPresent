@@ -18,6 +18,7 @@ export async function POST(req: NextRequest) {
   const body = (await req.json().catch(() => ({}))) as {
     name?: string;
     subtitle?: string;
+    gender?: string;
     script?: string;
     sections?: Partial<Section>[];
     language?: string;
@@ -47,9 +48,11 @@ export async function POST(req: NextRequest) {
     : "auto") as "auto" | "en" | "zh" | "bilingual";
 
   try {
+    const gender = body.gender === "male" || body.gender === "female" ? body.gender : undefined;
     const person = await createPerson({
       name: body.name.trim(),
       subtitle: body.subtitle?.trim() || undefined,
+      gender,
       script: body.script.trim(),
       sections,
       language,

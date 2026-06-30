@@ -38,7 +38,7 @@ export async function getPerson(idOrSlug: string): Promise<Person | null> {
 }
 
 export async function createPerson(
-  input: Pick<Person, "name" | "subtitle" | "script" | "sections" | "language">
+  input: Pick<Person, "name" | "subtitle" | "gender" | "script" | "sections" | "language">
 ): Promise<Person> {
   const people = await readDb();
   const now = Date.now();
@@ -47,6 +47,7 @@ export async function createPerson(
     slug: uniqueSlug(input.name, new Set(people.map((p) => p.slug))),
     name: input.name,
     subtitle: input.subtitle,
+    gender: input.gender,
     script: input.script,
     sections: input.sections,
     language: input.language,

@@ -21,6 +21,8 @@ export interface Person {
   subtitle?: string;
   /** Stored photo URL (served from /api/photo/<id> or a blob URL). */
   photoUrl?: string;
+  /** Voice gender for the talking avatar (picks the TTS voice). */
+  gender?: "male" | "female";
   /** Full raw script text (source of truth for the AI). */
   script: string;
   /** Script divided into the parts a visitor can pick. */

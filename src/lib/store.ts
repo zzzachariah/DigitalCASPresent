@@ -24,7 +24,7 @@ export function getPerson(idOrSlug: string): Promise<Person | null> {
   return driver().getPerson(idOrSlug);
 }
 export function createPerson(
-  input: Pick<Person, "name" | "subtitle" | "script" | "sections" | "language">
+  input: Pick<Person, "name" | "subtitle" | "gender" | "script" | "sections" | "language">
 ): Promise<Person> {
   return driver().createPerson(input);
 }

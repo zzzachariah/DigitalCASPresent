@@ -27,6 +27,49 @@ export async function GET(req: NextRequest) {
     },
   };
 
+  // ── Cartoon-ify discovery (?cartoon=1): probe the image-edit endpoints so we
+  //    can turn a photo into a light cartoon that still looks like the person. ──
+  if (req.nextUrl.searchParams.get("cartoon") === "1") {
+    const person = personId ? await getPerson(personId) : (await listPeople())[0];
+    if (!person?.photoUrl) {
+      return NextResponse.json({ error: "没有带照片的人物" }, { status: 404 });
+    }
+    const cartoonOut: Record<string, unknown> = {};
+    try {
+      const cdnUrl = await a2eUploadImage(person.photoUrl);
+      cartoonOut.uploadedImageCdnUrl = cdnUrl;
+      const prompt =
+        "Turn this portrait into a soft, lightly stylized cartoon illustration while keeping the person clearly recognizable. Clean friendly cartoon style, smooth shading, not too realistic, head and shoulders, plain background.";
+      // Superset of likely field names; raw responses reveal the right ones.
+      const bodies = {
+        nanoBanana: { prompt, image_urls: [cdnUrl], imageUrls: [cdnUrl], images: [cdnUrl], image_url: cdnUrl },
+        gptImage: { prompt, image_url: cdnUrl, image: cdnUrl, images: [cdnUrl], imageUrls: [cdnUrl] },
+        imageEdit: { prompt, image_url: cdnUrl, imageUrl: cdnUrl, image: cdnUrl },
+      };
+      cartoonOut.nanoBanana_start = await a2e("/api/v1/userNanoBanana/start", "POST", bodies.nanoBanana);
+      cartoonOut.gptImage_start = await a2e("/api/v1/userGptImage/start", "POST", bodies.gptImage);
+      cartoonOut.imageEdit_start = await a2e("/api/v1/userImageEdit/start", "POST", bodies.imageEdit);
+
+      // Try to poll whichever returned an id, to learn the result-image field.
+      const probe = async (label: string, res: any, detailPath: (id: string) => string) => {
+        const id = res?.json?.data?._id || res?.json?.data?.id;
+        if (!id) return;
+        for (let i = 0; i < 4; i++) {
+          await new Promise((r) => setTimeout(r, 4000));
+          const d = await a2e(detailPath(id), "GET");
+          (cartoonOut as any)[`${label}_detail`] = d;
+          if (findUrl(d.json, /result|image|url|cartoon|cdn/i)) break;
+        }
+      };
+      await probe("nanoBanana", cartoonOut.nanoBanana_start, (id) => `/api/v1/userNanoBanana/detail/${id}`);
+      await probe("gptImage", cartoonOut.gptImage_start, (id) => `/api/v1/userGptImage/detail/${id}`);
+      await probe("imageEdit", cartoonOut.imageEdit_start, (id) => `/api/v1/userImageEdit/${id}`);
+    } catch (e) {
+      cartoonOut.error = e instanceof Error ? e.message : String(e);
+    }
+    return NextResponse.json({ config: out.config, cartoon: cartoonOut });
+  }
+
   // 1) Voices (cheap). Try POST then GET shapes.
   out.tts_list = await a2e("/api/v1/anchor/tts_list", "POST", {});
   out.voice_list = await a2e("/api/v1/anchor/voice_list", "GET");

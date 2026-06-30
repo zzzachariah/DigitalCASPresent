@@ -28,6 +28,7 @@ export default function PersonEditor({
   const isEdit = !!person;
   const [name, setName] = useState(person?.name ?? "");
   const [subtitle, setSubtitle] = useState(person?.subtitle ?? "");
+  const [gender, setGender] = useState<"" | "male" | "female">(person?.gender ?? "");
   const [language, setLanguage] = useState<Person["language"]>(person?.language ?? "auto");
   const [script, setScript] = useState(person?.script ?? "");
   const [sections, setSections] = useState<Section[]>(person?.sections ?? []);
@@ -110,7 +111,7 @@ export default function PersonEditor({
     if (!script.trim()) return setError("请提供讲稿");
     setSaving(true);
     try {
-      const payload = { name, subtitle, language, script, sections };
+      const payload = { name, subtitle, gender, language, script, sections };
       const res = await fetch(
         isEdit ? `/api/admin/people/${person!.id}` : "/api/admin/people",
         {
@@ -213,6 +214,29 @@ export default function PersonEditor({
             onChange={(e) => setSubtitle(e.target.value)}
             placeholder="例如：TOK Exhibition · Knowledge & Technology"
           />
+        </div>
+        <div>
+          <label className="label">声音性别 · Voice（数字人音色）</label>
+          <div className="flex gap-2">
+            {[
+              { v: "", t: "默认" },
+              { v: "male", t: "男声" },
+              { v: "female", t: "女声" },
+            ].map((g) => (
+              <button
+                key={g.v}
+                type="button"
+                onClick={() => setGender(g.v as "" | "male" | "female")}
+                className={`flex-1 rounded-2xl px-3 py-2.5 text-sm font-medium ring-1 transition ${
+                  gender === g.v
+                    ? "bg-brand-500 text-white ring-brand-500"
+                    : "bg-white text-ink-soft ring-black/10 hover:bg-gray-50"
+                }`}
+              >
+                {g.t}
+              </button>
+            ))}
+          </div>
         </div>
         <div>
           <label className="label">回答语言 · Answer language</label>
