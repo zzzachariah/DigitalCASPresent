@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { checkPassword, setAdminCookie } from "@/lib/auth";
+import { checkPassword, makeToken, adminCookieOptions, ADMIN_COOKIE } from "@/lib/auth";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
   const { password } = (await req.json().catch(() => ({}))) as {
@@ -8,6 +11,7 @@ export async function POST(req: NextRequest) {
   if (!checkPassword(password || "")) {
     return NextResponse.json({ error: "密码错误 / Wrong password" }, { status: 401 });
   }
-  setAdminCookie();
-  return NextResponse.json({ ok: true });
+  const res = NextResponse.json({ ok: true });
+  res.cookies.set(ADMIN_COOKIE, makeToken(), adminCookieOptions(60 * 60 * 12)); // 12h
+  return res;
 }

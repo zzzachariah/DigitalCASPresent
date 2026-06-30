@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
-import { clearAdminCookie } from "@/lib/auth";
+import { adminCookieOptions, ADMIN_COOKIE } from "@/lib/auth";
+
+export const runtime = "nodejs";
 
 export async function POST() {
-  clearAdminCookie();
-  return NextResponse.json({ ok: true });
+  const res = NextResponse.json({ ok: true });
+  res.cookies.set(ADMIN_COOKIE, "", adminCookieOptions(0)); // expire now
+  return res;
 }

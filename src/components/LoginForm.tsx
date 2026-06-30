@@ -1,10 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 
 export default function LoginForm() {
-  const router = useRouter();
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -18,14 +16,15 @@ export default function LoginForm() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ password }),
     });
-    setLoading(false);
     if (res.ok) {
-      router.push("/admin");
-      router.refresh();
-    } else {
-      const data = await res.json().catch(() => ({}));
-      setError(data.error || "登录失败");
+      // Hard navigation so the browser sends the freshly-set cookie to the
+      // server-rendered /admin page (avoids the App Router cache/cookie race).
+      window.location.href = "/admin";
+      return;
     }
+    setLoading(false);
+    const data = await res.json().catch(() => ({}));
+    setError(data.error || "登录失败");
   }
 
   return (
