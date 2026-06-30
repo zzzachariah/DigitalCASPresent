@@ -77,12 +77,16 @@ export default function VisitorExperience({
     videoRef: streamVideoRef,
     status: streamStatus,
     speaking: streamSpeaking,
+    playing: streamPlaying,
     start: startStream,
     say: sayStream,
   } = useDidStream(person.id, avatarStream);
 
-  // Unified "is the avatar talking right now?" flag.
-  const talking = avatarStream ? streamSpeaking : stage === "speaking";
+  // The live stream is usable only once real frames are flowing (handles the
+  // case where the stream "connects" but media is blocked, e.g. some networks).
+  const streamUsable = avatarStream && streamPlaying;
+  // Unified "is the avatar talking right now?" flag (stream OR browser TTS).
+  const talking = streamSpeaking || stage === "speaking";
 
   useEffect(() => {
     if (avatarStream) startStream();
@@ -218,11 +222,15 @@ export default function VisitorExperience({
       setLastLang(lang);
 
       // Avatar output, in order of preference:
-      if (avatarStream) {
-        // Real-time stream: the always-on avatar speaks immediately (~1-2s).
+      if (streamUsable) {
+        // Real-time stream IS actually playing → make it speak (~1-2s).
         setStage("ready"); // "talking" is driven by the stream's speaking flag
         const ok = await sayStream(text, lang);
-        if (!ok) speak(text, lang); // stream failed → fall back to browser voice
+        if (!ok) speak(text, lang); // stream hiccup → fall back to browser voice
+      } else if (avatarStream) {
+        // Stream enabled but media isn't flowing (blocked/slow) → speak the
+        // answer with the browser voice so the visitor always hears it.
+        speak(text, lang);
       } else {
         // No stream: queue a D-ID clip (poll), or just speak via the browser.
         const avRes = await fetch("/api/avatar", {
@@ -306,7 +314,9 @@ export default function VisitorExperience({
               muted
               className="absolute inset-0 h-full w-full object-cover"
             />
-            {streamStatus !== "live" && person.photoUrl && (
+            {!streamPlaying && person.photoUrl && (
+              // Show the photo until real video frames arrive (or forever if the
+              // stream's media is blocked) — never leaves a blank white frame.
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={person.photoUrl}

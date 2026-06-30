@@ -16,6 +16,8 @@ export function useDidStream(personId: string, enabled: boolean) {
 
   const [status, setStatus] = useState<StreamStatus>("idle");
   const [speaking, setSpeaking] = useState(false);
+  // True only once real video frames are actually flowing (media works).
+  const [playing, setPlaying] = useState(false);
 
   const post = (body: unknown) =>
     fetch("/api/avatar/stream", {
@@ -44,6 +46,7 @@ export function useDidStream(personId: string, enabled: boolean) {
         const [stream] = e.streams;
         if (videoRef.current && stream) {
           videoRef.current.srcObject = stream;
+          videoRef.current.onplaying = () => setPlaying(true);
           videoRef.current.play().catch(() => {});
         }
       });
@@ -112,11 +115,12 @@ export function useDidStream(personId: string, enabled: boolean) {
     pcRef.current?.close();
     pcRef.current = null;
     sessRef.current = null;
+    setPlaying(false);
   }, []);
 
   useEffect(() => {
     return () => stop();
   }, [stop]);
 
-  return { videoRef, status, speaking, start, say };
+  return { videoRef, status, speaking, playing, start, say };
 }
