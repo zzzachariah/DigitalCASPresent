@@ -1,4 +1,5 @@
 import type { AvatarCreateResult, AvatarPollResult } from "./types";
+import { a2eConfigured, a2eCreateTalkingPhoto, a2ePollTalkingPhoto } from "./a2e";
 
 // ─────────────────────────────────────────────────────────────────────
 // Talking-avatar (digital human) provider.
@@ -60,6 +61,17 @@ function isPublicUrl(url: string): boolean {
 }
 
 export async function createAvatar(req: AvatarRequest): Promise<AvatarCreateResult> {
+  // A2E talking-photo (domestic, China-friendly lip-sync video).
+  if (PROVIDER === "a2e" && a2eConfigured() && req.photoPublicUrl) {
+    try {
+      const id = await a2eCreateTalkingPhoto(req.text, req.photoPublicUrl);
+      return { kind: "video-pending", id, text: req.text };
+    } catch (err) {
+      console.error("[avatar] A2E failed, falling back to TTS:", err);
+      return { kind: "tts", text: req.text, lang: langTag(req.lang) };
+    }
+  }
+
   const canVideo =
     PROVIDER === "did" &&
     !!DID_API_KEY &&
@@ -96,6 +108,9 @@ export async function createAvatar(req: AvatarRequest): Promise<AvatarCreateResu
 }
 
 export async function pollAvatar(id: string): Promise<AvatarPollResult> {
+  if (PROVIDER === "a2e") {
+    return a2ePollTalkingPhoto(id);
+  }
   try {
     const res = await fetch(`${DID_API_URL}/talks/${id}`, {
       headers: { Authorization: didAuthHeader() },

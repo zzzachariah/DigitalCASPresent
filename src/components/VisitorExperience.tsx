@@ -260,10 +260,11 @@ export default function VisitorExperience({
     }
   }
 
-  // Poll the queued D-ID render until it's ready (~max 60s), else give up → TTS.
+  // Poll the queued render until it's ready (talking-photo can take a while),
+  // else give up → TTS. ~3 min max; exits early as soon as the video is ready.
   async function pollForVideo(id: string): Promise<string | null> {
-    for (let i = 0; i < 40; i++) {
-      await new Promise((r) => setTimeout(r, 1500));
+    for (let i = 0; i < 90; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
       try {
         const r = await fetch(`/api/avatar/status?id=${encodeURIComponent(id)}`);
         const d = await r.json();

@@ -3,6 +3,8 @@
 // Responses are wrapped as { code: 0, data: {...} }. Auth: Bearer sk_...
 // ─────────────────────────────────────────────────────────────────────
 
+import type { AvatarPollResult } from "./types";
+
 const BASE = (process.env.A2E_BASE_URL || "https://video.a2e.com.cn").replace(/\/$/, "");
 
 function key(): string {
@@ -56,6 +58,50 @@ export function findUrl(obj: unknown, hint?: RegExp): string | null {
     if (m) return m.url;
   }
   return urls[0]?.url ?? null;
+}
+
+// Default voice (Andrew Multilingual — speaks zh + en). Override with A2E_TTS_ID.
+const TTS_ID = process.env.A2E_TTS_ID || "66d3fb1bc051cfb134c60f20";
+
+// Cache the A2E-hosted copy of each photo so we upload it only once per source.
+const imageCache = new Map<string, string>();
+
+async function a2eHostedImage(srcUrl: string): Promise<string> {
+  const hit = imageCache.get(srcUrl);
+  if (hit) return hit;
+  const cdn = await a2eUploadImage(srcUrl);
+  imageCache.set(srcUrl, cdn);
+  return cdn;
+}
+
+/** Create a talking-photo (lip-sync) task: TTS the text, then animate the photo.
+ *  Returns the A2E task id. */
+export async function a2eCreateTalkingPhoto(text: string, srcPhotoUrl: string): Promise<string> {
+  const image_url = await a2eHostedImage(srcPhotoUrl);
+
+  const tts = await a2e("/api/v1/video/send_tts", "POST", { msg: text, tts_id: TTS_ID });
+  const audio_url = typeof tts.json?.data === "string" ? tts.json.data : findUrl(tts.json);
+  if (!audio_url) throw new Error("send_tts returned no audio: " + JSON.stringify(tts.json).slice(0, 200));
+
+  const start = await a2e("/api/v1/talkingPhoto/start", "POST", {
+    name: "dcp",
+    prompt: "A person looking at the camera talking naturally with subtle head movement, friendly expression",
+    negative_prompt: "blurry, low quality, distorted face, deformed, extra fingers, watermark",
+    image_url,
+    audio_url,
+  });
+  const id = start.json?.data?._id;
+  if (!id) throw new Error("talkingPhoto/start failed: " + JSON.stringify(start.json).slice(0, 300));
+  return id as string;
+}
+
+/** Poll a talking-photo task. Done when result_url is set; error if failed. */
+export async function a2ePollTalkingPhoto(id: string): Promise<AvatarPollResult> {
+  const r = await a2e(`/api/v1/talkingPhoto/${id}`, "GET");
+  const d = r.json?.data;
+  if (d?.result_url) return { status: "done", videoUrl: d.result_url as string };
+  if (d?.failed_message || d?.failed_code) return { status: "error" };
+  return { status: "pending" };
 }
 
 /** Upload an image (from any public URL) into A2E's storage; returns cdnUrl. */
