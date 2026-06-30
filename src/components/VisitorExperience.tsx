@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { PublicPerson, ChatTurn } from "@/lib/types";
 import { TopProgress } from "./Loading";
 import { useDidStream } from "./useDidStream";
+import { readJson } from "@/lib/http";
 
 type Stage = "intro" | "thinking" | "speaking" | "ready";
 
@@ -212,7 +213,7 @@ export default function VisitorExperience({
           uiLang,
         }),
       });
-      const chat = await chatRes.json();
+      const chat = await readJson(chatRes);
       if (!chatRes.ok) throw new Error(chat.error || "AI error");
 
       const text: string = chat.text;
@@ -221,37 +222,42 @@ export default function VisitorExperience({
       setLastText(text);
       setLastLang(lang);
 
-      // Avatar output, in order of preference:
-      if (streamUsable) {
-        // Real-time stream IS actually playing → make it speak (~1-2s).
-        setStage("ready"); // "talking" is driven by the stream's speaking flag
-        const ok = await sayStream(text, lang);
-        if (!ok) speak(text, lang); // stream hiccup → fall back to browser voice
-      } else if (avatarStream) {
-        // Stream enabled but media isn't flowing (blocked/slow) → speak the
-        // answer with the browser voice so the visitor always hears it.
-        speak(text, lang);
-      } else {
-        // No stream: queue a D-ID clip (poll), or just speak via the browser.
-        const avRes = await fetch("/api/avatar", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ personId: person.id, text, lang }),
-        });
-        const av = await avRes.json();
-        if (avRes.ok && av.avatar?.kind === "video-pending") {
-          setVideoLoading(true);
-          const url = await pollForVideo(av.avatar.id);
-          setVideoLoading(false);
-          if (url) {
-            setVideoUrl(url);
-            setStage("speaking");
+      // Avatar output — never let an avatar failure break the turn; fall back
+      // to the browser voice so the visitor always hears the answer.
+      try {
+        if (streamUsable) {
+          // Real-time stream IS actually playing → make it speak (~1-2s).
+          setStage("ready");
+          const ok = await sayStream(text, lang);
+          if (!ok) speak(text, lang);
+        } else if (avatarStream) {
+          speak(text, lang);
+        } else {
+          // Queue a render (A2E / D-ID), or just speak via the browser.
+          const avRes = await fetch("/api/avatar", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ personId: person.id, text, lang }),
+          });
+          const av = await readJson(avRes);
+          if (avRes.ok && av.avatar?.kind === "video-pending") {
+            setVideoLoading(true);
+            const url = await pollForVideo(av.avatar.id);
+            setVideoLoading(false);
+            if (url) {
+              setVideoUrl(url);
+              setStage("speaking");
+            } else {
+              speak(text, lang);
+            }
           } else {
             speak(text, lang);
           }
-        } else {
-          speak(text, lang);
         }
+      } catch {
+        // Avatar failed (timeout / non-JSON / provider error) → just speak.
+        setVideoLoading(false);
+        speak(text, lang);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "出错了，请重试");

@@ -3,7 +3,7 @@ import { getPerson } from "@/lib/store";
 import { createAvatar } from "@/lib/avatar";
 
 export const runtime = "nodejs";
-export const maxDuration = 30; // only QUEUES the render; rendering is polled separately
+export const maxDuration = 60; // queues the render (A2E upload+tts+start); polled separately
 
 function baseUrlFrom(req: NextRequest): string {
   if (process.env.NEXT_PUBLIC_BASE_URL) {
