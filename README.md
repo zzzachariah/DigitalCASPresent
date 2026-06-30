@@ -78,10 +78,11 @@ packyapi（PackyCode）是国内可直连的 OpenAI/Anthropic 兼容中转，支
 
 1. 把仓库导入 Vercel（Framework 自动识别为 Next.js）。
 2. 在 Project → Settings → Environment Variables 填入上表变量（`NEXT_PUBLIC_BASE_URL` 用你的 Vercel 域名）。
-3. **持久化存储（必须）**：本地版用文件系统保存照片和数据，而 Vercel 的函数文件系统是**只读且临时**的，
-   所以上线前要把存储换成云存储。代码已把所有读写集中在 `src/lib/store.ts` 这一处，便于切换：
-   - 推荐 **Vercel Blob**（存照片）+ **Vercel KV/Postgres**（存数据）。
-   - 这一步我可以帮你接好并测试 —— 你在 Vercel 控制台创建好 Blob / KV 资源、给我对应 token 即可。
+3. **持久化存储（已内置 Vercel Blob）**：Vercel 函数文件系统是只读且临时的，所以线上自动改用 **Vercel Blob**
+   （照片和数据都存 Blob，只需一个资源）。开启方法：
+   - Vercel 项目 → **Storage** → **Create Database** → **Blob** → 连接到本项目。
+   - Vercel 会自动注入 `BLOB_READ_WRITE_TOKEN`，**无需手填**。代码检测到它就自动切到 Blob；本地没有它则用 `./data` 文件存储。
+   - 连接后 **Redeploy** 一次即生效，后台上传的人会永久保存。
 4. 视频渲染较慢：Vercel Hobby 函数上限 60s，建议 **Pro（300s）** 或后续改用实时数字人（WebRTC）方案；
    即便超时，访客也会自动听到语音版回答。
 
@@ -108,7 +109,8 @@ src/
     AdminApp / PersonEditor / QrModal     后台界面
     VisitorExperience / LoginForm         访客 + 登录界面
   lib/
-    store.ts     数据层（本地文件；上线切云存储的唯一改动点）
+    store.ts     数据层调度（按环境自动选 文件 / Vercel Blob）
+    store-fs.ts / store-blob.ts   两种存储实现
     ai.ts        packyapi 客户端（含演示模式）
     avatar.ts    数字人提供方（mock / D-ID，可扩展）
     parse.ts     txt / pdf / docx 文本提取
@@ -121,7 +123,6 @@ scripts/seed.mjs  示例数据
 
 ## 🧭 后续可加
 
-- Vercel 云存储接入（部署必需，待你创建资源后接）。
 - 实时流式数字人（WebRTC，HeyGen/D-ID Streaming）以降低现场等待。
 - 克隆每位同学的真实声音（需录制音样）。
 - 后台数据看板：每位同学被问最多的问题等。

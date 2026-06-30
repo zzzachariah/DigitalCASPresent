@@ -29,8 +29,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "no text" }, { status: 400 });
   }
 
+  // Blob mode stores an absolute CDN URL; filesystem mode stores /api/photo/<id>.
   const photoPublicUrl = person.photoUrl
-    ? `${baseUrlFrom(req)}${person.photoUrl}`
+    ? person.photoUrl.startsWith("http")
+      ? person.photoUrl
+      : `${baseUrlFrom(req)}${person.photoUrl}`
     : undefined;
 
   const result = await generateAvatar({
