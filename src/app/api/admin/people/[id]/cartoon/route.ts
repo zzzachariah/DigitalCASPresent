@@ -34,12 +34,12 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     : `${baseUrlFrom(req)}${person.photoUrl}`;
 
   try {
-    const cartoonRemoteUrl = await a2eCartoonify(srcUrl);
-    if (!cartoonRemoteUrl) {
-      return NextResponse.json({ error: "卡通生成失败（额度/接口）" }, { status: 502 });
+    const result = await a2eCartoonify(srcUrl);
+    if ("error" in result) {
+      return NextResponse.json({ error: "卡通生成失败: " + result.error }, { status: 502 });
     }
     // Download the (3-day) A2E result and store it permanently.
-    const img = await fetch(cartoonRemoteUrl);
+    const img = await fetch(result.url);
     if (!img.ok) throw new Error(`download cartoon failed: ${img.status}`);
     const buffer = Buffer.from(await img.arrayBuffer());
     const ct = img.headers.get("content-type") || "image/png";

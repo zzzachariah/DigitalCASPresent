@@ -116,13 +116,16 @@ export async function a2ePollTalkingPhoto(id: string): Promise<AvatarPollResult>
 }
 
 /** Turn a portrait into a light, still-recognizable cartoon via Nano Banana.
- *  Returns the A2E result image URL (caller should download + store it, since
- *  A2E-hosted files expire in ~3 days). Returns null on failure. */
-export async function a2eCartoonify(srcPhotoUrl: string): Promise<string | null> {
+ *  Returns the A2E result image URL (caller downloads + stores it, since
+ *  A2E-hosted files expire in ~3 days), or a human-readable error. */
+export async function a2eCartoonify(
+  srcPhotoUrl: string
+): Promise<{ url: string } | { error: string }> {
+  const model = process.env.A2E_CARTOON_MODEL || "nano-banana-pro";
   try {
     const cdnUrl = await a2eHostedImage(srcPhotoUrl);
     const start = await a2e("/api/v1/userNanoBanana/start", "POST", {
-      model: "nano-banana-pro",
+      model,
       prompt:
         "Turn this portrait into a soft, lightly stylized cartoon illustration while keeping the person clearly recognizable (same face, hair, features). Clean friendly cartoon style, smooth shading, not too realistic, head and shoulders, simple plain background.",
       input_images: [cdnUrl],
@@ -130,25 +133,25 @@ export async function a2eCartoonify(srcPhotoUrl: string): Promise<string | null>
     });
     const id = start.json?.data?._id;
     if (!id) {
-      console.error("[a2e] cartoonify start failed:", JSON.stringify(start.json).slice(0, 200));
-      return null;
+      const j = start.json || {};
+      return {
+        error: `start ${start.httpStatus}: ${j.msg || j.message || j.code || JSON.stringify(j).slice(0, 200)}`,
+      };
     }
     // Poll until image_urls is populated (or failure / timeout).
-    for (let i = 0; i < 40; i++) {
+    let lastStatus = "";
+    for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, 2000));
       const d = await a2e(`/api/v1/userNanoBanana/detail/${id}`, "GET");
       const data = d.json?.data;
+      lastStatus = data?.current_status || lastStatus;
       const urls: string[] = data?.image_urls || [];
-      if (urls.length > 0) return urls[0];
-      if (data?.failed_message) {
-        console.error("[a2e] cartoonify failed:", data.failed_message);
-        return null;
-      }
+      if (urls.length > 0) return { url: urls[0] };
+      if (data?.failed_message) return { error: `render failed: ${data.failed_message}` };
     }
-    return null;
+    return { error: `render timed out (status=${lastStatus || "unknown"})` };
   } catch (e) {
-    console.error("[a2e] cartoonify error:", e);
-    return null;
+    return { error: e instanceof Error ? e.message : String(e) };
   }
 }
 

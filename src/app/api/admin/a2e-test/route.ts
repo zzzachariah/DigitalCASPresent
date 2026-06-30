@@ -70,6 +70,9 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ config: out.config, cartoon: cartoonOut });
   }
 
+  // Credits balance (to check the "额度" question).
+  out.credits = await a2e("/api/v1/transactionRecord/creditsHistory", "GET");
+
   // 1) Voices (cheap). Try POST then GET shapes.
   out.tts_list = await a2e("/api/v1/anchor/tts_list", "POST", {});
   out.voice_list = await a2e("/api/v1/anchor/voice_list", "GET");
