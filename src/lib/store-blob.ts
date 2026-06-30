@@ -1,7 +1,7 @@
 import { put, list, del } from "@vercel/blob";
 import { nanoid } from "nanoid";
 import type { Person } from "./types";
-import { uniqueSlug, resolveBlobToken } from "./store-shared";
+import { uniqueSlug, blobAuth } from "./store-shared";
 
 // Vercel Blob driver — used in production (Vercel's filesystem is read-only).
 // Both the photos and the people metadata live in Blob, so only one Vercel
@@ -17,7 +17,7 @@ let metaUrl: string | null = null;
 
 async function getMetaUrl(): Promise<string | null> {
   if (metaUrl) return metaUrl;
-  const { blobs } = await list({ prefix: META_PATH, limit: 1, token: resolveBlobToken() });
+  const { blobs } = await list({ prefix: META_PATH, limit: 1, ...blobAuth() });
   metaUrl = blobs[0]?.url ?? null;
   return metaUrl;
 }
@@ -42,7 +42,7 @@ async function writeDb(people: Person[]): Promise<void> {
     addRandomSuffix: false,
     allowOverwrite: true,
     cacheControlMaxAge: 0,
-    token: resolveBlobToken(),
+    ...blobAuth(),
   });
   metaUrl = url;
 }
@@ -96,7 +96,7 @@ export async function deletePerson(id: string): Promise<boolean> {
   await writeDb(people.filter((p) => p.id !== id));
   if (target.photoUrl?.startsWith("http")) {
     try {
-      await del(target.photoUrl, { token: resolveBlobToken() });
+      await del(target.photoUrl, { ...blobAuth() });
     } catch {
       /* ignore */
     }
@@ -109,7 +109,7 @@ export async function savePhoto(id: string, buffer: Buffer, ext: string): Promis
   const person = await getPerson(id);
   if (person?.photoUrl?.startsWith("http")) {
     try {
-      await del(person.photoUrl, { token: resolveBlobToken() });
+      await del(person.photoUrl, { ...blobAuth() });
     } catch {
       /* ignore */
     }
@@ -119,7 +119,7 @@ export async function savePhoto(id: string, buffer: Buffer, ext: string): Promis
     addRandomSuffix: false,
     allowOverwrite: true,
     cacheControlMaxAge: 31536000,
-    token: resolveBlobToken(),
+    ...blobAuth(),
   });
   await updatePerson(id, { photoUrl: url });
   return url;

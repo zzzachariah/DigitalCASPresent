@@ -24,6 +24,9 @@ export async function GET() {
     onVercel: !!process.env.VERCEL,
     hasBlobTokenStandard: !!process.env.BLOB_READ_WRITE_TOKEN,
     tokenResolved: !!resolveBlobToken(),
+    // OIDC path: works without a manually-copied token if both are present.
+    hasOidcToken: !!process.env.VERCEL_OIDC_TOKEN,
+    hasBlobStoreId: !!process.env.BLOB_STORE_ID,
     blobEnvKeys, // e.g. ["BLOB_READ_WRITE_TOKEN"] or a prefixed name
     aiKeySet: !!process.env.AI_API_KEY,
     aiModel: process.env.AI_MODEL || "(default: claude-opus-4-8)",

@@ -62,6 +62,21 @@ export function resolveBlobToken(): string | undefined {
   return undefined;
 }
 
+/** True when Blob can authenticate: either a static read-write token, or
+ *  Vercel's OIDC token + a Blob store id (the SDK uses these automatically,
+ *  so no manually-copied token is required). */
+export function blobConfigured(): boolean {
+  if (resolveBlobToken()) return true;
+  return !!(process.env.VERCEL_OIDC_TOKEN && process.env.BLOB_STORE_ID);
+}
+
+/** Auth option to spread into @vercel/blob calls. When there's a static token
+ *  we pass it; otherwise we omit `token` so the SDK falls back to OIDC. */
+export function blobAuth(): { token?: string } {
+  const t = resolveBlobToken();
+  return t ? { token: t } : {};
+}
+
 export function toPublic(p: Person): PublicPerson {
   return {
     id: p.id,

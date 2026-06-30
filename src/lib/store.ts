@@ -10,11 +10,11 @@
 
 import * as fsDriver from "./store-fs";
 import * as blobDriver from "./store-blob";
-import { resolveBlobToken } from "./store-shared";
+import { blobConfigured } from "./store-shared";
 import type { Person } from "./types";
 
 function driver() {
-  return resolveBlobToken() ? blobDriver : fsDriver;
+  return blobConfigured() ? blobDriver : fsDriver;
 }
 
 export function listPeople(): Promise<Person[]> {
@@ -49,13 +49,13 @@ export function readPhoto(
 export { toPublic } from "./store-shared";
 
 export function storageDriverName(): "vercel-blob" | "filesystem" {
-  return resolveBlobToken() ? "vercel-blob" : "filesystem";
+  return blobConfigured() ? "vercel-blob" : "filesystem";
 }
 
 /** Guard for write endpoints: the filesystem driver can't write on Vercel
  *  (read-only FS), so surface a clear, actionable message instead of a crash. */
 export function storageWritable(): { ok: true } | { ok: false; reason: string } {
-  if (!resolveBlobToken() && process.env.VERCEL) {
+  if (!blobConfigured() && process.env.VERCEL) {
     return {
       ok: false,
       reason:
