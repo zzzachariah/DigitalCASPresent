@@ -1,14 +1,14 @@
 import { put, list, del } from "@vercel/blob";
 import { nanoid } from "nanoid";
 import type { Person } from "./types";
-import { uniqueSlug } from "./store-shared";
+import { uniqueSlug, resolveBlobToken } from "./store-shared";
 
 // Vercel Blob driver — used in production (Vercel's filesystem is read-only).
-// Activated automatically when BLOB_READ_WRITE_TOKEN is present (Vercel injects
-// it once you connect a Blob store to the project).
+// Both the photos and the people metadata live in Blob, so only one Vercel
+// resource is needed; photo URLs are public CDN links (also fetchable by D-ID).
 //
-// Both the photos and the people metadata live in Blob, so you only need ONE
-// Vercel resource. Photo URLs are public CDN links (also fetchable by D-ID).
+// The token is resolved at call time (by value, so a non-standard env var name
+// still works) and passed explicitly to every Blob call.
 
 const META_PATH = "data/people.json";
 
@@ -17,7 +17,7 @@ let metaUrl: string | null = null;
 
 async function getMetaUrl(): Promise<string | null> {
   if (metaUrl) return metaUrl;
-  const { blobs } = await list({ prefix: META_PATH, limit: 1 });
+  const { blobs } = await list({ prefix: META_PATH, limit: 1, token: resolveBlobToken() });
   metaUrl = blobs[0]?.url ?? null;
   return metaUrl;
 }
@@ -42,6 +42,7 @@ async function writeDb(people: Person[]): Promise<void> {
     addRandomSuffix: false,
     allowOverwrite: true,
     cacheControlMaxAge: 0,
+    token: resolveBlobToken(),
   });
   metaUrl = url;
 }
@@ -93,10 +94,9 @@ export async function deletePerson(id: string): Promise<boolean> {
   const target = people.find((p) => p.id === id);
   if (!target) return false;
   await writeDb(people.filter((p) => p.id !== id));
-  // best-effort photo cleanup (photoUrl is the absolute blob URL)
   if (target.photoUrl?.startsWith("http")) {
     try {
-      await del(target.photoUrl);
+      await del(target.photoUrl, { token: resolveBlobToken() });
     } catch {
       /* ignore */
     }
@@ -106,11 +106,10 @@ export async function deletePerson(id: string): Promise<boolean> {
 
 export async function savePhoto(id: string, buffer: Buffer, ext: string): Promise<string> {
   const safeExt = ext.replace(/[^a-z0-9]/gi, "").toLowerCase() || "jpg";
-  // Remove any previous photo for this person first.
   const person = await getPerson(id);
   if (person?.photoUrl?.startsWith("http")) {
     try {
-      await del(person.photoUrl);
+      await del(person.photoUrl, { token: resolveBlobToken() });
     } catch {
       /* ignore */
     }
@@ -120,13 +119,16 @@ export async function savePhoto(id: string, buffer: Buffer, ext: string): Promis
     addRandomSuffix: false,
     allowOverwrite: true,
     cacheControlMaxAge: 31536000,
+    token: resolveBlobToken(),
   });
   await updatePerson(id, { photoUrl: url });
   return url;
 }
 
 // Photos are served directly from the Blob CDN (absolute photoUrl), so the
-// /api/photo route is never hit in Blob mode.
-export async function readPhoto(): Promise<{ buffer: Buffer; contentType: string } | null> {
+// /api/photo route is never hit in Blob mode. Signature mirrors the fs driver.
+export async function readPhoto(
+  _id: string
+): Promise<{ buffer: Buffer; contentType: string } | null> {
   return null;
 }

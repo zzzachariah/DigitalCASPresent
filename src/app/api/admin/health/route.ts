@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { isAdmin } from "@/lib/auth";
 import { storageDriverName } from "@/lib/store";
+import { resolveBlobToken } from "@/lib/store-shared";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,10 +13,18 @@ export async function GET() {
   if (!isAdmin()) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
+  // Names only (no values) of env vars that look blob/token related — reveals
+  // what Vercel actually injected when you connected the Blob store.
+  const blobEnvKeys = Object.keys(process.env).filter((k) =>
+    /blob|read_write_token/i.test(k)
+  );
+
   return NextResponse.json({
     storage: storageDriverName(), // "vercel-blob" once Blob is wired
     onVercel: !!process.env.VERCEL,
-    hasBlobToken: !!process.env.BLOB_READ_WRITE_TOKEN,
+    hasBlobTokenStandard: !!process.env.BLOB_READ_WRITE_TOKEN,
+    tokenResolved: !!resolveBlobToken(),
+    blobEnvKeys, // e.g. ["BLOB_READ_WRITE_TOKEN"] or a prefixed name
     aiKeySet: !!process.env.AI_API_KEY,
     aiModel: process.env.AI_MODEL || "(default: claude-opus-4-8)",
     avatarProvider: process.env.AVATAR_PROVIDER || "mock",

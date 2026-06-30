@@ -1,39 +1,61 @@
 // ─────────────────────────────────────────────────────────────────────
 // Data layer entry point.
 //
-// Picks a storage driver at load time:
-//   • Vercel Blob  — when BLOB_READ_WRITE_TOKEN is set (Vercel injects it once
-//     you connect a Blob store). Production-ready, persistent.
+// Picks a storage driver PER REQUEST (not at module load):
+//   • Vercel Blob  — when a Blob read-write token is present in the runtime
+//     environment (resolved by value, so a non-standard env var name still
+//     works, and a runtime-only secret is never baked to undefined at build).
 //   • Filesystem   — otherwise (local dev, or a single always-on server).
-//
-// The rest of the app imports only from here, so switching drivers needs no
-// changes anywhere else.
 // ─────────────────────────────────────────────────────────────────────
 
 import * as fsDriver from "./store-fs";
 import * as blobDriver from "./store-blob";
+import { resolveBlobToken } from "./store-shared";
+import type { Person } from "./types";
 
-const useBlob = !!process.env.BLOB_READ_WRITE_TOKEN;
-const driver = useBlob ? blobDriver : fsDriver;
+function driver() {
+  return resolveBlobToken() ? blobDriver : fsDriver;
+}
 
-export const listPeople = driver.listPeople;
-export const getPerson = driver.getPerson;
-export const createPerson = driver.createPerson;
-export const updatePerson = driver.updatePerson;
-export const deletePerson = driver.deletePerson;
-export const savePhoto = driver.savePhoto;
-export const readPhoto = driver.readPhoto;
+export function listPeople(): Promise<Person[]> {
+  return driver().listPeople();
+}
+export function getPerson(idOrSlug: string): Promise<Person | null> {
+  return driver().getPerson(idOrSlug);
+}
+export function createPerson(
+  input: Pick<Person, "name" | "subtitle" | "script" | "sections" | "language">
+): Promise<Person> {
+  return driver().createPerson(input);
+}
+export function updatePerson(
+  id: string,
+  patch: Partial<Omit<Person, "id" | "createdAt">>
+): Promise<Person | null> {
+  return driver().updatePerson(id, patch);
+}
+export function deletePerson(id: string): Promise<boolean> {
+  return driver().deletePerson(id);
+}
+export function savePhoto(id: string, buffer: Buffer, ext: string): Promise<string> {
+  return driver().savePhoto(id, buffer, ext);
+}
+export function readPhoto(
+  id: string
+): Promise<{ buffer: Buffer; contentType: string } | null> {
+  return driver().readPhoto(id);
+}
 
 export { toPublic } from "./store-shared";
 
 export function storageDriverName(): "vercel-blob" | "filesystem" {
-  return useBlob ? "vercel-blob" : "filesystem";
+  return resolveBlobToken() ? "vercel-blob" : "filesystem";
 }
 
 /** Guard for write endpoints: the filesystem driver can't write on Vercel
  *  (read-only FS), so surface a clear, actionable message instead of a crash. */
 export function storageWritable(): { ok: true } | { ok: false; reason: string } {
-  if (!useBlob && process.env.VERCEL) {
+  if (!resolveBlobToken() && process.env.VERCEL) {
     return {
       ok: false,
       reason:

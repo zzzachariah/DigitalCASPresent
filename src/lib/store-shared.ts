@@ -43,6 +43,25 @@ export function contentTypeForExt(ext: string): string {
   }
 }
 
+/** Resolve the Vercel Blob read-write token regardless of the exact env var
+ *  name. Vercel usually injects BLOB_READ_WRITE_TOKEN, but some setups use a
+ *  prefixed name (e.g. MYSTORE_READ_WRITE_TOKEN). Blob tokens always start with
+ *  "vercel_blob_", so we fall back to detecting by value. Evaluated at request
+ *  time so a runtime-only secret is never baked to undefined at build. */
+export function resolveBlobToken(): string | undefined {
+  if (process.env.BLOB_READ_WRITE_TOKEN) return process.env.BLOB_READ_WRITE_TOKEN;
+  for (const [k, v] of Object.entries(process.env)) {
+    if (
+      typeof v === "string" &&
+      v.startsWith("vercel_blob_") &&
+      /token/i.test(k)
+    ) {
+      return v;
+    }
+  }
+  return undefined;
+}
+
 export function toPublic(p: Person): PublicPerson {
   return {
     id: p.id,
