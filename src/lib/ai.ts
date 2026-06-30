@@ -9,7 +9,7 @@ import type { ChatTurn } from "./types";
 
 const API_KEY = process.env.AI_API_KEY?.trim() || "";
 const BASE_URL = (process.env.AI_BASE_URL || "https://www.packyapi.com/v1").replace(/\/$/, "");
-const MODEL = process.env.AI_MODEL || "claude-3-5-sonnet-20241022";
+const MODEL = process.env.AI_MODEL || "claude-opus-4-8";
 
 export function aiIsMock(): boolean {
   return !API_KEY;
