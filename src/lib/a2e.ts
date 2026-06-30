@@ -115,12 +115,13 @@ export async function a2ePollTalkingPhoto(id: string): Promise<AvatarPollResult>
   return { status: "pending" };
 }
 
-/** Turn a portrait into a light, still-recognizable cartoon via Nano Banana.
- *  Returns the A2E result image URL (caller downloads + stores it, since
- *  A2E-hosted files expire in ~3 days), or a human-readable error. */
-export async function a2eCartoonify(
+// Cartoon-ify is async (Nano Banana render can exceed serverless limits):
+// start the task, then poll separately from the client.
+
+/** Start a cartoon-ify task. Returns the A2E task id (or an error reason). */
+export async function a2eCartoonStart(
   srcPhotoUrl: string
-): Promise<{ url: string } | { error: string }> {
+): Promise<{ taskId: string } | { error: string }> {
   const model = process.env.A2E_CARTOON_MODEL || "nano-banana-pro";
   try {
     const cdnUrl = await a2eHostedImage(srcPhotoUrl);
@@ -138,21 +139,22 @@ export async function a2eCartoonify(
         error: `start ${start.httpStatus}: ${j.msg || j.message || j.code || JSON.stringify(j).slice(0, 200)}`,
       };
     }
-    // Poll until image_urls is populated (or failure / timeout).
-    let lastStatus = "";
-    for (let i = 0; i < 20; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      const d = await a2e(`/api/v1/userNanoBanana/detail/${id}`, "GET");
-      const data = d.json?.data;
-      lastStatus = data?.current_status || lastStatus;
-      const urls: string[] = data?.image_urls || [];
-      if (urls.length > 0) return { url: urls[0] };
-      if (data?.failed_message) return { error: `render failed: ${data.failed_message}` };
-    }
-    return { error: `render timed out (status=${lastStatus || "unknown"})` };
+    return { taskId: id as string };
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/** Poll a cartoon-ify task once. */
+export async function a2eCartoonPoll(
+  taskId: string
+): Promise<{ done: true; url: string } | { pending: true } | { error: string }> {
+  const d = await a2e(`/api/v1/userNanoBanana/detail/${taskId}`, "GET");
+  const data = d.json?.data;
+  const urls: string[] = data?.image_urls || [];
+  if (urls.length > 0) return { done: true, url: urls[0] };
+  if (data?.failed_message) return { error: `render failed: ${data.failed_message}` };
+  return { pending: true };
 }
 
 /** Upload an image (from any public URL) into A2E's storage; returns cdnUrl. */

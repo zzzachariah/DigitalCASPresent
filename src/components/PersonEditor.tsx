@@ -113,10 +113,26 @@ export default function PersonEditor({
     setError("");
     setCartooning(true);
     try {
-      const res = await fetch(`/api/admin/people/${person.id}/cartoon`, { method: "POST" });
-      const data = await readJson(res);
-      if (!res.ok) throw new Error(data.error || "卡通生成失败");
-      setCartoonUrl(data.cartoonUrl);
+      // Start the (async) render, then poll until the cartoon is ready.
+      const startRes = await fetch(`/api/admin/people/${person.id}/cartoon`, { method: "POST" });
+      const startData = await readJson(startRes);
+      if (!startRes.ok) throw new Error(startData.error || "卡通发起失败");
+      const taskId = startData.taskId as string;
+
+      for (let i = 0; i < 80; i++) {
+        await new Promise((r) => setTimeout(r, 3000)); // ~4 min max
+        const pRes = await fetch(
+          `/api/admin/people/${person.id}/cartoon?taskId=${encodeURIComponent(taskId)}`
+        );
+        const pData = await readJson(pRes);
+        if (!pRes.ok) throw new Error(pData.error || "卡通生成失败");
+        if (pData.cartoonUrl) {
+          setCartoonUrl(pData.cartoonUrl);
+          return;
+        }
+        // else { pending: true } → keep polling
+      }
+      throw new Error("卡通生成超时,请重试");
     } catch (e) {
       setError(e instanceof Error ? e.message : "卡通生成失败");
     } finally {

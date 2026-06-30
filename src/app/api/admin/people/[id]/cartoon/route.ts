@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAdmin } from "@/lib/auth";
 import { getPerson, saveCartoon, storageWritable } from "@/lib/store";
-import { a2eConfigured, a2eCartoonify } from "@/lib/a2e";
+import { a2eConfigured, a2eCartoonStart, a2eCartoonPoll } from "@/lib/a2e";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+export const maxDuration = 60;
 
 function baseUrlFrom(req: NextRequest): string {
   if (process.env.NEXT_PUBLIC_BASE_URL) return process.env.NEXT_PUBLIC_BASE_URL.replace(/\/$/, "");
@@ -12,8 +12,7 @@ function baseUrlFrom(req: NextRequest): string {
   return `${proto}://${req.headers.get("host")}`;
 }
 
-// Generate a light cartoon portrait from the person's photo (A2E Nano Banana),
-// download it, and store it permanently in our own storage.
+// POST = start a cartoon-ify task → { taskId }. (Fast; render happens async.)
 export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
   if (!isAdmin()) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   if (!a2eConfigured()) {
@@ -26,20 +25,32 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   if (!writable.ok) return NextResponse.json({ error: writable.reason }, { status: 503 });
 
   const person = await getPerson(params.id);
-  if (!person?.photoUrl) {
-    return NextResponse.json({ error: "请先上传照片" }, { status: 400 });
-  }
+  if (!person?.photoUrl) return NextResponse.json({ error: "请先上传照片" }, { status: 400 });
+
   const srcUrl = person.photoUrl.startsWith("http")
     ? person.photoUrl
     : `${baseUrlFrom(req)}${person.photoUrl}`;
 
+  const res = await a2eCartoonStart(srcUrl);
+  if ("error" in res) {
+    return NextResponse.json({ error: "卡通发起失败: " + res.error }, { status: 502 });
+  }
+  return NextResponse.json({ taskId: res.taskId });
+}
+
+// GET ?taskId=… = poll. When ready, download the (3-day) A2E image and store
+// it permanently → { cartoonUrl }. Otherwise { pending: true } or { error }.
+export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
+  if (!isAdmin()) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  const taskId = req.nextUrl.searchParams.get("taskId");
+  if (!taskId) return NextResponse.json({ error: "no taskId" }, { status: 400 });
+
+  const poll = await a2eCartoonPoll(taskId);
+  if ("error" in poll) return NextResponse.json({ error: "卡通生成失败: " + poll.error }, { status: 502 });
+  if ("pending" in poll) return NextResponse.json({ pending: true });
+
   try {
-    const result = await a2eCartoonify(srcUrl);
-    if ("error" in result) {
-      return NextResponse.json({ error: "卡通生成失败: " + result.error }, { status: 502 });
-    }
-    // Download the (3-day) A2E result and store it permanently.
-    const img = await fetch(result.url);
+    const img = await fetch(poll.url);
     if (!img.ok) throw new Error(`download cartoon failed: ${img.status}`);
     const buffer = Buffer.from(await img.arrayBuffer());
     const ct = img.headers.get("content-type") || "image/png";
@@ -48,7 +59,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     return NextResponse.json({ cartoonUrl });
   } catch (e) {
     return NextResponse.json(
-      { error: e instanceof Error ? e.message : "cartoon error" },
+      { error: e instanceof Error ? e.message : "store cartoon error" },
       { status: 500 }
     );
   }
