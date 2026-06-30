@@ -126,6 +126,19 @@ export async function savePhoto(id: string, buffer: Buffer, ext: string): Promis
   return url;
 }
 
+export async function saveCartoon(id: string, buffer: Buffer, ext: string): Promise<string> {
+  const safeExt = ext.replace(/[^a-z0-9]/gi, "").toLowerCase() || "png";
+  const { url } = await put(`cartoons/${id}.${safeExt}`, buffer, {
+    access: "public",
+    addRandomSuffix: false,
+    allowOverwrite: true,
+    cacheControlMaxAge: 31536000,
+    ...blobAuth(),
+  });
+  await updatePerson(id, { cartoonUrl: url });
+  return url;
+}
+
 // Photos are served directly from the Blob CDN (absolute photoUrl), so the
 // /api/photo route is never hit in Blob mode. Signature mirrors the fs driver.
 export async function readPhoto(

@@ -286,6 +286,7 @@ export default function VisitorExperience({
     run({ mode: "followup", question });
   }
 
+  const displayImage = person.cartoonUrl || person.photoUrl;
   const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
   const caption =
@@ -315,12 +316,12 @@ export default function VisitorExperience({
               muted
               className="absolute inset-0 h-full w-full object-cover"
             />
-            {!streamPlaying && person.photoUrl && (
+            {!streamPlaying && displayImage && (
               // Show the photo until real video frames arrive (or forever if the
               // stream's media is blocked) — never leaves a blank white frame.
               // eslint-disable-next-line @next/next/no-img-element
               <img
-                src={person.photoUrl}
+                src={displayImage}
                 alt={person.name}
                 className="absolute inset-0 h-full w-full object-cover"
               />
@@ -336,9 +337,9 @@ export default function VisitorExperience({
             onEnded={() => setStage("ready")}
             className="absolute inset-0 h-full w-full object-cover"
           />
-        ) : person.photoUrl ? (
+        ) : displayImage ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={person.photoUrl} alt={person.name} className="absolute inset-0 h-full w-full object-cover" />
+          <img src={displayImage} alt={person.name} className="absolute inset-0 h-full w-full object-cover" />
         ) : (
           <div className="absolute inset-0 grid place-items-center bg-brand-50 text-7xl">🙂</div>
         )}
@@ -351,9 +352,9 @@ export default function VisitorExperience({
         <div className="absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-4">
           <div className="flex min-w-0 items-center gap-3">
             <div className="h-11 w-11 shrink-0 overflow-hidden rounded-full bg-white/20 shadow ring-2 ring-white/70">
-              {person.photoUrl ? (
+              {displayImage ? (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={person.photoUrl} alt={person.name} className="h-full w-full object-cover" />
+                <img src={displayImage} alt={person.name} className="h-full w-full object-cover" />
               ) : (
                 <div className="grid h-full w-full place-items-center text-lg">🙂</div>
               )}

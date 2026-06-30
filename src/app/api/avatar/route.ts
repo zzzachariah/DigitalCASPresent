@@ -27,11 +27,13 @@ export async function POST(req: NextRequest) {
   if (!person) return NextResponse.json({ error: "not found" }, { status: 404 });
   if (!body.text?.trim()) return NextResponse.json({ error: "no text" }, { status: 400 });
 
-  // Blob mode stores an absolute CDN URL; filesystem mode stores /api/photo/<id>.
-  const photoPublicUrl = person.photoUrl
-    ? person.photoUrl.startsWith("http")
-      ? person.photoUrl
-      : `${baseUrlFrom(req)}${person.photoUrl}`
+  // Prefer the cartoon portrait when available (the talking avatar should be the
+  // cartoon). Blob stores absolute URLs; filesystem stores /api/photo/<id>.
+  const src = person.cartoonUrl || person.photoUrl;
+  const photoPublicUrl = src
+    ? src.startsWith("http")
+      ? src
+      : `${baseUrlFrom(req)}${src}`
     : undefined;
 
   const result = await createAvatar({

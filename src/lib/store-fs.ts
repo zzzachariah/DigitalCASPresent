@@ -108,12 +108,24 @@ export async function savePhoto(id: string, buffer: Buffer, ext: string): Promis
   return photoUrl;
 }
 
+export async function saveCartoon(id: string, buffer: Buffer, ext: string): Promise<string> {
+  await ensureDirs();
+  const safeExt = ext.replace(/[^a-z0-9]/gi, "").toLowerCase() || "png";
+  await fs.writeFile(path.join(UPLOAD_DIR, `${id}.cartoon.${safeExt}`), buffer);
+  const cartoonUrl = `/api/photo/${id}.cartoon`;
+  await updatePerson(id, { cartoonUrl });
+  return cartoonUrl;
+}
+
 export async function readPhoto(
   id: string
 ): Promise<{ buffer: Buffer; contentType: string } | null> {
   try {
     const files = await fs.readdir(UPLOAD_DIR);
-    const file = files.find((f) => f.startsWith(id + "."));
+    const wantCartoon = id.endsWith(".cartoon");
+    const file = files.find(
+      (f) => f.startsWith(id + ".") && (wantCartoon || !f.includes(".cartoon."))
+    );
     if (!file) return null;
     const buffer = await fs.readFile(path.join(UPLOAD_DIR, file));
     const ext = file.split(".").pop()!.toLowerCase();

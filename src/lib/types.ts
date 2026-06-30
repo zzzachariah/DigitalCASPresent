@@ -21,6 +21,8 @@ export interface Person {
   subtitle?: string;
   /** Stored photo URL (served from /api/photo/<id> or a blob URL). */
   photoUrl?: string;
+  /** Generated cartoon portrait URL (used for display + the talking avatar). */
+  cartoonUrl?: string;
   /** Voice gender for the talking avatar (picks the TTS voice). */
   gender?: "male" | "female";
   /** Full raw script text (source of truth for the AI). */
@@ -41,6 +43,7 @@ export interface PublicPerson {
   name: string;
   subtitle?: string;
   photoUrl?: string;
+  cartoonUrl?: string;
   language: Person["language"];
   sections: { id: string; title: string; hint?: string }[];
 }

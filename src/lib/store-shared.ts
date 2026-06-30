@@ -84,6 +84,7 @@ export function toPublic(p: Person): PublicPerson {
     name: p.name,
     subtitle: p.subtitle,
     photoUrl: p.photoUrl,
+    cartoonUrl: p.cartoonUrl,
     language: p.language,
     sections: p.sections.map((s) => ({ id: s.id, title: s.title, hint: s.hint })),
   };

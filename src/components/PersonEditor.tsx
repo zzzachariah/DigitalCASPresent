@@ -36,6 +36,9 @@ export default function PersonEditor({
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoPreview, setPhotoPreview] = useState<string | undefined>(person?.photoUrl);
 
+  const [cartoonUrl, setCartoonUrl] = useState<string | undefined>(person?.cartoonUrl);
+  const [cartooning, setCartooning] = useState(false);
+
   const [parsing, setParsing] = useState(false);
   const [sectioning, setSectioning] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -105,6 +108,22 @@ export default function PersonEditor({
     setPhotoPreview(URL.createObjectURL(file));
   }
 
+  async function generateCartoon() {
+    if (!person) return;
+    setError("");
+    setCartooning(true);
+    try {
+      const res = await fetch(`/api/admin/people/${person.id}/cartoon`, { method: "POST" });
+      const data = await readJson(res);
+      if (!res.ok) throw new Error(data.error || "卡通生成失败");
+      setCartoonUrl(data.cartoonUrl);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "卡通生成失败");
+    } finally {
+      setCartooning(false);
+    }
+  }
+
   async function save() {
     setError("");
     if (!name.trim()) return setError("请填写姓名");
@@ -145,17 +164,25 @@ export default function PersonEditor({
 
   return (
     <div className="space-y-5 pb-28">
-      {(sectioning || saving || parsing) && (
+      {(sectioning || saving || parsing || cartooning) && (
         <LoadingOverlay
           label={
-            sectioning ? "AI 正在智能分段…" : saving ? "正在保存…" : "正在解析文件…"
+            sectioning
+              ? "AI 正在智能分段…"
+              : cartooning
+                ? "正在生成卡通形象…"
+                : saving
+                  ? "正在保存…"
+                  : "正在解析文件…"
           }
           sub={
             sectioning
               ? "把讲稿分成几个部分，请稍候"
-              : saving
-                ? "上传照片并生成二维码"
-                : "从 PDF / Word 提取文字"
+              : cartooning
+                ? "用照片生成卡通,约 20–40 秒"
+                : saving
+                  ? "上传照片并生成二维码"
+                  : "从 PDF / Word 提取文字"
           }
         />
       )}
@@ -196,6 +223,31 @@ export default function PersonEditor({
               {photoPreview ? "更换照片" : "上传照片"}
             </button>
             <p className="mt-1 text-xs text-ink-mute">建议正脸、清晰、≤8MB</p>
+          </div>
+        </div>
+
+        {/* Cartoon avatar (A2E) — needs the person saved with a photo first. */}
+        <div className="mt-4 flex items-center gap-4 border-t border-black/5 pt-4">
+          <div className="h-20 w-20 shrink-0 overflow-hidden rounded-2xl bg-gray-100 ring-1 ring-black/5">
+            {cartoonUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={cartoonUrl} alt="" className="h-full w-full object-cover" />
+            ) : (
+              <div className="grid h-full w-full place-items-center text-xl text-ink-mute">🎨</div>
+            )}
+          </div>
+          <div>
+            <p className="label">卡通形象 · Cartoon</p>
+            {isEdit ? (
+              <button className="btn-soft" onClick={generateCartoon} disabled={cartooning}>
+                {cartooning ? "生成中…" : cartoonUrl ? "重新生成卡通" : "✨ 生成卡通形象"}
+              </button>
+            ) : (
+              <p className="text-xs text-ink-mute">先保存这位同学,再回来生成卡通形象。</p>
+            )}
+            <p className="mt-1 text-xs text-ink-mute">
+              用本人照片生成轻卡通(还认得出是谁),用于访客端显示和数字人说话。
+            </p>
           </div>
         </div>
       </section>

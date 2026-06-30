@@ -40,6 +40,9 @@ export function deletePerson(id: string): Promise<boolean> {
 export function savePhoto(id: string, buffer: Buffer, ext: string): Promise<string> {
   return driver().savePhoto(id, buffer, ext);
 }
+export function saveCartoon(id: string, buffer: Buffer, ext: string): Promise<string> {
+  return driver().saveCartoon(id, buffer, ext);
+}
 export function readPhoto(
   id: string
 ): Promise<{ buffer: Buffer; contentType: string } | null> {
