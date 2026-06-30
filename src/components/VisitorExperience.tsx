@@ -95,12 +95,23 @@ export default function VisitorExperience({ person }: { person: PublicPerson }) 
   function pickVoice(lang: "en" | "zh"): SpeechSynthesisVoice | undefined {
     if (!("speechSynthesis" in window)) return undefined;
     const voices = window.speechSynthesis.getVoices();
-    const want = lang === "zh" ? /zh|cmn|chinese/i : /^en|english/i;
-    return (
-      voices.find((v) => want.test(v.lang) || want.test(v.name)) ||
-      voices.find((v) => /^en/i.test(v.lang)) ||
-      voices[0]
-    );
+    if (!voices.length) return undefined;
+
+    if (lang === "zh") {
+      const zh = voices.filter((v) => /zh|cmn|chinese/i.test(v.lang) || /chinese|中文|普通话/i.test(v.name));
+      // Prefer known higher-quality Mandarin voices, then zh-CN, then any zh.
+      const nicer = /xiaoxiao|yunxi|huihui|yaoyao|tingting|ting-ting|mei-?jia|sinji|google|microsoft/i;
+      return (
+        zh.find((v) => nicer.test(v.name) && /zh[-_]?cn|zh$/i.test(v.lang)) ||
+        zh.find((v) => /zh[-_]?cn/i.test(v.lang)) ||
+        zh.find((v) => nicer.test(v.name)) ||
+        zh[0] ||
+        voices[0]
+      );
+    }
+    const en = voices.filter((v) => /^en/i.test(v.lang) || /english/i.test(v.name));
+    const nicerEn = /jenny|aria|guy|google|microsoft|samantha/i;
+    return en.find((v) => nicerEn.test(v.name)) || en[0] || voices[0];
   }
 
   function speak(text: string, lang: "en" | "zh") {
