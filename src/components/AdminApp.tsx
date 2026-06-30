@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { Person } from "@/lib/types";
+import { readJson } from "@/lib/http";
 import PersonEditor from "./PersonEditor";
 import QrModal from "./QrModal";
 
@@ -22,7 +23,7 @@ export default function AdminApp() {
       router.push("/admin/login");
       return;
     }
-    const data = await res.json();
+    const data = await readJson(res);
     setPeople(data.people ?? []);
     setLoading(false);
   }

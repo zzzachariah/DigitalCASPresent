@@ -62,11 +62,17 @@ const config: Config = {
           "70%": { transform: "scale(1.25)", opacity: "0" },
           "100%": { opacity: "0" },
         },
+        indeterminate: {
+          "0%": { left: "-45%", width: "45%" },
+          "55%": { left: "60%", width: "55%" },
+          "100%": { left: "100%", width: "45%" },
+        },
       },
       animation: {
         "fade-up": "fade-up 0.4s ease-out both",
         breathe: "breathe 4s ease-in-out infinite",
         "pulse-ring": "pulse-ring 1.6s ease-out infinite",
+        indeterminate: "indeterminate 1.15s ease-in-out infinite",
       },
     },
   },

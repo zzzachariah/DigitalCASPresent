@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAdmin } from "@/lib/auth";
-import { getPerson, savePhoto } from "@/lib/store";
+import { getPerson, savePhoto, storageWritable } from "@/lib/store";
 
 export const runtime = "nodejs";
 
@@ -9,6 +9,11 @@ export async function POST(
   { params }: { params: { id: string } }
 ) {
   if (!isAdmin()) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+
+  const writable = storageWritable();
+  if (!writable.ok) {
+    return NextResponse.json({ error: writable.reason }, { status: 503 });
+  }
 
   const person = await getPerson(params.id);
   if (!person) return NextResponse.json({ error: "not found" }, { status: 404 });
@@ -30,6 +35,14 @@ export async function POST(
         ? "webp"
         : file.name.split(".").pop()?.toLowerCase() || "jpg";
 
-  const photoUrl = await savePhoto(params.id, buffer, ext);
-  return NextResponse.json({ photoUrl });
+  try {
+    const photoUrl = await savePhoto(params.id, buffer, ext);
+    return NextResponse.json({ photoUrl });
+  } catch (err) {
+    console.error("[photo:save] failed:", err);
+    return NextResponse.json(
+      { error: "照片保存失败 / Photo save failed: " + (err instanceof Error ? err.message : "unknown") },
+      { status: 500 }
+    );
+  }
 }

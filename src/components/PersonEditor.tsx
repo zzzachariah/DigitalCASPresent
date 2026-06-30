@@ -2,6 +2,8 @@
 
 import { useRef, useState } from "react";
 import type { Person, Section } from "@/lib/types";
+import { readJson } from "@/lib/http";
+import { LoadingOverlay, Spinner } from "./Loading";
 
 const LANGUAGES: { value: Person["language"]; label: string }[] = [
   { value: "auto", label: "跟随提问语言 (Auto)" },
@@ -64,7 +66,7 @@ export default function PersonEditor({
       const fd = new FormData();
       fd.append("file", file);
       const res = await fetch("/api/admin/parse", { method: "POST", body: fd });
-      const data = await res.json();
+      const data = await readJson(res);
       if (!res.ok) throw new Error(data.error || "解析失败");
       setScript(data.text);
     } catch (e) {
@@ -87,7 +89,7 @@ export default function PersonEditor({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ script }),
       });
-      const data = await res.json();
+      const data = await readJson(res);
       if (!res.ok) throw new Error(data.error || "分段失败");
       setSections(data.sections);
     } catch (e) {
@@ -117,7 +119,7 @@ export default function PersonEditor({
           body: JSON.stringify(payload),
         }
       );
-      const data = await res.json();
+      const data = await readJson(res);
       if (!res.ok) throw new Error(data.error || "保存失败");
       let saved: Person = data.person;
 
@@ -128,8 +130,9 @@ export default function PersonEditor({
           method: "POST",
           body: fd,
         });
-        const pdata = await pres.json();
+        const pdata = await readJson(pres);
         if (pres.ok) saved = { ...saved, photoUrl: pdata.photoUrl };
+        else throw new Error(pdata.error || "照片上传失败");
       }
       onSaved(saved);
     } catch (e) {
@@ -141,6 +144,21 @@ export default function PersonEditor({
 
   return (
     <div className="space-y-5 pb-28">
+      {(sectioning || saving || parsing) && (
+        <LoadingOverlay
+          label={
+            sectioning ? "AI 正在智能分段…" : saving ? "正在保存…" : "正在解析文件…"
+          }
+          sub={
+            sectioning
+              ? "把讲稿分成几个部分，请稍候"
+              : saving
+                ? "上传照片并生成二维码"
+                : "从 PDF / Word 提取文字"
+          }
+        />
+      )}
+
       <div className="flex items-center justify-between">
         <button onClick={onCancel} className="text-sm text-ink-mute hover:text-ink">
           ← 返回
@@ -233,7 +251,13 @@ export default function PersonEditor({
           placeholder="直接粘贴讲稿文字，或上传 PDF / Word / txt 自动提取…"
         />
         <button className="btn-primary w-full" onClick={autoSection} disabled={sectioning}>
-          {sectioning ? "AI 分段中…" : "✨ AI 智能分段"}
+          {sectioning ? (
+            <>
+              <Spinner light /> AI 分段中…
+            </>
+          ) : (
+            "✨ AI 智能分段"
+          )}
         </button>
         <p className="text-xs text-ink-mute">
           AI 会把讲稿分成几个“部分”，访客可以选择想先听哪一部分。分段后可手动微调。
@@ -299,7 +323,15 @@ export default function PersonEditor({
             取消
           </button>
           <button className="btn-primary flex-[2]" onClick={save} disabled={saving}>
-            {saving ? "保存中…" : isEdit ? "保存修改" : "创建并生成二维码"}
+            {saving ? (
+              <>
+                <Spinner light /> 保存中…
+              </>
+            ) : isEdit ? (
+              "保存修改"
+            ) : (
+              "创建并生成二维码"
+            )}
           </button>
         </div>
       </div>

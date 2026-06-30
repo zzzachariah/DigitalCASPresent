@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { PublicPerson, ChatTurn } from "@/lib/types";
+import { TopProgress } from "./Loading";
 
 type Stage = "intro" | "thinking" | "speaking" | "ready";
 
@@ -240,6 +241,7 @@ export default function VisitorExperience({ person }: { person: PublicPerson }) 
     <div className="mx-auto flex h-dvh max-w-md flex-col bg-[var(--bg)]">
       {/* ── Avatar stage ───────────────────────────────────────────── */}
       <div className="relative shrink-0 overflow-hidden bg-gradient-to-b from-brand-50 to-[var(--bg)] px-5 pb-4 pt-6">
+        {(stage === "thinking" || videoLoading) && <TopProgress />}
         <div className="flex items-center gap-4">
           <div className="relative">
             {stage === "speaking" && !videoUrl && (

@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { nanoid } from "nanoid";
 import { isAdmin } from "@/lib/auth";
-import { createPerson, listPeople } from "@/lib/store";
+import { createPerson, listPeople, storageWritable } from "@/lib/store";
 import type { Section } from "@/lib/types";
+
+export const runtime = "nodejs";
 
 export async function GET() {
   if (!isAdmin()) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -28,6 +30,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "请提供讲稿 / Script is required" }, { status: 400 });
   }
 
+  const writable = storageWritable();
+  if (!writable.ok) {
+    return NextResponse.json({ error: writable.reason }, { status: 503 });
+  }
+
   const sections: Section[] = (body.sections ?? []).map((s) => ({
     id: s.id || nanoid(8),
     title: s.title?.trim() || "Untitled",
@@ -39,13 +46,20 @@ export async function POST(req: NextRequest) {
     ? body.language
     : "auto") as "auto" | "en" | "zh" | "bilingual";
 
-  const person = await createPerson({
-    name: body.name.trim(),
-    subtitle: body.subtitle?.trim() || undefined,
-    script: body.script.trim(),
-    sections,
-    language,
-  });
-
-  return NextResponse.json({ person });
+  try {
+    const person = await createPerson({
+      name: body.name.trim(),
+      subtitle: body.subtitle?.trim() || undefined,
+      script: body.script.trim(),
+      sections,
+      language,
+    });
+    return NextResponse.json({ person });
+  } catch (err) {
+    console.error("[people:create] failed:", err);
+    return NextResponse.json(
+      { error: "保存失败 / Save failed: " + (err instanceof Error ? err.message : "unknown") },
+      { status: 500 }
+    );
+  }
 }

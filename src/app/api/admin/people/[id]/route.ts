@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { nanoid } from "nanoid";
 import { isAdmin } from "@/lib/auth";
-import { deletePerson, getPerson, updatePerson } from "@/lib/store";
+import { deletePerson, getPerson, updatePerson, storageWritable } from "@/lib/store";
 import type { Section } from "@/lib/types";
+
+export const runtime = "nodejs";
 
 export async function GET(
   _req: NextRequest,
@@ -44,9 +46,22 @@ export async function PUT(
     patch.language = body.language;
   }
 
-  const person = await updatePerson(params.id, patch);
-  if (!person) return NextResponse.json({ error: "not found" }, { status: 404 });
-  return NextResponse.json({ person });
+  const writable = storageWritable();
+  if (!writable.ok) {
+    return NextResponse.json({ error: writable.reason }, { status: 503 });
+  }
+
+  try {
+    const person = await updatePerson(params.id, patch);
+    if (!person) return NextResponse.json({ error: "not found" }, { status: 404 });
+    return NextResponse.json({ person });
+  } catch (err) {
+    console.error("[people:update] failed:", err);
+    return NextResponse.json(
+      { error: "保存失败 / Save failed: " + (err instanceof Error ? err.message : "unknown") },
+      { status: 500 }
+    );
+  }
 }
 
 export async function DELETE(
