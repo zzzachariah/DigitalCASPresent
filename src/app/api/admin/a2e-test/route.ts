@@ -54,23 +54,35 @@ export async function GET(req: NextRequest) {
     const cdnUrl = await a2eUploadImage(person.photoUrl);
     out.uploadedImageCdnUrl = cdnUrl;
 
-    // 4) Start talking photo (best-guess fields; raw response will confirm).
+    // 4) Start talking photo. Now includes prompt/negative_prompt (required per
+    //    the prior 400) + a superset of likely image/audio field names.
     const startBody: Record<string, unknown> = {
       name: "dcp-test",
+      prompt: "A person looking at the camera and talking naturally with subtle head movement, friendly expression",
+      negative_prompt: "blurry, low quality, distorted face, deformed, extra fingers, watermark",
       image_url: cdnUrl,
       imageUrl: cdnUrl,
+      image: cdnUrl,
       audio_url: audioUrl,
       audioUrl: audioUrl,
+      audio: audioUrl,
+      audioSrc: audioUrl,
     };
+    out.talkingPhoto_startBodySent = startBody;
     const start = await a2e("/api/v1/talkingPhoto/start", "POST", startBody);
     out.talkingPhoto_start = start;
 
-    // 5) Poll once for the detail/result shape.
-    const taskId = start.json?.data?._id || start.json?.data?.id || findUrl(start.json, /_id|id/i);
+    // 5) Poll a few times for the detail/result shape.
+    const taskId = start.json?.data?._id || start.json?.data?.id || start.json?.data;
     out.detectedTaskId = taskId;
     if (typeof taskId === "string" && /^[\w-]+$/.test(taskId)) {
-      await new Promise((r) => setTimeout(r, 4000));
-      out.talkingPhoto_detail = await a2e(`/api/v1/talkingPhoto/${taskId}`, "GET");
+      for (let i = 0; i < 3; i++) {
+        await new Promise((r) => setTimeout(r, 5000));
+        const detail = await a2e(`/api/v1/talkingPhoto/${taskId}`, "GET");
+        out.talkingPhoto_detail = detail;
+        const st = detail.json?.data?.status;
+        if (st && /success|done|complet|fail|error/i.test(String(st))) break;
+      }
     }
   } catch (e) {
     out.uploadError = e instanceof Error ? e.message : String(e);
