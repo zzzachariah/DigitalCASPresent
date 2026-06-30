@@ -277,169 +277,136 @@ export default function VisitorExperience({
     run({ mode: "followup", question });
   }
 
-  return (
-    <div className="mx-auto flex h-dvh max-w-md flex-col bg-[var(--bg)]">
-      {/* ── Avatar stage ───────────────────────────────────────────── */}
-      <div className="relative shrink-0 overflow-hidden bg-gradient-to-b from-brand-50 to-[var(--bg)] px-5 pb-4 pt-6">
-        {(stage === "thinking" || videoLoading) && <TopProgress />}
-        <div className="flex items-center gap-4">
-          <div className="relative">
-            {talking && !videoUrl && (
-              <>
-                <span className="absolute inset-0 animate-pulse-ring rounded-full bg-brand-300" />
-                <span
-                  className="absolute inset-0 animate-pulse-ring rounded-full bg-brand-200"
-                  style={{ animationDelay: "0.5s" }}
-                />
-              </>
-            )}
-            <div
-              className={`relative h-24 w-24 overflow-hidden rounded-full bg-white shadow-lift ring-4 ring-white ${
-                talking && !videoUrl ? "animate-breathe" : ""
-              }`}
-            >
-              {avatarStream ? (
-                // Always-on real-time avatar (idle, then talks on demand).
-                <>
-                  <video
-                    ref={streamVideoRef}
-                    autoPlay
-                    playsInline
-                    muted
-                    className="h-full w-full object-cover"
-                  />
-                  {streamStatus !== "live" && person.photoUrl && (
-                    // show the photo until the stream connects
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={person.photoUrl}
-                      alt={person.name}
-                      className="absolute inset-0 h-full w-full object-cover"
-                    />
-                  )}
-                </>
-              ) : videoUrl ? (
-                <video
-                  key={videoUrl}
-                  src={videoUrl}
-                  autoPlay
-                  playsInline
-                  controls={false}
-                  onEnded={() => setStage("ready")}
-                  className="h-full w-full object-cover"
-                />
-              ) : person.photoUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={person.photoUrl} alt={person.name} className="h-full w-full object-cover" />
-              ) : (
-                <div className="grid h-full w-full place-items-center text-3xl">🙂</div>
-              )}
-            </div>
-          </div>
+  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+  const lastUser = [...messages].reverse().find((m) => m.role === "user");
+  const caption =
+    messages.length === 0
+      ? `${t.greeting(person.name)} ${t.pick}`
+      : lastAssistant?.text || t.greeting(person.name);
+  const statusText = videoLoading
+    ? t.rendering
+    : stage === "thinking"
+      ? t.thinking
+      : talking
+        ? t.speaking
+        : "数字人 · Digital guide";
 
-          <div className="min-w-0 flex-1">
-            <h1 className="truncate text-lg font-semibold tracking-tight">{person.name}</h1>
-            {person.subtitle && (
-              <p className="truncate text-xs text-ink-mute">{person.subtitle}</p>
+  return (
+    <div className="relative mx-auto flex h-dvh max-w-md flex-col overflow-hidden bg-black">
+      {/* ── Full-screen digital human ──────────────────────────────── */}
+      <div className="relative flex-1 overflow-hidden bg-gradient-to-b from-brand-100 to-brand-50">
+        {(stage === "thinking" || videoLoading) && <TopProgress />}
+
+        {avatarStream ? (
+          <>
+            <video
+              ref={streamVideoRef}
+              autoPlay
+              playsInline
+              muted
+              className="absolute inset-0 h-full w-full object-cover"
+            />
+            {streamStatus !== "live" && person.photoUrl && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={person.photoUrl}
+                alt={person.name}
+                className="absolute inset-0 h-full w-full object-cover"
+              />
             )}
-            <div className="mt-1 inline-flex items-center gap-1.5 rounded-full bg-white/70 px-2.5 py-1 text-xs text-ink-soft ring-1 ring-black/5">
+          </>
+        ) : videoUrl ? (
+          <video
+            key={videoUrl}
+            src={videoUrl}
+            autoPlay
+            playsInline
+            controls={false}
+            onEnded={() => setStage("ready")}
+            className="absolute inset-0 h-full w-full object-cover"
+          />
+        ) : person.photoUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={person.photoUrl} alt={person.name} className="absolute inset-0 h-full w-full object-cover" />
+        ) : (
+          <div className="absolute inset-0 grid place-items-center bg-brand-50 text-7xl">🙂</div>
+        )}
+
+        {/* legibility gradients */}
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-black/45 to-transparent" />
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-2/5 bg-gradient-to-t from-black/65 to-transparent" />
+
+        {/* top bar: name + status + language */}
+        <div className="absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-4">
+          <div className="min-w-0">
+            <h1 className="truncate text-lg font-semibold text-white drop-shadow-sm">{person.name}</h1>
+            {person.subtitle && (
+              <p className="truncate text-xs text-white/80 drop-shadow-sm">{person.subtitle}</p>
+            )}
+            <div className="mt-1.5 inline-flex items-center gap-1.5 rounded-full bg-black/30 px-2.5 py-1 text-xs text-white backdrop-blur">
               <span
                 className={`h-1.5 w-1.5 rounded-full ${
                   stage === "thinking" || videoLoading
                     ? "animate-pulse bg-amber-400"
                     : talking
-                      ? "animate-pulse bg-green-500"
-                      : "bg-brand-400"
+                      ? "animate-pulse bg-green-400"
+                      : "bg-white/70"
                 }`}
               />
-              {videoLoading
-                ? t.rendering
-                : stage === "thinking"
-                  ? t.thinking
-                  : talking
-                    ? t.speaking
-                    : "数字人 · Digital guide"}
+              {statusText}
             </div>
           </div>
-
-          {/* language toggle */}
           <button
             onClick={() => {
               setLangTouched(true);
               setUiLang((l) => (l === "zh" ? "en" : "zh"));
             }}
-            className="rounded-full bg-white px-3 py-1.5 text-xs font-medium text-ink-soft shadow-soft ring-1 ring-black/5"
+            className="shrink-0 rounded-full bg-black/30 px-3 py-1.5 text-xs font-medium text-white backdrop-blur"
             title="切换语言 / Toggle language"
           >
             {uiLang === "zh" ? "EN" : "中"}
           </button>
         </div>
-      </div>
 
-      {/* ── Transcript ─────────────────────────────────────────────── */}
-      <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
-        {/* greeting */}
-        <Bubble role="assistant">
-          {t.greeting(person.name)} {messages.length === 0 ? t.pick : ""}
-        </Bubble>
-
-        {messages.map((m) => (
-          <Bubble key={m.id} role={m.role}>
-            {m.text}
-          </Bubble>
-        ))}
-
-        {stage === "thinking" && !videoLoading && (
-          <div className="flex items-center gap-1.5 pl-1 text-ink-mute">
-            <Dot /> <Dot d="0.15s" /> <Dot d="0.3s" />
-          </div>
-        )}
-
-        {error && <p className="text-sm text-red-500">{error}</p>}
-
-        {/* speaking controls */}
-        {stage !== "thinking" && !videoLoading && messages.length > 0 && (
-          <div className="flex flex-wrap gap-2 pt-1">
-            {talking ? (
-              !avatarStream && (
-                <button onClick={stopSpeaking} className="chip bg-white text-ink-soft ring-1 ring-black/5">
-                  ⏹ {t.stop}
-                </button>
-              )
+        {/* caption overlay (read along) */}
+        <div className="absolute inset-x-0 bottom-0 p-3">
+          {lastUser && (stage === "thinking" || talking) && (
+            <div className="mb-2 flex justify-end">
+              <span className="max-w-[80%] truncate rounded-full bg-white/90 px-3 py-1 text-xs text-ink shadow-soft">
+                {lastUser.text}
+              </span>
+            </div>
+          )}
+          <div className="max-h-[40vh] overflow-y-auto rounded-2xl bg-black/45 px-4 py-3 backdrop-blur">
+            {stage === "thinking" ? (
+              <span className="flex items-center gap-1.5 text-white/90">
+                <Dot /> <Dot d="0.15s" /> <Dot d="0.3s" />
+                <span className="ml-1 text-sm">{t.thinking}</span>
+              </span>
             ) : (
-              <button onClick={replay} className="chip bg-white text-ink-soft ring-1 ring-black/5">
-                ↻ {t.replay}
-              </button>
+              <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-white">{caption}</p>
             )}
           </div>
-        )}
-
-        {/* follow-up suggestions, shown once an answer has finished */}
-        {stage === "ready" && !talking && !videoLoading && messages.length > 0 && (
-          <div className="pt-1">
-            <p className="mb-1.5 text-xs text-ink-mute">{t.followHint}</p>
-            <div className="flex flex-wrap gap-2">
-              {t.suggestions.map((s) => (
-                <button
-                  key={s}
-                  onClick={() => submitFollowUp(s)}
-                  className="chip bg-brand-50 text-brand-700 hover:bg-brand-100"
-                >
-                  {s}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+          {error && <p className="mt-2 text-sm text-red-200">{error}</p>}
+          {/* replay */}
+          {stage === "ready" && !talking && !videoLoading && messages.length > 0 && (
+            <button
+              onClick={replay}
+              className="mt-2 rounded-full bg-white/85 px-3 py-1 text-xs text-ink-soft shadow-soft active:scale-95"
+            >
+              ↻ {t.replay}
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* ── Section menu (always reachable) ────────────────────────── */}
-      <div className="shrink-0 border-t border-black/5 bg-white/80 backdrop-blur">
-        <div className="px-5 pt-3">
+      {/* ── Compact control bar ────────────────────────────────────── */}
+      <div className="shrink-0 bg-white">
+        <div className="px-4 pt-3">
           <p className="mb-2 text-xs font-medium text-ink-mute">
             {messages.length === 0 ? t.pick : t.other}
           </p>
-          <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-3 pt-1.5">
+          <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-2 pt-1.5">
             {person.sections.map((s, i) => (
               <button
                 key={s.id}
@@ -457,13 +424,27 @@ export default function VisitorExperience({
           </div>
         </div>
 
-        {/* ── Follow-up input ──────────────────────────────────────── */}
+        {/* follow-up suggestions (compact, single row) */}
+        {stage === "ready" && !talking && !videoLoading && messages.length > 0 && (
+          <div className="-mx-1 flex gap-2 overflow-x-auto px-5 pb-1">
+            {t.suggestions.map((s) => (
+              <button
+                key={s}
+                onClick={() => submitFollowUp(s)}
+                className="chip shrink-0 whitespace-nowrap bg-brand-50 text-brand-700 hover:bg-brand-100"
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+        )}
+
         <form
           onSubmit={(e) => {
             e.preventDefault();
             submitFollowUp(input);
           }}
-          className="flex items-center gap-2 border-t border-black/5 px-4 py-3"
+          className="flex items-center gap-2 px-4 pb-3 pt-2"
         >
           <input
             className="input flex-1 py-2.5"
@@ -472,11 +453,7 @@ export default function VisitorExperience({
             placeholder={t.askPlaceholder}
             disabled={busy}
           />
-          <button
-            type="submit"
-            disabled={busy || !input.trim()}
-            className="btn-primary px-4 py-2.5"
-          >
+          <button type="submit" disabled={busy || !input.trim()} className="btn-primary px-4 py-2.5">
             {t.send}
           </button>
         </form>
@@ -486,23 +463,6 @@ export default function VisitorExperience({
 }
 
 // ─── Small UI bits ─────────────────────────────────────────────────────
-function Bubble({ role, children }: { role: "user" | "assistant"; children: React.ReactNode }) {
-  const isUser = role === "user";
-  return (
-    <div className={`flex animate-fade-up ${isUser ? "justify-end" : "justify-start"}`}>
-      <div
-        className={`max-w-[82%] whitespace-pre-wrap rounded-3xl px-4 py-2.5 text-[15px] leading-relaxed ${
-          isUser
-            ? "rounded-br-lg bg-brand-500 text-white"
-            : "rounded-bl-lg bg-white text-ink shadow-soft ring-1 ring-black/5"
-        }`}
-      >
-        {children}
-      </div>
-    </div>
-  );
-}
-
 function Dot({ d = "0s" }: { d?: string }) {
   return (
     <span
