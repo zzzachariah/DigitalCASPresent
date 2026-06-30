@@ -69,21 +69,49 @@ export async function GET(req: NextRequest) {
       }),
     });
     const status = res.status;
-    const bodyText = await res.text();
-    let parsed: unknown = bodyText;
-    try {
-      parsed = JSON.parse(bodyText);
-    } catch {
-      /* keep text */
+    const created = (await res.json().catch(() => ({}))) as { id?: string; [k: string]: unknown };
+
+    if (!res.ok || !created.id) {
+      return NextResponse.json({
+        ...checks,
+        didCreateStatus: status,
+        didCreateOk: res.ok,
+        didResponse: created,
+        verdict: "D-ID 拒绝了创建请求 ❌(看 didResponse 里的原因)",
+      });
     }
+
+    // Poll the render to completion so we see the REAL outcome (done / error /
+    // still rendering), not just that it was queued.
+    const talkId = created.id;
+    let final: { status?: string; result_url?: string; error?: unknown; kind?: string } = {};
+    let polls = 0;
+    const startedAt = Date.now();
+    for (; polls < 16; polls++) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const p = await fetch(`https://api.d-id.com/talks/${talkId}`, {
+        headers: { Authorization: auth },
+      });
+      if (!p.ok) continue;
+      final = (await p.json()) as typeof final;
+      if (final.status === "done" || final.status === "error" || final.status === "rejected") break;
+    }
+    const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+
     return NextResponse.json({
       ...checks,
       didCreateStatus: status,
-      didCreateOk: res.ok,
-      didResponse: parsed,
-      verdict: res.ok
-        ? "D-ID 接受了请求 ✅(说明 key/照片都没问题;视频会异步渲染)"
-        : "D-ID 拒绝了请求 ❌(看 didResponse 里的原因)",
+      talkId,
+      renderStatus: final.status,
+      renderSeconds: elapsedSec,
+      resultUrl: final.result_url || null,
+      renderError: final.error || null,
+      verdict:
+        final.status === "done" && final.result_url
+          ? `渲染成功 ✅ 用时约 ${elapsedSec}s。问题在前端等待/显示,我已延长等待时间。`
+          : final.status === "error" || final.status === "rejected"
+            ? "渲染失败 ❌(看 renderError,常见是额度/人脸/套餐限制)"
+            : `${elapsedSec}s 还没渲染完(可能偏慢);resultUrl 仍为空。`,
     });
   } catch (e) {
     return NextResponse.json({

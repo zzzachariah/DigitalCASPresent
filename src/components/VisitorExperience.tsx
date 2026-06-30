@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { PublicPerson, ChatTurn } from "@/lib/types";
 import { TopProgress } from "./Loading";
+import { useDidStream } from "./useDidStream";
 
 type Stage = "intro" | "thinking" | "speaking" | "ready";
 
@@ -45,7 +46,13 @@ const T = {
   },
 };
 
-export default function VisitorExperience({ person }: { person: PublicPerson }) {
+export default function VisitorExperience({
+  person,
+  avatarStream = false,
+}: {
+  person: PublicPerson;
+  avatarStream?: boolean;
+}) {
   // Deterministic initial value (same on server + first client render) to avoid
   // a hydration mismatch. For "auto"/"bilingual" we refine to the device
   // language in an effect AFTER mount (see below).
@@ -64,6 +71,23 @@ export default function VisitorExperience({ person }: { person: PublicPerson }) 
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const t = T[uiLang];
+
+  // Real-time talking-avatar stream (D-ID WebRTC). No-op when not enabled.
+  const {
+    videoRef: streamVideoRef,
+    status: streamStatus,
+    speaking: streamSpeaking,
+    start: startStream,
+    say: sayStream,
+  } = useDidStream(person.id, avatarStream);
+
+  // Unified "is the avatar talking right now?" flag.
+  const talking = avatarStream ? streamSpeaking : stage === "speaking";
+
+  useEffect(() => {
+    if (avatarStream) startStream();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [avatarStream]);
 
   useEffect(() => {
     // warm up speech voices
@@ -144,10 +168,11 @@ export default function VisitorExperience({ person }: { person: PublicPerson }) 
   }
 
   function replay() {
-    if (videoUrl) {
-      setStage("speaking");
-      // re-trigger video by remounting via key bump handled below
-      setVideoUrl((u) => u); // no-op; <video> has its own controls
+    if (!lastText) return;
+    if (avatarStream) {
+      sayStream(lastText, lastLang).then((ok) => {
+        if (!ok) speak(lastText, lastLang);
+      });
     } else if (lastText) {
       speak(lastText, lastLang);
     }
@@ -192,29 +217,33 @@ export default function VisitorExperience({ person }: { person: PublicPerson }) 
       setLastText(text);
       setLastLang(lang);
 
-      // Now the avatar: either browser TTS (mock) or a queued D-ID video.
-      const avRes = await fetch("/api/avatar", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ personId: person.id, text, lang }),
-      });
-      const av = await avRes.json();
-
-      if (avRes.ok && av.avatar?.kind === "video-pending") {
-        // Show the answer + speak it while the video renders, then swap to video.
-        setVideoLoading(true);
-        speak(text, lang);
-        const url = await pollForVideo(av.avatar.id);
-        setVideoLoading(false);
-        if (url) {
-          if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-          setVideoUrl(url);
-          setStage("speaking");
-        } else if (stage !== "speaking") {
-          setStage("ready");
-        }
+      // Avatar output, in order of preference:
+      if (avatarStream) {
+        // Real-time stream: the always-on avatar speaks immediately (~1-2s).
+        setStage("ready"); // "talking" is driven by the stream's speaking flag
+        const ok = await sayStream(text, lang);
+        if (!ok) speak(text, lang); // stream failed → fall back to browser voice
       } else {
-        speak(text, lang);
+        // No stream: queue a D-ID clip (poll), or just speak via the browser.
+        const avRes = await fetch("/api/avatar", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ personId: person.id, text, lang }),
+        });
+        const av = await avRes.json();
+        if (avRes.ok && av.avatar?.kind === "video-pending") {
+          setVideoLoading(true);
+          const url = await pollForVideo(av.avatar.id);
+          setVideoLoading(false);
+          if (url) {
+            setVideoUrl(url);
+            setStage("speaking");
+          } else {
+            speak(text, lang);
+          }
+        } else {
+          speak(text, lang);
+        }
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "出错了，请重试");
@@ -239,7 +268,7 @@ export default function VisitorExperience({ person }: { person: PublicPerson }) 
     return null;
   }
 
-  const busy = stage === "thinking" || stage === "speaking" || videoLoading;
+  const busy = stage === "thinking" || talking || videoLoading;
 
   function submitFollowUp(q: string) {
     const question = q.trim();
@@ -255,7 +284,7 @@ export default function VisitorExperience({ person }: { person: PublicPerson }) 
         {(stage === "thinking" || videoLoading) && <TopProgress />}
         <div className="flex items-center gap-4">
           <div className="relative">
-            {stage === "speaking" && !videoUrl && (
+            {talking && !videoUrl && (
               <>
                 <span className="absolute inset-0 animate-pulse-ring rounded-full bg-brand-300" />
                 <span
@@ -266,10 +295,30 @@ export default function VisitorExperience({ person }: { person: PublicPerson }) 
             )}
             <div
               className={`relative h-24 w-24 overflow-hidden rounded-full bg-white shadow-lift ring-4 ring-white ${
-                stage === "speaking" && !videoUrl ? "animate-breathe" : ""
+                talking && !videoUrl ? "animate-breathe" : ""
               }`}
             >
-              {videoUrl ? (
+              {avatarStream ? (
+                // Always-on real-time avatar (idle, then talks on demand).
+                <>
+                  <video
+                    ref={streamVideoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className="h-full w-full object-cover"
+                  />
+                  {streamStatus !== "live" && person.photoUrl && (
+                    // show the photo until the stream connects
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={person.photoUrl}
+                      alt={person.name}
+                      className="absolute inset-0 h-full w-full object-cover"
+                    />
+                  )}
+                </>
+              ) : videoUrl ? (
                 <video
                   key={videoUrl}
                   src={videoUrl}
@@ -298,7 +347,7 @@ export default function VisitorExperience({ person }: { person: PublicPerson }) 
                 className={`h-1.5 w-1.5 rounded-full ${
                   stage === "thinking" || videoLoading
                     ? "animate-pulse bg-amber-400"
-                    : stage === "speaking"
+                    : talking
                       ? "animate-pulse bg-green-500"
                       : "bg-brand-400"
                 }`}
@@ -307,7 +356,7 @@ export default function VisitorExperience({ person }: { person: PublicPerson }) 
                 ? t.rendering
                 : stage === "thinking"
                   ? t.thinking
-                  : stage === "speaking"
+                  : talking
                     ? t.speaking
                     : "数字人 · Digital guide"}
             </div>
@@ -340,7 +389,7 @@ export default function VisitorExperience({ person }: { person: PublicPerson }) 
           </Bubble>
         ))}
 
-        {stage === "thinking" && (
+        {stage === "thinking" && !videoLoading && (
           <div className="flex items-center gap-1.5 pl-1 text-ink-mute">
             <Dot /> <Dot d="0.15s" /> <Dot d="0.3s" />
           </div>
@@ -349,12 +398,14 @@ export default function VisitorExperience({ person }: { person: PublicPerson }) 
         {error && <p className="text-sm text-red-500">{error}</p>}
 
         {/* speaking controls */}
-        {(stage === "speaking" || stage === "ready") && messages.length > 0 && (
+        {stage !== "thinking" && !videoLoading && messages.length > 0 && (
           <div className="flex flex-wrap gap-2 pt-1">
-            {stage === "speaking" ? (
-              <button onClick={stopSpeaking} className="chip bg-white text-ink-soft ring-1 ring-black/5">
-                ⏹ {t.stop}
-              </button>
+            {talking ? (
+              !avatarStream && (
+                <button onClick={stopSpeaking} className="chip bg-white text-ink-soft ring-1 ring-black/5">
+                  ⏹ {t.stop}
+                </button>
+              )
             ) : (
               <button onClick={replay} className="chip bg-white text-ink-soft ring-1 ring-black/5">
                 ↻ {t.replay}
@@ -363,8 +414,8 @@ export default function VisitorExperience({ person }: { person: PublicPerson }) 
           </div>
         )}
 
-        {/* follow-up suggestions, shown once an answer has been given */}
-        {stage === "ready" && messages.length > 0 && (
+        {/* follow-up suggestions, shown once an answer has finished */}
+        {stage === "ready" && !talking && !videoLoading && messages.length > 0 && (
           <div className="pt-1">
             <p className="mb-1.5 text-xs text-ink-mute">{t.followHint}</p>
             <div className="flex flex-wrap gap-2">
