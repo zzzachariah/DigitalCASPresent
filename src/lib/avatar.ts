@@ -1,4 +1,4 @@
-import type { AvatarResult } from "./types";
+import type { AvatarCreateResult, AvatarPollResult } from "./types";
 
 // ─────────────────────────────────────────────────────────────────────
 // Talking-avatar (digital human) provider.
@@ -6,11 +6,12 @@ import type { AvatarResult } from "./types";
 //   mock : no video — the browser speaks the text with a built-in voice while
 //          the photo animates. Zero cost, no key, works locally. (default)
 //   did  : real lip-sync video via D-ID. Requires DID_API_KEY and a PUBLIC
-//          photo URL D-ID's servers can fetch (works once deployed to Vercel;
-//          localhost photos are not reachable by D-ID, so mock is used there).
+//          photo URL D-ID can fetch (Blob CDN URLs work; localhost does not).
 //
-// The flow the product uses: packyapi produces the answer TEXT, then that text
-// is handed here to be turned into a talking avatar.
+// Flow (serverless-friendly): packyapi produces the answer TEXT → createAvatar()
+// queues a D-ID render and returns a job id immediately → the browser polls
+// pollAvatar(id) until the video is ready. This avoids long-running functions
+// and Vercel timeouts; if the render fails/stalls the browser falls back to TTS.
 // ─────────────────────────────────────────────────────────────────────
 
 const PROVIDER = (process.env.AVATAR_PROVIDER || "mock").toLowerCase();
@@ -26,40 +27,30 @@ function didVoiceFor(lang: "en" | "zh"): string {
   return lang === "zh" ? "zh-CN-XiaoxiaoNeural" : "en-US-JennyNeural";
 }
 
-export interface AvatarRequest {
-  text: string;
-  lang: "en" | "zh";
-  /** Absolute, publicly reachable URL of the person's photo (for video providers). */
-  photoPublicUrl?: string;
+// D-ID keys from the dashboard are usually a ready-to-use base64 token, but
+// some are shown as raw "email:key". Accept either form.
+function didAuthHeader(): string {
+  const token = DID_API_KEY.includes(":")
+    ? Buffer.from(DID_API_KEY).toString("base64")
+    : DID_API_KEY;
+  return `Basic ${token}`;
 }
 
 export function avatarProvider(): string {
   return PROVIDER;
 }
 
-export async function generateAvatar(req: AvatarRequest): Promise<AvatarResult> {
-  const canDoVideo =
-    PROVIDER === "did" && !!DID_API_KEY && !!req.photoPublicUrl && isPublicUrl(req.photoPublicUrl);
-
-  if (!canDoVideo) {
-    return { kind: "tts", text: req.text, lang: langTag(req.lang) };
-  }
-
-  try {
-    const videoUrl = await didTalk(req.text, req.lang, req.photoPublicUrl!);
-    return { kind: "video", videoUrl, text: req.text };
-  } catch (err) {
-    // Never let a video failure break the answer — fall back to spoken text.
-    console.error("[avatar] D-ID failed, falling back to TTS:", err);
-    return { kind: "tts", text: req.text, lang: langTag(req.lang) };
-  }
+export interface AvatarRequest {
+  text: string;
+  lang: "en" | "zh";
+  /** Absolute, publicly reachable photo URL (required for video providers). */
+  photoPublicUrl?: string;
 }
 
 function isPublicUrl(url: string): boolean {
   try {
     const u = new URL(url);
     if (u.protocol !== "https:" && u.protocol !== "http:") return false;
-    // D-ID can't reach localhost / private hosts.
     return !/^(localhost|127\.|0\.0\.0\.0|192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(
       u.hostname
     );
@@ -68,44 +59,57 @@ function isPublicUrl(url: string): boolean {
   }
 }
 
-async function didTalk(
-  text: string,
-  lang: "en" | "zh",
-  photoPublicUrl: string
-): Promise<string> {
-  const create = await fetch(`${DID_API_URL}/talks`, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${DID_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      source_url: photoPublicUrl,
-      script: {
-        type: "text",
-        input: text,
-        provider: { type: "microsoft", voice_id: didVoiceFor(lang) },
-      },
-      config: { stitch: true },
-    }),
-  });
+export async function createAvatar(req: AvatarRequest): Promise<AvatarCreateResult> {
+  const canVideo =
+    PROVIDER === "did" &&
+    !!DID_API_KEY &&
+    !!req.photoPublicUrl &&
+    isPublicUrl(req.photoPublicUrl);
 
-  if (!create.ok) {
-    throw new Error(`D-ID create failed (${create.status}): ${await create.text()}`);
+  if (!canVideo) {
+    return { kind: "tts", text: req.text, lang: langTag(req.lang) };
   }
-  const { id } = (await create.json()) as { id: string };
 
-  // Poll for completion (D-ID renders in a few seconds → up to ~40s).
-  const deadline = Date.now() + 90_000;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 1500));
-    const poll = await fetch(`${DID_API_URL}/talks/${id}`, {
-      headers: { Authorization: `Basic ${DID_API_KEY}` },
+  try {
+    const res = await fetch(`${DID_API_URL}/talks`, {
+      method: "POST",
+      headers: { Authorization: didAuthHeader(), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source_url: req.photoPublicUrl,
+        script: {
+          type: "text",
+          input: req.text,
+          provider: { type: "microsoft", voice_id: didVoiceFor(req.lang) },
+        },
+        config: { stitch: true },
+      }),
     });
-    if (!poll.ok) continue;
-    const data = (await poll.json()) as { status: string; result_url?: string };
-    if (data.status === "done" && data.result_url) return data.result_url;
-    if (data.status === "error") throw new Error("D-ID render error");
+    if (!res.ok) {
+      throw new Error(`D-ID create failed (${res.status}): ${await res.text()}`);
+    }
+    const { id } = (await res.json()) as { id: string };
+    return { kind: "video-pending", id, text: req.text };
+  } catch (err) {
+    console.error("[avatar] create failed, falling back to TTS:", err);
+    return { kind: "tts", text: req.text, lang: langTag(req.lang) };
   }
-  throw new Error("D-ID render timed out");
+}
+
+export async function pollAvatar(id: string): Promise<AvatarPollResult> {
+  try {
+    const res = await fetch(`${DID_API_URL}/talks/${id}`, {
+      headers: { Authorization: didAuthHeader() },
+    });
+    if (!res.ok) return { status: "pending" }; // transient; let the client retry
+    const data = (await res.json()) as { status: string; result_url?: string };
+    if (data.status === "done" && data.result_url) {
+      return { status: "done", videoUrl: data.result_url };
+    }
+    if (data.status === "error" || data.status === "rejected") {
+      return { status: "error" };
+    }
+    return { status: "pending" }; // created / started
+  } catch {
+    return { status: "pending" };
+  }
 }

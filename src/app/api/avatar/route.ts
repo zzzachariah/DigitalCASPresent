@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPerson } from "@/lib/store";
-import { generateAvatar } from "@/lib/avatar";
+import { createAvatar } from "@/lib/avatar";
 
 export const runtime = "nodejs";
-export const maxDuration = 120; // video render can take a while
+export const maxDuration = 30; // only QUEUES the render; rendering is polled separately
 
 function baseUrlFrom(req: NextRequest): string {
   if (process.env.NEXT_PUBLIC_BASE_URL) {
@@ -14,8 +14,8 @@ function baseUrlFrom(req: NextRequest): string {
   return `${proto}://${host}`;
 }
 
-// Turn the answer TEXT into a talking avatar (video via D-ID, or TTS instructions
-// for the browser in mock mode).
+// Queue a talking-avatar render for the answer text (or return TTS instructions
+// for the browser in mock mode). The browser then polls /api/avatar/status.
 export async function POST(req: NextRequest) {
   const body = (await req.json().catch(() => ({}))) as {
     personId?: string;
@@ -25,9 +25,7 @@ export async function POST(req: NextRequest) {
 
   const person = body.personId ? await getPerson(body.personId) : null;
   if (!person) return NextResponse.json({ error: "not found" }, { status: 404 });
-  if (!body.text?.trim()) {
-    return NextResponse.json({ error: "no text" }, { status: 400 });
-  }
+  if (!body.text?.trim()) return NextResponse.json({ error: "no text" }, { status: 400 });
 
   // Blob mode stores an absolute CDN URL; filesystem mode stores /api/photo/<id>.
   const photoPublicUrl = person.photoUrl
@@ -36,7 +34,7 @@ export async function POST(req: NextRequest) {
       : `${baseUrlFrom(req)}${person.photoUrl}`
     : undefined;
 
-  const result = await generateAvatar({
+  const result = await createAvatar({
     text: body.text,
     lang: body.lang || "en",
     photoPublicUrl,

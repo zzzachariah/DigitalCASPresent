@@ -25,6 +25,7 @@ const T = {
     followHint: "可以继续追问，或选择听其他部分。",
     suggestions: ["能举个例子吗？", "可以说得更具体一点吗？", "这和现实生活有什么联系？"],
     poweredThinking: "准备中…",
+    rendering: "数字人生成中…",
   },
   en: {
     greeting: (n: string) => `Hi, I'm ${n}.`,
@@ -39,6 +40,7 @@ const T = {
     followHint: "Ask a follow-up, or pick another part to hear.",
     suggestions: ["Can you give an example?", "Could you be more specific?", "How does this connect to real life?"],
     poweredThinking: "Preparing…",
+    rendering: "Generating avatar…",
   },
 };
 
@@ -53,6 +55,7 @@ export default function VisitorExperience({ person }: { person: PublicPerson }) 
   const [messages, setMessages] = useState<Msg[]>([]);
   const [stage, setStage] = useState<Stage>("intro");
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [videoLoading, setVideoLoading] = useState(false);
   const [input, setInput] = useState("");
   const [lastText, setLastText] = useState<string>("");
   const [lastLang, setLastLang] = useState<"en" | "zh">(initialLang);
@@ -177,26 +180,54 @@ export default function VisitorExperience({ person }: { person: PublicPerson }) 
       setLastText(text);
       setLastLang(lang);
 
-      // Now the avatar (video via D-ID, or TTS instructions for the browser).
+      // Now the avatar: either browser TTS (mock) or a queued D-ID video.
       const avRes = await fetch("/api/avatar", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ personId: person.id, text, lang }),
       });
       const av = await avRes.json();
-      if (avRes.ok && av.avatar?.kind === "video") {
-        setVideoUrl(av.avatar.videoUrl);
-        setStage("speaking");
+
+      if (avRes.ok && av.avatar?.kind === "video-pending") {
+        // Show the answer + speak it while the video renders, then swap to video.
+        setVideoLoading(true);
+        speak(text, lang);
+        const url = await pollForVideo(av.avatar.id);
+        setVideoLoading(false);
+        if (url) {
+          if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+          setVideoUrl(url);
+          setStage("speaking");
+        } else if (stage !== "speaking") {
+          setStage("ready");
+        }
       } else {
         speak(text, lang);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "出错了，请重试");
+      setVideoLoading(false);
       setStage("ready");
     }
   }
 
-  const busy = stage === "thinking" || stage === "speaking";
+  // Poll the queued D-ID render until it's ready (~max 60s), else give up → TTS.
+  async function pollForVideo(id: string): Promise<string | null> {
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 1500));
+      try {
+        const r = await fetch(`/api/avatar/status?id=${encodeURIComponent(id)}`);
+        const d = await r.json();
+        if (d.status === "done" && d.videoUrl) return d.videoUrl;
+        if (d.status === "error") return null;
+      } catch {
+        /* keep trying */
+      }
+    }
+    return null;
+  }
+
+  const busy = stage === "thinking" || stage === "speaking" || videoLoading;
 
   function submitFollowUp(q: string) {
     const question = q.trim();
@@ -252,14 +283,20 @@ export default function VisitorExperience({ person }: { person: PublicPerson }) 
             <div className="mt-1 inline-flex items-center gap-1.5 rounded-full bg-white/70 px-2.5 py-1 text-xs text-ink-soft ring-1 ring-black/5">
               <span
                 className={`h-1.5 w-1.5 rounded-full ${
-                  stage === "thinking"
+                  stage === "thinking" || videoLoading
                     ? "animate-pulse bg-amber-400"
                     : stage === "speaking"
                       ? "animate-pulse bg-green-500"
                       : "bg-brand-400"
                 }`}
               />
-              {stage === "thinking" ? t.thinking : stage === "speaking" ? t.speaking : "数字人 · Digital guide"}
+              {videoLoading
+                ? t.rendering
+                : stage === "thinking"
+                  ? t.thinking
+                  : stage === "speaking"
+                    ? t.speaking
+                    : "数字人 · Digital guide"}
             </div>
           </div>
 

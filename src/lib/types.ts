@@ -50,7 +50,15 @@ export interface ChatTurn {
   content: string;
 }
 
-/** What the avatar layer returns to the browser for one answer. */
-export type AvatarResult =
-  | { kind: "video"; videoUrl: string; text: string }
-  | { kind: "tts"; text: string; lang: string }; // browser speaks it
+/** First response when the browser asks for an avatar for one answer.
+ *  - tts: no video provider → the browser speaks the text itself.
+ *  - video-pending: a D-ID render was queued; poll /api/avatar/status?id=… */
+export type AvatarCreateResult =
+  | { kind: "tts"; text: string; lang: string }
+  | { kind: "video-pending"; id: string; text: string };
+
+/** Result of polling a queued video render. */
+export type AvatarPollResult =
+  | { status: "pending" }
+  | { status: "done"; videoUrl: string }
+  | { status: "error" };
