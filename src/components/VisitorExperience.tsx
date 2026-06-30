@@ -377,7 +377,7 @@ export default function VisitorExperience({ person }: { person: PublicPerson }) 
           <p className="mb-2 text-xs font-medium text-ink-mute">
             {messages.length === 0 ? t.pick : t.other}
           </p>
-          <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-3">
+          <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-3 pt-1.5">
             {person.sections.map((s, i) => (
               <button
                 key={s.id}
