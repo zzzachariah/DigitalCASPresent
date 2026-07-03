@@ -462,32 +462,31 @@ export default function VisitorExperience({
         </div>
       </div>
 
-      {/* ── Caption panel — separate from the avatar, never covers the face ── */}
-      <div className="min-h-0 flex-1 overflow-y-auto bg-neutral-900 px-4 py-3">
+      {/* ── Caption panel — separate from the avatar, never covers the face.
+           Light background (matches the rest of the app) so it never reads as
+           a giant empty black block when there isn't much content yet. ── */}
+      <div className="min-h-0 flex-1 overflow-y-auto bg-[var(--bg)] px-4 py-3">
         {lastUser && (stage === "thinking" || talking) && (
           <div className="mb-2 flex justify-end">
-            <span className="max-w-[80%] truncate rounded-full bg-white/90 px-3 py-1 text-xs text-ink shadow-soft">
+            <span className="max-w-[80%] truncate rounded-full bg-brand-50 px-3 py-1 text-xs text-brand-700 shadow-soft">
               {lastUser.text}
             </span>
           </div>
         )}
-        <div className="rounded-2xl bg-white/10 px-4 py-3">
+        <div className="card px-4 py-3">
           {stage === "thinking" ? (
-            <span className="flex items-center gap-1.5 text-white/90">
+            <span className="flex items-center gap-1.5 text-ink-mute">
               <Dot /> <Dot d="0.15s" /> <Dot d="0.3s" />
               <span className="ml-1 text-sm">{t.thinking}</span>
             </span>
           ) : (
-            <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-white">{caption}</p>
+            <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-ink">{caption}</p>
           )}
         </div>
-        {error && <p className="mt-2 text-sm text-red-300">{error}</p>}
+        {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
         {/* replay */}
         {stage === "ready" && !talking && !videoLoading && messages.length > 0 && (
-          <button
-            onClick={replay}
-            className="mt-2 rounded-full bg-white/85 px-3 py-1 text-xs text-ink-soft shadow-soft active:scale-95"
-          >
+          <button onClick={replay} className="chip mt-2 bg-white text-ink-soft shadow-soft ring-1 ring-black/5 active:scale-95">
             ↻ {t.replay}
           </button>
         )}
