@@ -29,6 +29,8 @@ export async function PUT(
     script?: string;
     sections?: Partial<Section>[];
     language?: string;
+    cartoonUrl?: string;
+    loopVideoUrl?: string;
   };
 
   const patch: Record<string, unknown> = {};
@@ -49,6 +51,12 @@ export async function PUT(
   if (body.language && ["auto", "en", "zh", "bilingual"].includes(body.language)) {
     patch.language = body.language;
   }
+  // These are generated separately (by the cartoon/loop-video buttons, which
+  // already persisted them). Re-asserting them here — instead of relying on
+  // an omitted field implying "keep existing" — closes any gap where a save
+  // could otherwise clobber a just-generated asset.
+  if (typeof body.cartoonUrl === "string") patch.cartoonUrl = body.cartoonUrl || undefined;
+  if (typeof body.loopVideoUrl === "string") patch.loopVideoUrl = body.loopVideoUrl || undefined;
 
   const writable = storageWritable();
   if (!writable.ok) {

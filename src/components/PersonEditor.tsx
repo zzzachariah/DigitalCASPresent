@@ -253,7 +253,21 @@ export default function PersonEditor({
     if (!script.trim()) return setError("请提供讲稿");
     setSaving(true);
     try {
-      const payload = { name, subtitle, gender, language, script, sections };
+      // Explicitly re-assert the already-generated cartoon/loop-video URLs on
+      // every save. They live in this component's local state (set by the
+      // generate buttons, which already persisted them server-side), but
+      // sending them again here closes any gap where a later "save" could
+      // otherwise clobber them with a stale/omitted value.
+      const payload = {
+        name,
+        subtitle,
+        gender,
+        language,
+        script,
+        sections,
+        cartoonUrl,
+        loopVideoUrl,
+      };
       const res = await fetch(
         isEdit ? `/api/admin/people/${person!.id}` : "/api/admin/people",
         {
