@@ -86,6 +86,8 @@ export async function GET(req: NextRequest) {
         name: "dcp-loop-test",
         prompt:
           "The person talks naturally to the camera: subtle mouth movement as if speaking, gentle head motion, occasional relaxed hand gestures, friendly calm demeanor, static camera, plain background, smooth continuous motion suitable for a seamless loop.",
+        negative_prompt:
+          "static image, no motion, frozen, blurry, low quality, distorted face, deformed, extra limbs, watermark, text overlay, camera movement, scene change",
         image_url: cdnUrl,
         duration: "5",
         aspect_ratio: "9:16",
