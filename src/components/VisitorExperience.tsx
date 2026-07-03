@@ -81,6 +81,8 @@ export default function VisitorExperience({
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const loopVideoRef = useRef<HTMLVideoElement>(null);
+  const [loopVideoReady, setLoopVideoReady] = useState(false);
   const t = T[uiLang];
 
   // Real-time talking-avatar stream (D-ID WebRTC). No-op when not enabled.
@@ -103,6 +105,20 @@ export default function VisitorExperience({
     if (avatarStream) startStream();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [avatarStream]);
+
+  // The ambient loop video should only animate while actually narrating —
+  // play (restarting from the top so each utterance begins cleanly) when
+  // talking starts, and pause immediately the moment it stops.
+  useEffect(() => {
+    const el = loopVideoRef.current;
+    if (!el) return;
+    if (talking) {
+      el.currentTime = 0;
+      el.play().catch(() => {});
+    } else {
+      el.pause();
+    }
+  }, [talking]);
 
   useEffect(() => {
     // warm up speech voices
@@ -352,7 +368,7 @@ export default function VisitorExperience({
         : "数字人 · Digital guide";
 
   return (
-    <div className="relative mx-auto flex h-dvh max-w-md flex-col overflow-hidden bg-black">
+    <div className="relative mx-auto flex h-dvh max-w-md flex-col overflow-hidden bg-[var(--bg)]">
       {/* Narration audio (A2E TTS fast path) — hidden, played over the loop video. */}
       <audio
         ref={audioRef}
@@ -363,8 +379,50 @@ export default function VisitorExperience({
         onPause={() => setAudioPlaying(false)}
         onError={() => setAudioPlaying(false)}
       />
-      {/* ── Digital human — fixed-height area, nothing else overlaps the face ── */}
-      <div className="relative h-[42dvh] min-h-[220px] shrink-0 overflow-hidden bg-gradient-to-b from-brand-100 to-brand-50">
+      {/* ── Top info bar — separate from the avatar, never overlays the face ── */}
+      <div className="flex shrink-0 items-center justify-between gap-2 bg-white px-4 py-2.5 shadow-sm">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="h-10 w-10 shrink-0 overflow-hidden rounded-full bg-gray-100 ring-1 ring-black/5">
+            {displayImage ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={displayImage} alt={person.name} className="h-full w-full object-cover" />
+            ) : (
+              <div className="grid h-full w-full place-items-center text-lg">🙂</div>
+            )}
+          </div>
+          <div className="min-w-0">
+            <h1 className="truncate text-base font-semibold leading-tight text-ink">{person.name}</h1>
+            {person.subtitle && (
+              <p className="truncate text-[11px] leading-tight text-ink-mute">{person.subtitle}</p>
+            )}
+            <div className="mt-0.5 flex items-center gap-1.5 text-xs text-ink-mute">
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  stage === "thinking" || videoLoading
+                    ? "animate-pulse bg-amber-400"
+                    : talking
+                      ? "animate-pulse bg-green-500"
+                      : "bg-brand-400"
+                }`}
+              />
+              {statusText}
+            </div>
+          </div>
+        </div>
+        <button
+          onClick={() => {
+            setLangTouched(true);
+            setUiLang((l) => (l === "zh" ? "en" : "zh"));
+          }}
+          className="shrink-0 rounded-full bg-gray-100 px-3 py-1.5 text-xs font-medium text-ink-soft"
+          title="切换语言 / Toggle language"
+        >
+          {uiLang === "zh" ? "EN" : "中"}
+        </button>
+      </div>
+
+      {/* ── Digital human — fills remaining space; nothing overlaps it ── */}
+      <div className="relative min-h-0 flex-1 overflow-hidden bg-gradient-to-b from-brand-100 to-brand-50">
         {(stage === "thinking" || videoLoading) && <TopProgress />}
 
         {avatarStream ? (
@@ -398,74 +456,41 @@ export default function VisitorExperience({
             className="absolute inset-0 h-full w-full object-cover"
           />
         ) : person.loopVideoUrl ? (
-          // Ambient "talking" loop (generated once): plays continuously while
-          // narration audio (played separately, see <audio> below) narrates.
-          <video
-            key={person.loopVideoUrl}
-            src={person.loopVideoUrl}
-            autoPlay
-            muted
-            loop
-            playsInline
-            className="absolute inset-0 h-full w-full object-cover"
-          />
+          <>
+            {/* Ambient "talking" loop (generated once): paused by default, and
+                driven to play/pause by the `talking` effect above — animates
+                only while narration is actually playing, freezes otherwise. */}
+            <video
+              ref={loopVideoRef}
+              key={person.loopVideoUrl}
+              src={person.loopVideoUrl}
+              muted
+              loop
+              playsInline
+              preload="auto"
+              onLoadedData={() => setLoopVideoReady(true)}
+              className="absolute inset-0 h-full w-full object-cover"
+            />
+            {!loopVideoReady && displayImage && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={displayImage}
+                alt={person.name}
+                className="absolute inset-0 h-full w-full object-cover"
+              />
+            )}
+          </>
         ) : displayImage ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img src={displayImage} alt={person.name} className="absolute inset-0 h-full w-full object-cover" />
         ) : (
           <div className="absolute inset-0 grid place-items-center bg-brand-50 text-7xl">🙂</div>
         )}
-
-        {/* legibility gradient for the name/status bar */}
-        <div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-black/45 to-transparent" />
-
-        {/* top bar: avatar + name + status + language */}
-        <div className="absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-4">
-          <div className="flex min-w-0 items-center gap-3">
-            <div className="h-11 w-11 shrink-0 overflow-hidden rounded-full bg-white/20 shadow ring-2 ring-white/70">
-              {displayImage ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={displayImage} alt={person.name} className="h-full w-full object-cover" />
-              ) : (
-                <div className="grid h-full w-full place-items-center text-lg">🙂</div>
-              )}
-            </div>
-            <div className="min-w-0">
-            <h1 className="truncate text-lg font-semibold text-white drop-shadow-sm">{person.name}</h1>
-            {person.subtitle && (
-              <p className="truncate text-xs text-white/80 drop-shadow-sm">{person.subtitle}</p>
-            )}
-            <div className="mt-1.5 inline-flex items-center gap-1.5 rounded-full bg-black/30 px-2.5 py-1 text-xs text-white backdrop-blur">
-              <span
-                className={`h-1.5 w-1.5 rounded-full ${
-                  stage === "thinking" || videoLoading
-                    ? "animate-pulse bg-amber-400"
-                    : talking
-                      ? "animate-pulse bg-green-400"
-                      : "bg-white/70"
-                }`}
-              />
-              {statusText}
-            </div>
-            </div>
-          </div>
-          <button
-            onClick={() => {
-              setLangTouched(true);
-              setUiLang((l) => (l === "zh" ? "en" : "zh"));
-            }}
-            className="shrink-0 rounded-full bg-black/30 px-3 py-1.5 text-xs font-medium text-white backdrop-blur"
-            title="切换语言 / Toggle language"
-          >
-            {uiLang === "zh" ? "EN" : "中"}
-          </button>
-        </div>
       </div>
 
-      {/* ── Caption panel — separate from the avatar, never covers the face.
-           Light background (matches the rest of the app) so it never reads as
-           a giant empty black block when there isn't much content yet. ── */}
-      <div className="min-h-0 flex-1 overflow-y-auto bg-[var(--bg)] px-4 py-3">
+      {/* ── Caption panel — sized to its content (capped + scrollable), so it
+           never forces a big empty block when there isn't much to show yet. ── */}
+      <div className="max-h-[34dvh] shrink-0 overflow-y-auto bg-[var(--bg)] px-4 py-3">
         {lastUser && (stage === "thinking" || talking) && (
           <div className="mb-2 flex justify-end">
             <span className="max-w-[80%] truncate rounded-full bg-brand-50 px-3 py-1 text-xs text-brand-700 shadow-soft">
