@@ -46,7 +46,7 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
 
   const poll = await a2eLoopVideoPoll(taskId);
   if ("error" in poll) return NextResponse.json({ error: "循环视频生成失败: " + poll.error }, { status: 502 });
-  if ("pending" in poll) return NextResponse.json({ pending: true });
+  if ("pending" in poll) return NextResponse.json({ pending: true, status: poll.status });
 
   try {
     const vid = await fetch(poll.url);

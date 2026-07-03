@@ -220,16 +220,19 @@ function extractVideoUrl(data: any): string | null {
   return candidates.find((u) => /\.(mp4|mov|webm|m3u8)(\?|$)/i.test(u)) ?? null;
 }
 
-/** Poll a loop-video task once. */
+/** Poll a loop-video task once. Includes the raw status even while pending,
+ *  so a client-side timeout can report something diagnosable instead of a
+ *  bare "timed out" (this is what let a silent failure go unnoticed before —
+ *  the error banner just wasn't visible on screen when it happened). */
 export async function a2eLoopVideoPoll(
   taskId: string
-): Promise<{ done: true; url: string } | { pending: true } | { error: string }> {
+): Promise<{ done: true; url: string } | { pending: true; status?: string } | { error: string }> {
   const d = await a2e(`/api/v1/userImage2Video/${taskId}`, "GET");
   const data = d.json?.data;
   const url = extractVideoUrl(data);
   if (url) return { done: true, url };
   if (data?.failed_message) return { error: `render failed: ${data.failed_message}` };
-  return { pending: true };
+  return { pending: true, status: data?.current_status };
 }
 
 /** Upload an image (from any public URL) into A2E's storage; returns cdnUrl. */

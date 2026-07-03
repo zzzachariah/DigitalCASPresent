@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Person, Section } from "@/lib/types";
 import { readJson } from "@/lib/http";
 import { LoadingOverlay, Spinner } from "./Loading";
@@ -51,6 +51,13 @@ export default function PersonEditor({
   const [error, setError] = useState("");
 
   const fileRef = useRef<HTMLInputElement>(null);
+  const errorRef = useRef<HTMLDivElement>(null);
+
+  // A failure from any button (which may be far down the page) should always
+  // be visible — scroll the top error banner into view when it appears.
+  useEffect(() => {
+    if (error) errorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [error]);
 
   function updateSection(id: string, patch: Partial<Section>) {
     // Editing the title/content invalidates any pre-generated answer (it was
@@ -165,6 +172,7 @@ export default function PersonEditor({
       if (!startRes.ok) throw new Error(startData.error || "循环视频发起失败");
       const taskId = startData.taskId as string;
 
+      let lastStatus = "";
       for (let i = 0; i < 80; i++) {
         await new Promise((r) => setTimeout(r, 3000)); // ~4 min max
         const pRes = await fetch(
@@ -176,8 +184,9 @@ export default function PersonEditor({
           setLoopVideoUrl(pData.loopVideoUrl);
           return;
         }
+        if (pData.status) lastStatus = pData.status;
       }
-      throw new Error("循环视频生成超时,请重试");
+      throw new Error(`循环视频生成超时,请重试${lastStatus ? `（最后状态: ${lastStatus}）` : ""}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "循环视频生成失败");
     } finally {
@@ -318,6 +327,26 @@ export default function PersonEditor({
         </h2>
         <span className="w-10" />
       </div>
+
+      {/* Error banner — always right under the header, so a failure from ANY
+          button (photo/cartoon/loop-video/pregenerate/save) is impossible to
+          miss, no matter where on the page that button is. */}
+      {error && (
+        <div
+          ref={errorRef}
+          className="flex items-start gap-2 rounded-2xl bg-red-50 px-4 py-3 text-sm text-red-700 ring-1 ring-red-200"
+        >
+          <span className="mt-0.5 shrink-0">⚠️</span>
+          <p className="min-w-0 flex-1 break-words">{error}</p>
+          <button
+            onClick={() => setError("")}
+            className="shrink-0 text-red-400 hover:text-red-600"
+            aria-label="关闭"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Photo */}
       <section className="card p-5">
@@ -577,8 +606,6 @@ export default function PersonEditor({
           </div>
         ))}
       </section>
-
-      {error && <p className="px-1 text-sm text-red-500">{error}</p>}
 
       {/* Sticky save bar */}
       <div className="fixed inset-x-0 bottom-0 z-10 border-t border-black/5 bg-white/90 px-5 py-3 backdrop-blur">
