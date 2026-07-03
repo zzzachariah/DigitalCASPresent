@@ -409,21 +409,24 @@ export default function VisitorExperience({
             </div>
           </div>
         </div>
-        <button
-          onClick={() => {
-            setLangTouched(true);
-            setUiLang((l) => (l === "zh" ? "en" : "zh"));
-          }}
-          className="shrink-0 rounded-full bg-gray-100 px-3 py-1.5 text-xs font-medium text-ink-soft"
-          title="切换语言 / Toggle language"
-        >
-          {uiLang === "zh" ? "EN" : "中"}
-        </button>
       </div>
 
       {/* ── Digital human — fills remaining space; nothing overlaps it ── */}
       <div className="relative min-h-0 flex-1 overflow-hidden bg-gradient-to-b from-brand-100 to-brand-50">
         {(stage === "thinking" || videoLoading) && <TopProgress />}
+
+        {/* language toggle — a bare floating ring, no filled background, so it
+            never reads as its own solid panel sitting over the person. */}
+        <button
+          onClick={() => {
+            setLangTouched(true);
+            setUiLang((l) => (l === "zh" ? "en" : "zh"));
+          }}
+          className="absolute right-3 top-3 z-10 grid h-9 w-9 place-items-center rounded-full text-xs font-medium text-white ring-1 ring-inset ring-white/80 backdrop-blur-[2px]"
+          title="切换语言 / Toggle language"
+        >
+          {uiLang === "zh" ? "EN" : "中"}
+        </button>
 
         {avatarStream ? (
           <>
@@ -432,7 +435,7 @@ export default function VisitorExperience({
               autoPlay
               playsInline
               muted
-              className="absolute inset-0 h-full w-full object-cover"
+              className="absolute inset-0 h-full w-full object-contain"
             />
             {!streamPlaying && displayImage && (
               // Show the photo until real video frames arrive (or forever if the
@@ -441,7 +444,7 @@ export default function VisitorExperience({
               <img
                 src={displayImage}
                 alt={person.name}
-                className="absolute inset-0 h-full w-full object-cover"
+                className="absolute inset-0 h-full w-full object-contain"
               />
             )}
           </>
@@ -453,7 +456,7 @@ export default function VisitorExperience({
             playsInline
             controls={false}
             onEnded={() => setStage("ready")}
-            className="absolute inset-0 h-full w-full object-cover"
+            className="absolute inset-0 h-full w-full object-contain"
           />
         ) : person.loopVideoUrl ? (
           <>
@@ -469,20 +472,20 @@ export default function VisitorExperience({
               playsInline
               preload="auto"
               onLoadedData={() => setLoopVideoReady(true)}
-              className="absolute inset-0 h-full w-full object-cover"
+              className="absolute inset-0 h-full w-full object-contain"
             />
             {!loopVideoReady && displayImage && (
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={displayImage}
                 alt={person.name}
-                className="absolute inset-0 h-full w-full object-cover"
+                className="absolute inset-0 h-full w-full object-contain"
               />
             )}
           </>
         ) : displayImage ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={displayImage} alt={person.name} className="absolute inset-0 h-full w-full object-cover" />
+          <img src={displayImage} alt={person.name} className="absolute inset-0 h-full w-full object-contain" />
         ) : (
           <div className="absolute inset-0 grid place-items-center bg-brand-50 text-7xl">🙂</div>
         )}
