@@ -196,14 +196,35 @@ export async function a2eLoopVideoStart(
   }
 }
 
+/** Extract an actual video file URL from an A2E response. Deliberately strict:
+ *  every A2E asset (including the source photo / cover thumbnail) is hosted on
+ *  a domain containing "video" (video.a2e.com.cn), so a loose "url containing
+ *  video" match would happily grab the INPUT PHOTO instead of the rendered
+ *  clip. Only accept known result fields, and only if they look like a video
+ *  file — never fall back to a generic scan. */
+function extractVideoUrl(data: any): string | null {
+  if (!data || typeof data !== "object") return null;
+  const candidates = [
+    data.result_url,
+    data.video_url,
+    data.output_url,
+    data.output_video_url,
+    data.render_url,
+    data.result?.video_url,
+    data.result?.url,
+    ...(Array.isArray(data.video_urls) ? data.video_urls : []),
+    ...(Array.isArray(data.result_urls) ? data.result_urls : []),
+  ].filter((v): v is string => typeof v === "string" && v.length > 0);
+  return candidates.find((u) => /\.(mp4|mov|webm|m3u8)(\?|$)/i.test(u)) ?? null;
+}
+
 /** Poll a loop-video task once. */
 export async function a2eLoopVideoPoll(
   taskId: string
 ): Promise<{ done: true; url: string } | { pending: true } | { error: string }> {
   const d = await a2e(`/api/v1/userImage2Video/${taskId}`, "GET");
   const data = d.json?.data;
-  const url: string | null =
-    data?.result_url || data?.video_url || findUrl(d.json, /result|video/i);
+  const url = extractVideoUrl(data);
   if (url) return { done: true, url };
   if (data?.failed_message) return { error: `render failed: ${data.failed_message}` };
   return { pending: true };

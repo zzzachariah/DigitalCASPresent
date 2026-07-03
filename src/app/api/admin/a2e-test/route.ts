@@ -70,6 +70,45 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ config: out.config, cartoon: cartoonOut });
   }
 
+  // ── Loop-video discovery (?loop=1): probe userImage2Video so we can confirm
+  //    the exact result-video field name (past bug: a loose url-scan matched
+  //    the INPUT photo because A2E hosts everything on a "video.a2e.com.cn"
+  //    domain, so any "contains video" match was unreliable). ──
+  if (req.nextUrl.searchParams.get("loop") === "1") {
+    const person = personId ? await getPerson(personId) : (await listPeople())[0];
+    const source = person?.cartoonUrl || person?.photoUrl;
+    if (!source) return NextResponse.json({ error: "没有带照片的人物" }, { status: 404 });
+    const loopOut: Record<string, unknown> = {};
+    try {
+      const cdnUrl = await a2eUploadImage(source);
+      loopOut.uploadedImageCdnUrl = cdnUrl;
+      const start = await a2e("/api/v1/userImage2Video/start", "POST", {
+        name: "dcp-loop-test",
+        prompt:
+          "The person talks naturally to the camera: subtle mouth movement as if speaking, gentle head motion, occasional relaxed hand gestures, friendly calm demeanor, static camera, plain background, smooth continuous motion suitable for a seamless loop.",
+        image_url: cdnUrl,
+        duration: "5",
+        aspect_ratio: "9:16",
+        resolution: "720p",
+      });
+      loopOut.start = start;
+      const id = start.json?.data?._id;
+      loopOut.detectedTaskId = id;
+      if (typeof id === "string") {
+        for (let i = 0; i < 10; i++) {
+          await new Promise((r) => setTimeout(r, 4000));
+          const d = await a2e(`/api/v1/userImage2Video/${id}`, "GET");
+          loopOut.detail = d;
+          const status = d.json?.data?.current_status;
+          if (status && /success|done|complet|fail|error/i.test(String(status))) break;
+        }
+      }
+    } catch (e) {
+      loopOut.error = e instanceof Error ? e.message : String(e);
+    }
+    return NextResponse.json({ config: out.config, loop: loopOut });
+  }
+
   // Credits balance (to check the "额度" question).
   out.credits = await a2e("/api/v1/transactionRecord/creditsHistory", "GET");
 
