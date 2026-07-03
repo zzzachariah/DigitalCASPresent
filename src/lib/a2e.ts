@@ -81,18 +81,25 @@ async function a2eHostedImage(srcUrl: string): Promise<string> {
   return cdn;
 }
 
+/** Text-to-speech: returns an audio URL. This call is synchronous/fast (no
+ *  polling needed) — this is what makes the "fast" avatar path near-instant. */
+export async function a2eTts(text: string, gender?: "male" | "female"): Promise<string> {
+  const tts = await a2e("/api/v1/video/send_tts", "POST", { msg: text, tts_id: voiceFor(gender) });
+  const audioUrl = typeof tts.json?.data === "string" ? tts.json.data : findUrl(tts.json);
+  if (!audioUrl) throw new Error("send_tts returned no audio: " + JSON.stringify(tts.json).slice(0, 200));
+  return audioUrl;
+}
+
 /** Create a talking-photo (lip-sync) task: TTS the text, then animate the photo.
- *  Returns the A2E task id. */
+ *  Returns the A2E task id. Slow (precise per-answer render) — used only in
+ *  A2E_MODE=precise; the default "fast" mode uses a2eTts + a pre-generated loop. */
 export async function a2eCreateTalkingPhoto(
   text: string,
   srcPhotoUrl: string,
   gender?: "male" | "female"
 ): Promise<string> {
   const image_url = await a2eHostedImage(srcPhotoUrl);
-
-  const tts = await a2e("/api/v1/video/send_tts", "POST", { msg: text, tts_id: voiceFor(gender) });
-  const audio_url = typeof tts.json?.data === "string" ? tts.json.data : findUrl(tts.json);
-  if (!audio_url) throw new Error("send_tts returned no audio: " + JSON.stringify(tts.json).slice(0, 200));
+  const audio_url = await a2eTts(text, gender);
 
   const start = await a2e("/api/v1/talkingPhoto/start", "POST", {
     name: "dcp",
@@ -153,6 +160,51 @@ export async function a2eCartoonPoll(
   const data = d.json?.data;
   const urls: string[] = data?.image_urls || [];
   if (urls.length > 0) return { done: true, url: urls[0] };
+  if (data?.failed_message) return { error: `render failed: ${data.failed_message}` };
+  return { pending: true };
+}
+
+// Ambient "talking" loop video — generated ONCE per person (not per answer).
+// A short clip of the person gesturing/talking with generic motion; played on
+// loop client-side while real narration audio (a2eTts) plays over it. This is
+// what makes answers start in seconds instead of waiting for a lip-sync render.
+
+/** Start generating the ambient loop video from a person's photo/cartoon. */
+export async function a2eLoopVideoStart(
+  srcPhotoUrl: string
+): Promise<{ taskId: string } | { error: string }> {
+  try {
+    const cdnUrl = await a2eHostedImage(srcPhotoUrl);
+    const start = await a2e("/api/v1/userImage2Video/start", "POST", {
+      name: "dcp-loop",
+      prompt:
+        "The person talks naturally to the camera: subtle mouth movement as if speaking, gentle head motion, occasional relaxed hand gestures, friendly calm demeanor, static camera, plain background, smooth continuous motion suitable for a seamless loop.",
+      image_url: cdnUrl,
+      duration: "5",
+      aspect_ratio: "9:16",
+      resolution: "720p",
+    });
+    const id = start.json?.data?._id;
+    if (!id) {
+      const j = start.json || {};
+      const detail = j.errors ? JSON.stringify(j.errors) : j.msg || j.message || JSON.stringify(j);
+      return { error: `start ${start.httpStatus}: ${String(detail).slice(0, 300)}` };
+    }
+    return { taskId: id as string };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** Poll a loop-video task once. */
+export async function a2eLoopVideoPoll(
+  taskId: string
+): Promise<{ done: true; url: string } | { pending: true } | { error: string }> {
+  const d = await a2e(`/api/v1/userImage2Video/${taskId}`, "GET");
+  const data = d.json?.data;
+  const url: string | null =
+    data?.result_url || data?.video_url || findUrl(d.json, /result|video/i);
+  if (url) return { done: true, url };
   if (data?.failed_message) return { error: `render failed: ${data.failed_message}` };
   return { pending: true };
 }

@@ -68,9 +68,12 @@ export default function VisitorExperience({
   const [input, setInput] = useState("");
   const [lastText, setLastText] = useState<string>("");
   const [lastLang, setLastLang] = useState<"en" | "zh">(initialLang);
+  const [lastAudioUrl, setLastAudioUrl] = useState<string | null>(null);
+  const [audioPlaying, setAudioPlaying] = useState(false);
   const [error, setError] = useState("");
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
   const t = T[uiLang];
 
   // Real-time talking-avatar stream (D-ID WebRTC). No-op when not enabled.
@@ -86,8 +89,8 @@ export default function VisitorExperience({
   // The live stream is usable only once real frames are flowing (handles the
   // case where the stream "connects" but media is blocked, e.g. some networks).
   const streamUsable = avatarStream && streamPlaying;
-  // Unified "is the avatar talking right now?" flag (stream OR browser TTS).
-  const talking = streamSpeaking || stage === "speaking";
+  // Unified "is the avatar talking right now?" flag (stream / narration audio / browser TTS).
+  const talking = streamSpeaking || stage === "speaking" || audioPlaying;
 
   useEffect(() => {
     if (avatarStream) startStream();
@@ -167,8 +170,25 @@ export default function VisitorExperience({
     }, 900);
   }
 
+  // Play narration audio (A2E TTS) over the ambient loop video. Falls back to
+  // the browser voice if playback fails (e.g. autoplay blocked).
+  function playNarration(url: string, onFail: () => void) {
+    const el = audioRef.current;
+    if (!el) return onFail();
+    el.pause();
+    el.src = url;
+    el.currentTime = 0;
+    setAudioPlaying(true);
+    el.play().catch(() => {
+      setAudioPlaying(false);
+      onFail();
+    });
+  }
+
   function stopSpeaking() {
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    audioRef.current?.pause();
+    setAudioPlaying(false);
     setStage("ready");
   }
 
@@ -178,7 +198,9 @@ export default function VisitorExperience({
       sayStream(lastText, lastLang).then((ok) => {
         if (!ok) speak(lastText, lastLang);
       });
-    } else if (lastText) {
+    } else if (lastAudioUrl) {
+      playNarration(lastAudioUrl, () => speak(lastText, lastLang));
+    } else {
       speak(lastText, lastLang);
     }
   }
@@ -191,6 +213,14 @@ export default function VisitorExperience({
   ) {
     setError("");
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    // Unlock audio autoplay on strict mobile browsers (e.g. iOS Safari) by
+    // calling play() synchronously within this user-gesture-triggered call,
+    // before any `await` below breaks the gesture association.
+    try {
+      audioRef.current?.play()?.catch(() => {});
+    } catch {
+      /* ignore */
+    }
     setVideoUrl(null);
 
     const userBubble =
@@ -240,7 +270,13 @@ export default function VisitorExperience({
             body: JSON.stringify({ personId: person.id, text, lang }),
           });
           const av = await readJson(avRes);
-          if (avRes.ok && av.avatar?.kind === "video-pending") {
+          if (avRes.ok && av.avatar?.kind === "audio") {
+            // Fast path: narration audio only, played over the ambient loop
+            // video — near-instant, no per-answer render.
+            setLastAudioUrl(av.avatar.audioUrl);
+            setStage("ready");
+            playNarration(av.avatar.audioUrl, () => speak(text, lang));
+          } else if (avRes.ok && av.avatar?.kind === "video-pending") {
             setVideoLoading(true);
             const url = await pollForVideo(av.avatar.id);
             setVideoLoading(false);
@@ -309,6 +345,16 @@ export default function VisitorExperience({
 
   return (
     <div className="relative mx-auto flex h-dvh max-w-md flex-col overflow-hidden bg-black">
+      {/* Narration audio (A2E TTS fast path) — hidden, played over the loop video. */}
+      <audio
+        ref={audioRef}
+        playsInline
+        hidden
+        onPlay={() => setAudioPlaying(true)}
+        onEnded={() => setAudioPlaying(false)}
+        onPause={() => setAudioPlaying(false)}
+        onError={() => setAudioPlaying(false)}
+      />
       {/* ── Full-screen digital human ──────────────────────────────── */}
       <div className="relative flex-1 overflow-hidden bg-gradient-to-b from-brand-100 to-brand-50">
         {(stage === "thinking" || videoLoading) && <TopProgress />}
@@ -341,6 +387,18 @@ export default function VisitorExperience({
             playsInline
             controls={false}
             onEnded={() => setStage("ready")}
+            className="absolute inset-0 h-full w-full object-cover"
+          />
+        ) : person.loopVideoUrl ? (
+          // Ambient "talking" loop (generated once): plays continuously while
+          // narration audio (played separately, see <audio> below) narrates.
+          <video
+            key={person.loopVideoUrl}
+            src={person.loopVideoUrl}
+            autoPlay
+            muted
+            loop
+            playsInline
             className="absolute inset-0 h-full w-full object-cover"
           />
         ) : displayImage ? (

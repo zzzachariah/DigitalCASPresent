@@ -1,5 +1,5 @@
 import type { AvatarCreateResult, AvatarPollResult } from "./types";
-import { a2eConfigured, a2eCreateTalkingPhoto, a2ePollTalkingPhoto } from "./a2e";
+import { a2eConfigured, a2eCreateTalkingPhoto, a2ePollTalkingPhoto, a2eTts } from "./a2e";
 
 // ─────────────────────────────────────────────────────────────────────
 // Talking-avatar (digital human) provider.
@@ -62,14 +62,30 @@ function isPublicUrl(url: string): boolean {
   }
 }
 
+// "fast" (default): TTS only, played over a pre-generated ambient loop video —
+//   near-instant, no per-answer render, lip sync is not exact.
+// "precise": per-answer talking-photo render — accurate lip sync, but slow
+//   (tens of seconds) and can time out on serverless.
+const A2E_MODE = (process.env.A2E_MODE || "fast").toLowerCase();
+
 export async function createAvatar(req: AvatarRequest): Promise<AvatarCreateResult> {
-  // A2E talking-photo (domestic, China-friendly lip-sync video).
-  if (PROVIDER === "a2e" && a2eConfigured() && req.photoPublicUrl) {
+  if (PROVIDER === "a2e" && a2eConfigured()) {
+    if (A2E_MODE === "precise" && req.photoPublicUrl) {
+      try {
+        const id = await a2eCreateTalkingPhoto(req.text, req.photoPublicUrl, req.gender);
+        return { kind: "video-pending", id, text: req.text };
+      } catch (err) {
+        console.error("[avatar] A2E precise failed, falling back to TTS:", err);
+        return { kind: "tts", text: req.text, lang: langTag(req.lang) };
+      }
+    }
+    // Fast path (default): just synthesize speech; the client plays it over
+    // the person's pre-generated ambient loop video (near-instant).
     try {
-      const id = await a2eCreateTalkingPhoto(req.text, req.photoPublicUrl, req.gender);
-      return { kind: "video-pending", id, text: req.text };
+      const audioUrl = await a2eTts(req.text, req.gender);
+      return { kind: "audio", audioUrl, text: req.text };
     } catch (err) {
-      console.error("[avatar] A2E failed, falling back to TTS:", err);
+      console.error("[avatar] A2E TTS failed, falling back to browser voice:", err);
       return { kind: "tts", text: req.text, lang: langTag(req.lang) };
     }
   }

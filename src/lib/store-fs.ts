@@ -117,14 +117,27 @@ export async function saveCartoon(id: string, buffer: Buffer, ext: string): Prom
   return cartoonUrl;
 }
 
+export async function saveLoopVideo(id: string, buffer: Buffer, ext: string): Promise<string> {
+  await ensureDirs();
+  const safeExt = ext.replace(/[^a-z0-9]/gi, "").toLowerCase() || "mp4";
+  await fs.writeFile(path.join(UPLOAD_DIR, `${id}.loop.${safeExt}`), buffer);
+  const loopVideoUrl = `/api/photo/${id}.loop`;
+  await updatePerson(id, { loopVideoUrl });
+  return loopVideoUrl;
+}
+
 export async function readPhoto(
   id: string
 ): Promise<{ buffer: Buffer; contentType: string } | null> {
   try {
     const files = await fs.readdir(UPLOAD_DIR);
     const wantCartoon = id.endsWith(".cartoon");
+    const wantLoop = id.endsWith(".loop");
+    const marker = wantCartoon ? ".cartoon." : wantLoop ? ".loop." : null;
     const file = files.find(
-      (f) => f.startsWith(id + ".") && (wantCartoon || !f.includes(".cartoon."))
+      (f) =>
+        f.startsWith(id + ".") &&
+        (marker ? f.includes(marker) : !f.includes(".cartoon.") && !f.includes(".loop."))
     );
     if (!file) return null;
     const buffer = await fs.readFile(path.join(UPLOAD_DIR, file));

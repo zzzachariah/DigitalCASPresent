@@ -23,6 +23,9 @@ export interface Person {
   photoUrl?: string;
   /** Generated cartoon portrait URL (used for display + the talking avatar). */
   cartoonUrl?: string;
+  /** Generated ambient "talking" loop video (a few seconds, generated once,
+   *  played on loop while narration audio plays — no per-answer render). */
+  loopVideoUrl?: string;
   /** Voice gender for the talking avatar (picks the TTS voice). */
   gender?: "male" | "female";
   /** Full raw script text (source of truth for the AI). */
@@ -44,6 +47,7 @@ export interface PublicPerson {
   subtitle?: string;
   photoUrl?: string;
   cartoonUrl?: string;
+  loopVideoUrl?: string;
   language: Person["language"];
   sections: { id: string; title: string; hint?: string }[];
 }
@@ -57,9 +61,13 @@ export interface ChatTurn {
 
 /** First response when the browser asks for an avatar for one answer.
  *  - tts: no video provider → the browser speaks the text itself.
- *  - video-pending: a D-ID render was queued; poll /api/avatar/status?id=… */
+ *  - audio: fast path — narration audio only (near-instant); the client plays
+ *    it over the person's pre-generated ambient "talking" loop video.
+ *  - video-pending: a per-answer render was queued (slow, precise lip-sync);
+ *    poll /api/avatar/status?id=… */
 export type AvatarCreateResult =
   | { kind: "tts"; text: string; lang: string }
+  | { kind: "audio"; audioUrl: string; text: string }
   | { kind: "video-pending"; id: string; text: string };
 
 /** Result of polling a queued video render. */

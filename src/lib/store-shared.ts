@@ -38,6 +38,12 @@ export function contentTypeForExt(ext: string): string {
       return "image/gif";
     case "svg":
       return "image/svg+xml";
+    case "mp4":
+      return "video/mp4";
+    case "webm":
+      return "video/webm";
+    case "mov":
+      return "video/quicktime";
     default:
       return "image/jpeg";
   }
@@ -85,6 +91,7 @@ export function toPublic(p: Person): PublicPerson {
     subtitle: p.subtitle,
     photoUrl: p.photoUrl,
     cartoonUrl: p.cartoonUrl,
+    loopVideoUrl: p.loopVideoUrl,
     language: p.language,
     sections: p.sections.map((s) => ({ id: s.id, title: s.title, hint: s.hint })),
   };

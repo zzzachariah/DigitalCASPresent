@@ -39,6 +39,9 @@ export default function PersonEditor({
   const [cartoonUrl, setCartoonUrl] = useState<string | undefined>(person?.cartoonUrl);
   const [cartooning, setCartooning] = useState(false);
 
+  const [loopVideoUrl, setLoopVideoUrl] = useState<string | undefined>(person?.loopVideoUrl);
+  const [loopGenerating, setLoopGenerating] = useState(false);
+
   const [parsing, setParsing] = useState(false);
   const [sectioning, setSectioning] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -140,6 +143,36 @@ export default function PersonEditor({
     }
   }
 
+  async function generateLoopVideo() {
+    if (!person) return;
+    setError("");
+    setLoopGenerating(true);
+    try {
+      const startRes = await fetch(`/api/admin/people/${person.id}/loop-video`, { method: "POST" });
+      const startData = await readJson(startRes);
+      if (!startRes.ok) throw new Error(startData.error || "循环视频发起失败");
+      const taskId = startData.taskId as string;
+
+      for (let i = 0; i < 80; i++) {
+        await new Promise((r) => setTimeout(r, 3000)); // ~4 min max
+        const pRes = await fetch(
+          `/api/admin/people/${person.id}/loop-video?taskId=${encodeURIComponent(taskId)}`
+        );
+        const pData = await readJson(pRes);
+        if (!pRes.ok) throw new Error(pData.error || "循环视频生成失败");
+        if (pData.loopVideoUrl) {
+          setLoopVideoUrl(pData.loopVideoUrl);
+          return;
+        }
+      }
+      throw new Error("循环视频生成超时,请重试");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "循环视频生成失败");
+    } finally {
+      setLoopGenerating(false);
+    }
+  }
+
   async function save() {
     setError("");
     if (!name.trim()) return setError("请填写姓名");
@@ -180,25 +213,29 @@ export default function PersonEditor({
 
   return (
     <div className="space-y-5 pb-28">
-      {(sectioning || saving || parsing || cartooning) && (
+      {(sectioning || saving || parsing || cartooning || loopGenerating) && (
         <LoadingOverlay
           label={
             sectioning
               ? "AI 正在智能分段…"
               : cartooning
                 ? "正在生成卡通形象…"
-                : saving
-                  ? "正在保存…"
-                  : "正在解析文件…"
+                : loopGenerating
+                  ? "正在生成动态视频…"
+                  : saving
+                    ? "正在保存…"
+                    : "正在解析文件…"
           }
           sub={
             sectioning
               ? "把讲稿分成几个部分，请稍候"
               : cartooning
                 ? "用照片生成卡通,约 20–40 秒"
-                : saving
-                  ? "上传照片并生成二维码"
-                  : "从 PDF / Word 提取文字"
+                : loopGenerating
+                  ? "生成说话动作循环视频,约 30–90 秒"
+                  : saving
+                    ? "上传照片并生成二维码"
+                    : "从 PDF / Word 提取文字"
           }
         />
       )}
@@ -263,6 +300,32 @@ export default function PersonEditor({
             )}
             <p className="mt-1 text-xs text-ink-mute">
               用本人照片生成轻卡通(还认得出是谁),用于访客端显示和数字人说话。
+            </p>
+          </div>
+        </div>
+
+        {/* Ambient talking-loop video — generated once; makes answers start
+            near-instantly instead of waiting for a per-answer lip-sync render. */}
+        <div className="mt-4 flex items-center gap-4 border-t border-black/5 pt-4">
+          <div className="h-20 w-20 shrink-0 overflow-hidden rounded-2xl bg-gray-100 ring-1 ring-black/5">
+            {loopVideoUrl ? (
+              <video src={loopVideoUrl} muted loop autoPlay playsInline className="h-full w-full object-cover" />
+            ) : (
+              <div className="grid h-full w-full place-items-center text-xl text-ink-mute">🎬</div>
+            )}
+          </div>
+          <div>
+            <p className="label">动态视频 · Talking loop（推荐，秒回）</p>
+            {isEdit ? (
+              <button className="btn-soft" onClick={generateLoopVideo} disabled={loopGenerating}>
+                {loopGenerating ? "生成中…" : loopVideoUrl ? "重新生成动态视频" : "🎬 生成动态视频"}
+              </button>
+            ) : (
+              <p className="text-xs text-ink-mute">先保存这位同学,再回来生成动态视频。</p>
+            )}
+            <p className="mt-1 text-xs text-ink-mute">
+              生成一段几秒的"说话状态"循环视频（一次性）。访客提问时立刻用语音配这段循环播放，
+              无需每次等待渲染，口型不做逐字对齐。建议先生成卡通形象再生成此项。
             </p>
           </div>
         </div>

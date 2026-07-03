@@ -43,6 +43,9 @@ export function savePhoto(id: string, buffer: Buffer, ext: string): Promise<stri
 export function saveCartoon(id: string, buffer: Buffer, ext: string): Promise<string> {
   return driver().saveCartoon(id, buffer, ext);
 }
+export function saveLoopVideo(id: string, buffer: Buffer, ext: string): Promise<string> {
+  return driver().saveLoopVideo(id, buffer, ext);
+}
 export function readPhoto(
   id: string
 ): Promise<{ buffer: Buffer; contentType: string } | null> {
