@@ -29,6 +29,8 @@ const T = {
     suggestions: ["能举个例子吗？", "可以说得更具体一点吗？", "这和现实生活有什么联系？"],
     poweredThinking: "准备中…",
     rendering: "数字人生成中…",
+    moreOptions: "选择部分 / 提问",
+    collapse: "收起",
   },
   en: {
     greeting: (n: string) => `Hi, I'm ${n}.`,
@@ -44,6 +46,8 @@ const T = {
     suggestions: ["Can you give an example?", "Could you be more specific?", "How does this connect to real life?"],
     poweredThinking: "Preparing…",
     rendering: "Generating avatar…",
+    moreOptions: "Choose a part / Ask",
+    collapse: "Collapse",
   },
 };
 
@@ -71,6 +75,9 @@ export default function VisitorExperience({
   const [lastAudioUrl, setLastAudioUrl] = useState<string | null>(null);
   const [audioPlaying, setAudioPlaying] = useState(false);
   const [error, setError] = useState("");
+  // Section picker / input starts open; collapses into a small pill after each
+  // selection so the avatar + caption get more room, and reopens on tap.
+  const [controlsOpen, setControlsOpen] = useState(true);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -212,6 +219,7 @@ export default function VisitorExperience({
       | { mode: "followup"; question: string }
   ) {
     setError("");
+    setControlsOpen(false);
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     // Unlock audio autoplay on strict mobile browsers (e.g. iOS Safari) by
     // calling play() synchronously within this user-gesture-triggered call,
@@ -485,64 +493,84 @@ export default function VisitorExperience({
         )}
       </div>
 
-      {/* ── Compact control bar ────────────────────────────────────── */}
-      <div className="shrink-0 bg-white">
-        <div className="px-4 pt-3">
-          <p className="mb-2 text-xs font-medium text-ink-mute">
-            {messages.length === 0 ? t.pick : t.other}
-          </p>
-          <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-2 pt-1.5">
-            {person.sections.map((s, i) => (
-              <button
-                key={s.id}
-                disabled={busy}
-                onClick={() => run({ mode: "section", sectionId: s.id, label: s.title })}
-                className="shrink-0 rounded-2xl bg-white px-4 py-2.5 text-left shadow-soft ring-1 ring-black/5 transition active:scale-95 disabled:opacity-50"
-              >
-                <span className="block text-[11px] text-brand-500">第 {i + 1} 部分</span>
-                <span className="block max-w-[44vw] truncate text-sm font-medium">{s.title}</span>
-              </button>
-            ))}
-            {person.sections.length === 0 && (
-              <span className="py-2 text-sm text-ink-mute">（暂无分段）</span>
-            )}
-          </div>
-        </div>
-
-        {/* follow-up suggestions (compact, single row) */}
-        {stage === "ready" && !talking && !videoLoading && messages.length > 0 && (
-          <div className="-mx-1 flex gap-2 overflow-x-auto px-5 pb-1">
-            {t.suggestions.map((s) => (
-              <button
-                key={s}
-                onClick={() => submitFollowUp(s)}
-                className="chip shrink-0 whitespace-nowrap bg-brand-50 text-brand-700 hover:bg-brand-100"
-              >
-                {s}
-              </button>
-            ))}
-          </div>
-        )}
-
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            submitFollowUp(input);
-          }}
-          className="flex items-center gap-2 px-4 pb-3 pt-2"
-        >
-          <input
-            className="input flex-1 py-2.5"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder={t.askPlaceholder}
-            disabled={busy}
-          />
-          <button type="submit" disabled={busy || !input.trim()} className="btn-primary px-4 py-2.5">
-            {t.send}
+      {/* ── Compact control bar (collapsible) ─────────────────────── */}
+      {controlsOpen ? (
+        <div className="shrink-0 bg-white">
+          {/* grip handle — tap to collapse */}
+          <button
+            onClick={() => setControlsOpen(false)}
+            className="flex w-full items-center justify-center py-1.5"
+            aria-label={t.collapse}
+          >
+            <span className="h-1 w-10 rounded-full bg-black/15" />
           </button>
-        </form>
-      </div>
+
+          <div className="px-4">
+            <p className="mb-2 text-xs font-medium text-ink-mute">
+              {messages.length === 0 ? t.pick : t.other}
+            </p>
+            <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-2 pt-1.5">
+              {person.sections.map((s, i) => (
+                <button
+                  key={s.id}
+                  disabled={busy}
+                  onClick={() => run({ mode: "section", sectionId: s.id, label: s.title })}
+                  className="shrink-0 rounded-2xl bg-white px-4 py-2.5 text-left shadow-soft ring-1 ring-black/5 transition active:scale-95 disabled:opacity-50"
+                >
+                  <span className="block text-[11px] text-brand-500">第 {i + 1} 部分</span>
+                  <span className="block max-w-[44vw] truncate text-sm font-medium">{s.title}</span>
+                </button>
+              ))}
+              {person.sections.length === 0 && (
+                <span className="py-2 text-sm text-ink-mute">（暂无分段）</span>
+              )}
+            </div>
+          </div>
+
+          {/* follow-up suggestions (compact, single row) */}
+          {stage === "ready" && !talking && !videoLoading && messages.length > 0 && (
+            <div className="-mx-1 flex gap-2 overflow-x-auto px-5 pb-1">
+              {t.suggestions.map((s) => (
+                <button
+                  key={s}
+                  onClick={() => submitFollowUp(s)}
+                  className="chip shrink-0 whitespace-nowrap bg-brand-50 text-brand-700 hover:bg-brand-100"
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              submitFollowUp(input);
+            }}
+            className="flex items-center gap-2 px-4 pb-3 pt-2"
+          >
+            <input
+              className="input flex-1 py-2.5"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder={t.askPlaceholder}
+              disabled={busy}
+            />
+            <button type="submit" disabled={busy || !input.trim()} className="btn-primary px-4 py-2.5">
+              {t.send}
+            </button>
+          </form>
+        </div>
+      ) : (
+        <div className="shrink-0 bg-white px-4 py-2.5">
+          <button
+            onClick={() => setControlsOpen(true)}
+            className="flex w-full items-center justify-center gap-1.5 rounded-2xl bg-brand-50 py-2.5 text-sm font-medium text-brand-700 active:scale-[0.98]"
+          >
+            <span className="text-xs">⌃</span> {t.moreOptions}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
