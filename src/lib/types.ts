@@ -9,6 +9,10 @@ export interface Section {
   hint?: string;
   /** The portion of the script this section covers. Used as AI context. */
   content: string;
+  /** Pre-generated explanation text, keyed by resolved answer language, so
+   *  opening this section can skip the AI call entirely (instant). Follow-up
+   *  questions are always generated live — never cached. */
+  cachedAnswers?: Partial<Record<"en" | "zh" | "bilingual", string>>;
 }
 
 /** A person = one digital human = one QR code. */

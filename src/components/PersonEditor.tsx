@@ -42,6 +42,9 @@ export default function PersonEditor({
   const [loopVideoUrl, setLoopVideoUrl] = useState<string | undefined>(person?.loopVideoUrl);
   const [loopGenerating, setLoopGenerating] = useState(false);
 
+  const [pregenerating, setPregenerating] = useState<Set<string>>(new Set());
+  const [bulkPregenerating, setBulkPregenerating] = useState(false);
+
   const [parsing, setParsing] = useState(false);
   const [sectioning, setSectioning] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -50,7 +53,16 @@ export default function PersonEditor({
   const fileRef = useRef<HTMLInputElement>(null);
 
   function updateSection(id: string, patch: Partial<Section>) {
-    setSections((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+    // Editing the title/content invalidates any pre-generated answer (it was
+    // written for the old text) — clear it so the "预生成" state stays honest.
+    const invalidatesCache = "title" in patch || "content" in patch;
+    setSections((prev) =>
+      prev.map((s) =>
+        s.id === id
+          ? { ...s, ...patch, cachedAnswers: invalidatesCache ? undefined : s.cachedAnswers }
+          : s
+      )
+    );
   }
   function removeSection(id: string) {
     setSections((prev) => prev.filter((s) => s.id !== id));
@@ -173,6 +185,59 @@ export default function PersonEditor({
     }
   }
 
+  function mergeCachedAnswers(updatedSections: Section[]) {
+    setSections((prev) =>
+      prev.map((s) => {
+        const updated = updatedSections.find((u) => u.id === s.id);
+        return updated ? { ...s, cachedAnswers: updated.cachedAnswers } : s;
+      })
+    );
+  }
+
+  async function pregenerateSection(sectionId: string) {
+    if (!person) return;
+    setError("");
+    setPregenerating((prev) => new Set(prev).add(sectionId));
+    try {
+      const res = await fetch(`/api/admin/people/${person.id}/pregenerate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sectionId }),
+      });
+      const data = await readJson(res);
+      if (!res.ok) throw new Error(data.error || "预生成失败");
+      mergeCachedAnswers(data.sections as Section[]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "预生成失败");
+    } finally {
+      setPregenerating((prev) => {
+        const next = new Set(prev);
+        next.delete(sectionId);
+        return next;
+      });
+    }
+  }
+
+  async function pregenerateAll() {
+    if (!person) return;
+    setError("");
+    setBulkPregenerating(true);
+    try {
+      const res = await fetch(`/api/admin/people/${person.id}/pregenerate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await readJson(res);
+      if (!res.ok) throw new Error(data.error || "预生成失败");
+      mergeCachedAnswers(data.sections as Section[]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "预生成失败");
+    } finally {
+      setBulkPregenerating(false);
+    }
+  }
+
   async function save() {
     setError("");
     if (!name.trim()) return setError("请填写姓名");
@@ -213,7 +278,7 @@ export default function PersonEditor({
 
   return (
     <div className="space-y-5 pb-28">
-      {(sectioning || saving || parsing || cartooning || loopGenerating) && (
+      {(sectioning || saving || parsing || cartooning || loopGenerating || bulkPregenerating) && (
         <LoadingOverlay
           label={
             sectioning
@@ -222,9 +287,11 @@ export default function PersonEditor({
                 ? "正在生成卡通形象…"
                 : loopGenerating
                   ? "正在生成动态视频…"
-                  : saving
-                    ? "正在保存…"
-                    : "正在解析文件…"
+                  : bulkPregenerating
+                    ? "正在为所有部分预生成讲解…"
+                    : saving
+                      ? "正在保存…"
+                      : "正在解析文件…"
           }
           sub={
             sectioning
@@ -233,9 +300,11 @@ export default function PersonEditor({
                 ? "用照片生成卡通,约 20–40 秒"
                 : loopGenerating
                   ? "生成说话动作循环视频,约 30–90 秒"
-                  : saving
-                    ? "上传照片并生成二维码"
-                    : "从 PDF / Word 提取文字"
+                  : bulkPregenerating
+                    ? "让访客选这些部分时能立刻播放，不用等 AI"
+                    : saving
+                      ? "上传照片并生成二维码"
+                      : "从 PDF / Word 提取文字"
           }
         />
       )}
@@ -425,13 +494,29 @@ export default function PersonEditor({
           <p className="text-sm font-semibold text-ink-soft">
             部分 · Sections（{sections.length}）
           </p>
-          <button
-            className="text-sm text-brand-600 hover:underline"
-            onClick={() => setSections((p) => [...p, emptySection()])}
-          >
-            + 添加
-          </button>
+          <div className="flex items-center gap-3">
+            {isEdit && sections.length > 0 && (
+              <button
+                className="text-sm text-brand-600 hover:underline disabled:opacity-50"
+                onClick={pregenerateAll}
+                disabled={bulkPregenerating}
+              >
+                {bulkPregenerating ? "生成中…" : "⚡ 预生成全部讲解"}
+              </button>
+            )}
+            <button
+              className="text-sm text-brand-600 hover:underline"
+              onClick={() => setSections((p) => [...p, emptySection()])}
+            >
+              + 添加
+            </button>
+          </div>
         </div>
+        {isEdit && sections.length > 0 && (
+          <p className="px-1 text-xs text-ink-mute">
+            ⚡ 预生成：提前让 AI 写好每部分的讲解，访客选中时立刻播放，不用现场等待。追问仍然是现场实时回答。
+          </p>
+        )}
         {sections.length === 0 && (
           <div className="card p-5 text-center text-sm text-ink-mute">
             还没有分段。先点上面的「AI 智能分段」，或手动添加。
@@ -465,6 +550,30 @@ export default function PersonEditor({
               onChange={(e) => updateSection(s.id, { content: e.target.value })}
               placeholder="这一部分对应的讲稿内容…"
             />
+            {isEdit && (
+              <div className="flex items-center gap-2 pt-1">
+                <button
+                  className="chip bg-brand-50 text-xs text-brand-700 hover:bg-brand-100 disabled:opacity-50"
+                  onClick={() => pregenerateSection(s.id)}
+                  disabled={pregenerating.has(s.id) || bulkPregenerating}
+                >
+                  {pregenerating.has(s.id) ? (
+                    <>
+                      <Spinner /> 生成中…
+                    </>
+                  ) : s.cachedAnswers && Object.keys(s.cachedAnswers).length > 0 ? (
+                    "🔁 重新预生成"
+                  ) : (
+                    "⚡ 预生成讲解"
+                  )}
+                </button>
+                {s.cachedAnswers && Object.keys(s.cachedAnswers).length > 0 && (
+                  <span className="text-xs text-green-600">
+                    ✅ 已生成（{Object.keys(s.cachedAnswers).join(" / ")}）
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         ))}
       </section>

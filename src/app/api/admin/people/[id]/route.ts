@@ -43,6 +43,7 @@ export async function PUT(
       title: s.title?.trim() || "Untitled",
       hint: s.hint?.trim() || undefined,
       content: s.content?.trim() || "",
+      cachedAnswers: s.cachedAnswers,
     }));
   }
   if (body.language && ["auto", "en", "zh", "bilingual"].includes(body.language)) {

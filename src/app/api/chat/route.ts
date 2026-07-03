@@ -2,13 +2,26 @@ import { NextRequest, NextResponse } from "next/server";
 import { getPerson } from "@/lib/store";
 import { chat } from "@/lib/ai";
 import { explainSectionPrompt, followUpPrompt, systemPrompt } from "@/lib/prompts";
-import type { ChatTurn } from "@/lib/types";
+import type { ChatTurn, Person } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 function looksChinese(s: string): boolean {
   return /[一-鿿]/.test(s);
+}
+
+/** Which cachedAnswers slot a section explanation resolves to for this
+ *  person + visitor language toggle. Mirrors the language logic used when
+ *  generating live (see prompts.ts languageRule / the "auto" override below). */
+function resolveAnswerLangKey(
+  person: Person,
+  uiLang?: "en" | "zh"
+): "en" | "zh" | "bilingual" {
+  if (person.language === "bilingual") return "bilingual";
+  if (person.language === "en") return "en";
+  if (person.language === "zh") return "zh";
+  return uiLang === "zh" ? "zh" : "en"; // "auto": follow the visitor's toggle
 }
 
 // Generate the spoken ANSWER TEXT (fast). The avatar/video is a separate call.
@@ -32,6 +45,19 @@ export async function POST(req: NextRequest) {
     const section = person.sections.find((s) => s.id === body.sectionId);
     if (!section) return NextResponse.json({ error: "bad section" }, { status: 400 });
     currentSectionTitle = section.title;
+
+    // Fast path: an admin-pregenerated answer skips the AI call entirely.
+    const langKey = resolveAnswerLangKey(person, body.uiLang);
+    const cached = section.cachedAnswers?.[langKey];
+    if (cached) {
+      return NextResponse.json({
+        text: cached,
+        lang: looksChinese(cached) ? "zh" : "en",
+        sectionTitle: currentSectionTitle,
+        cached: true,
+      });
+    }
+
     userPrompt = explainSectionPrompt(section);
     // A section explanation has no visitor message to detect language from,
     // so when the person is set to "auto" we follow the visitor's UI toggle.

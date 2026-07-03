@@ -41,6 +41,7 @@ export async function POST(req: NextRequest) {
     title: s.title?.trim() || "Untitled",
     hint: s.hint?.trim() || undefined,
     content: s.content?.trim() || "",
+    cachedAnswers: s.cachedAnswers,
   }));
 
   const language = (["auto", "en", "zh", "bilingual"].includes(body.language || "")

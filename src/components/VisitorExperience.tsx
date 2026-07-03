@@ -355,8 +355,8 @@ export default function VisitorExperience({
         onPause={() => setAudioPlaying(false)}
         onError={() => setAudioPlaying(false)}
       />
-      {/* ── Full-screen digital human ──────────────────────────────── */}
-      <div className="relative flex-1 overflow-hidden bg-gradient-to-b from-brand-100 to-brand-50">
+      {/* ── Digital human — fixed-height area, nothing else overlaps the face ── */}
+      <div className="relative h-[42dvh] min-h-[220px] shrink-0 overflow-hidden bg-gradient-to-b from-brand-100 to-brand-50">
         {(stage === "thinking" || videoLoading) && <TopProgress />}
 
         {avatarStream ? (
@@ -408,9 +408,8 @@ export default function VisitorExperience({
           <div className="absolute inset-0 grid place-items-center bg-brand-50 text-7xl">🙂</div>
         )}
 
-        {/* legibility gradients */}
-        <div className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-black/45 to-transparent" />
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-2/5 bg-gradient-to-t from-black/65 to-transparent" />
+        {/* legibility gradient for the name/status bar */}
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-black/45 to-transparent" />
 
         {/* top bar: avatar + name + status + language */}
         <div className="absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-4">
@@ -453,37 +452,37 @@ export default function VisitorExperience({
             {uiLang === "zh" ? "EN" : "中"}
           </button>
         </div>
+      </div>
 
-        {/* caption overlay (read along) */}
-        <div className="absolute inset-x-0 bottom-0 p-3">
-          {lastUser && (stage === "thinking" || talking) && (
-            <div className="mb-2 flex justify-end">
-              <span className="max-w-[80%] truncate rounded-full bg-white/90 px-3 py-1 text-xs text-ink shadow-soft">
-                {lastUser.text}
-              </span>
-            </div>
-          )}
-          <div className="max-h-[40vh] overflow-y-auto rounded-2xl bg-black/45 px-4 py-3 backdrop-blur">
-            {stage === "thinking" ? (
-              <span className="flex items-center gap-1.5 text-white/90">
-                <Dot /> <Dot d="0.15s" /> <Dot d="0.3s" />
-                <span className="ml-1 text-sm">{t.thinking}</span>
-              </span>
-            ) : (
-              <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-white">{caption}</p>
-            )}
+      {/* ── Caption panel — separate from the avatar, never covers the face ── */}
+      <div className="min-h-0 flex-1 overflow-y-auto bg-neutral-900 px-4 py-3">
+        {lastUser && (stage === "thinking" || talking) && (
+          <div className="mb-2 flex justify-end">
+            <span className="max-w-[80%] truncate rounded-full bg-white/90 px-3 py-1 text-xs text-ink shadow-soft">
+              {lastUser.text}
+            </span>
           </div>
-          {error && <p className="mt-2 text-sm text-red-200">{error}</p>}
-          {/* replay */}
-          {stage === "ready" && !talking && !videoLoading && messages.length > 0 && (
-            <button
-              onClick={replay}
-              className="mt-2 rounded-full bg-white/85 px-3 py-1 text-xs text-ink-soft shadow-soft active:scale-95"
-            >
-              ↻ {t.replay}
-            </button>
+        )}
+        <div className="rounded-2xl bg-white/10 px-4 py-3">
+          {stage === "thinking" ? (
+            <span className="flex items-center gap-1.5 text-white/90">
+              <Dot /> <Dot d="0.15s" /> <Dot d="0.3s" />
+              <span className="ml-1 text-sm">{t.thinking}</span>
+            </span>
+          ) : (
+            <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-white">{caption}</p>
           )}
         </div>
+        {error && <p className="mt-2 text-sm text-red-300">{error}</p>}
+        {/* replay */}
+        {stage === "ready" && !talking && !videoLoading && messages.length > 0 && (
+          <button
+            onClick={replay}
+            className="mt-2 rounded-full bg-white/85 px-3 py-1 text-xs text-ink-soft shadow-soft active:scale-95"
+          >
+            ↻ {t.replay}
+          </button>
+        )}
       </div>
 
       {/* ── Compact control bar ────────────────────────────────────── */}
