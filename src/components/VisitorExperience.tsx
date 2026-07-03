@@ -501,7 +501,8 @@ export default function VisitorExperience({
             </span>
           </div>
         )}
-        <div className="card px-4 py-3">
+        {/* The digital human's spoken text — plain, no card/background box. */}
+        <div className="px-1">
           {stage === "thinking" ? (
             <span className="flex items-center gap-1.5 text-ink-mute">
               <Dot /> <Dot d="0.15s" /> <Dot d="0.3s" />
@@ -511,7 +512,7 @@ export default function VisitorExperience({
             <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-ink">{caption}</p>
           )}
         </div>
-        {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
+        {error && <p className="mt-2 px-1 text-sm text-red-500">{error}</p>}
         {/* replay */}
         {stage === "ready" && !talking && !videoLoading && messages.length > 0 && (
           <button onClick={replay} className="chip mt-2 bg-white text-ink-soft shadow-soft ring-1 ring-black/5 active:scale-95">
