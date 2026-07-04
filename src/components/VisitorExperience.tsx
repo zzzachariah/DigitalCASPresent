@@ -239,12 +239,22 @@ export default function VisitorExperience({
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     // Unlock audio autoplay on strict mobile browsers (e.g. iOS Safari) by
     // calling play() synchronously within this user-gesture-triggered call,
-    // before any `await` below breaks the gesture association.
+    // before any `await` below breaks the gesture association. Pause + rewind
+    // immediately so the PREVIOUS narration doesn't audibly replay while the
+    // new answer is still being generated (which also kept the loop video
+    // animating during the "thinking" phase).
     try {
-      audioRef.current?.play()?.catch(() => {});
+      const el = audioRef.current;
+      if (el) {
+        const p = el.play();
+        el.pause();
+        el.currentTime = 0;
+        p?.catch(() => {});
+      }
     } catch {
       /* ignore */
     }
+    setAudioPlaying(false);
     setVideoUrl(null);
 
     const userBubble =
@@ -369,12 +379,14 @@ export default function VisitorExperience({
 
   return (
     <div className="relative mx-auto flex h-dvh max-w-md flex-col overflow-hidden bg-[var(--bg)]">
-      {/* Narration audio (A2E TTS fast path) — hidden, played over the loop video. */}
+      {/* Narration audio (A2E TTS fast path) — hidden, played over the loop
+          video. Deliberately NO onPlay handler: audioPlaying is set explicitly
+          in playNarration(), so the silent autoplay-unlock play() in run() can
+          never flip the talking state (and animate the video) while thinking. */}
       <audio
         ref={audioRef}
         playsInline
         hidden
-        onPlay={() => setAudioPlaying(true)}
         onEnded={() => setAudioPlaying(false)}
         onPause={() => setAudioPlaying(false)}
         onError={() => setAudioPlaying(false)}
