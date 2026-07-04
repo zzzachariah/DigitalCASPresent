@@ -540,16 +540,24 @@ export default function VisitorExperience({
         </div>
       </div>
 
-      {/* ── Compact control bar (collapsible) ─────────────────────── */}
-      {controlsOpen ? (
-        <div className="shrink-0 bg-white">
-          {/* grip handle — tap to collapse */}
+      {/* ── Compact control bar (collapsible, animated) ────────────
+           Both states stay mounted; the grid-rows 0fr↔1fr trick animates the
+           height smoothly without measuring content. ── */}
+      <div
+        className={`grid shrink-0 transition-[grid-template-rows] duration-300 ease-in-out ${
+          controlsOpen ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+        }`}
+      >
+        <div className="overflow-hidden">
+        <div className="bg-white">
+          {/* grip handle — tap to collapse (with a text hint) */}
           <button
             onClick={() => setControlsOpen(false)}
-            className="flex w-full items-center justify-center py-1.5"
+            className="flex w-full flex-col items-center gap-0.5 pb-1 pt-1.5"
             aria-label={t.collapse}
           >
             <span className="h-1 w-10 rounded-full bg-black/15" />
+            <span className="text-[11px] text-ink-mute">{t.collapse} ⌄</span>
           </button>
 
           <div className="px-4">
@@ -608,16 +616,26 @@ export default function VisitorExperience({
             </button>
           </form>
         </div>
-      ) : (
-        <div className="shrink-0 bg-white px-4 py-2.5">
-          <button
-            onClick={() => setControlsOpen(true)}
-            className="flex w-full items-center justify-center gap-1.5 rounded-2xl bg-brand-50 py-2.5 text-sm font-medium text-brand-700 active:scale-[0.98]"
-          >
-            <span className="text-xs">⌃</span> {t.moreOptions}
-          </button>
         </div>
-      )}
+      </div>
+
+      {/* collapsed pill — translucent, no solid white strip behind it */}
+      <div
+        className={`grid shrink-0 transition-[grid-template-rows] duration-300 ease-in-out ${
+          controlsOpen ? "grid-rows-[0fr]" : "grid-rows-[1fr]"
+        }`}
+      >
+        <div className="overflow-hidden">
+          <div className="px-4 py-2.5">
+            <button
+              onClick={() => setControlsOpen(true)}
+              className="flex w-full items-center justify-center gap-1.5 rounded-2xl bg-white/55 py-2.5 text-sm font-medium text-ink-soft ring-1 ring-black/10 backdrop-blur-md active:scale-[0.98]"
+            >
+              <span className="text-xs">⌃</span> {t.moreOptions}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
