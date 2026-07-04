@@ -44,6 +44,8 @@ export default function PersonEditor({
 
   const [pregenerating, setPregenerating] = useState<Set<string>>(new Set());
   const [bulkPregenerating, setBulkPregenerating] = useState(false);
+  // Sections whose pre-generated answer editor is expanded.
+  const [answersOpen, setAnswersOpen] = useState<Set<string>>(new Set());
 
   const [parsing, setParsing] = useState(false);
   const [sectioning, setSectioning] = useState(false);
@@ -71,6 +73,27 @@ export default function PersonEditor({
       )
     );
   }
+  // Edit a pre-generated answer directly (does NOT clear the cache like a
+  // title/content edit does). An emptied text is kept as "" so the textarea
+  // doesn't vanish mid-edit — the chat route treats empty as "no cache" and
+  // falls back to live generation for that language.
+  function updateCachedAnswer(id: string, key: "en" | "zh" | "bilingual", text: string) {
+    setSections((prev) =>
+      prev.map((s) =>
+        s.id === id ? { ...s, cachedAnswers: { ...(s.cachedAnswers || {}), [key]: text } } : s
+      )
+    );
+  }
+
+  function toggleAnswersOpen(id: string) {
+    setAnswersOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
   function removeSection(id: string) {
     setSections((prev) => prev.filter((s) => s.id !== id));
   }
@@ -611,10 +634,40 @@ export default function PersonEditor({
                   )}
                 </button>
                 {s.cachedAnswers && Object.keys(s.cachedAnswers).length > 0 && (
-                  <span className="text-xs text-green-600">
-                    ✅ 已生成（{Object.keys(s.cachedAnswers).join(" / ")}）
-                  </span>
+                  <>
+                    <span className="text-xs text-green-600">
+                      ✅ 已生成（{Object.keys(s.cachedAnswers).join(" / ")}）
+                    </span>
+                    <button
+                      className="chip bg-white text-xs text-ink-soft ring-1 ring-black/10 hover:bg-gray-50"
+                      onClick={() => toggleAnswersOpen(s.id)}
+                    >
+                      {answersOpen.has(s.id) ? "收起讲解 ⌃" : "📝 查看/编辑讲解"}
+                    </button>
+                  </>
                 )}
+              </div>
+            )}
+            {/* Editable pre-generated answers, one per language variant. */}
+            {isEdit && answersOpen.has(s.id) && s.cachedAnswers && (
+              <div className="space-y-2 rounded-2xl bg-brand-50/60 p-3">
+                {(Object.entries(s.cachedAnswers) as ["en" | "zh" | "bilingual", string][]).map(
+                  ([key, text]) => (
+                    <div key={key}>
+                      <p className="mb-1 text-xs font-medium text-ink-soft">
+                        {key === "zh" ? "中文讲解" : key === "en" ? "英文讲解 · English" : "双语讲解 · Bilingual"}
+                      </p>
+                      <textarea
+                        className="input min-h-[110px] resize-y bg-white text-sm leading-relaxed"
+                        value={text}
+                        onChange={(e) => updateCachedAnswer(s.id, key, e.target.value)}
+                      />
+                    </div>
+                  )
+                )}
+                <p className="text-xs text-ink-mute">
+                  改完后点底部「保存修改」生效；清空某段文字 = 该语言恢复为现场实时生成。
+                </p>
               </div>
             )}
           </div>
