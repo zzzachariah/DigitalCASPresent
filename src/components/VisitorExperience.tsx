@@ -411,8 +411,9 @@ export default function VisitorExperience({
         </div>
       </div>
 
-      {/* ── Digital human — fills remaining space; nothing overlaps it ── */}
-      <div className="relative min-h-0 flex-1 overflow-hidden bg-gradient-to-b from-brand-100 to-brand-50">
+      {/* ── Digital human — fills remaining space. Neutral backdrop (no blue
+           frame) so the letterboxed area around the contained video blends in. ── */}
+      <div className="relative min-h-0 flex-1 overflow-hidden bg-[var(--bg)]">
         {(stage === "thinking" || videoLoading) && <TopProgress />}
 
         {/* language toggle — a bare floating ring, no filled background, so it
@@ -422,7 +423,7 @@ export default function VisitorExperience({
             setLangTouched(true);
             setUiLang((l) => (l === "zh" ? "en" : "zh"));
           }}
-          className="absolute right-3 top-3 z-10 grid h-9 w-9 place-items-center rounded-full text-xs font-medium text-white ring-1 ring-inset ring-white/80 backdrop-blur-[2px]"
+          className="absolute right-3 top-3 z-10 grid h-9 w-9 place-items-center rounded-full text-xs font-medium text-ink-soft ring-1 ring-inset ring-black/20 backdrop-blur-[2px]"
           title="切换语言 / Toggle language"
         >
           {uiLang === "zh" ? "EN" : "中"}
@@ -487,38 +488,44 @@ export default function VisitorExperience({
           // eslint-disable-next-line @next/next/no-img-element
           <img src={displayImage} alt={person.name} className="absolute inset-0 h-full w-full object-contain" />
         ) : (
-          <div className="absolute inset-0 grid place-items-center bg-brand-50 text-7xl">🙂</div>
+          <div className="absolute inset-0 grid place-items-center text-7xl">🙂</div>
         )}
-      </div>
 
-      {/* ── Caption panel — sized to its content (capped + scrollable), so it
-           never forces a big empty block when there isn't much to show yet. ── */}
-      <div className="max-h-[34dvh] shrink-0 overflow-y-auto bg-[var(--bg)] px-4 py-3">
-        {lastUser && (stage === "thinking" || talking) && (
-          <div className="mb-2 flex justify-end">
-            <span className="max-w-[80%] truncate rounded-full bg-brand-50 px-3 py-1 text-xs text-brand-700 shadow-soft">
-              {lastUser.text}
-            </span>
+        {/* ── Caption — a translucent rounded bubble floating over the video
+             (deliberately allowed to overlap the person a little). ── */}
+        <div className="absolute inset-x-0 bottom-0 z-10 p-3">
+          {lastUser && (stage === "thinking" || talking) && (
+            <div className="mb-2 flex justify-end">
+              <span className="max-w-[80%] truncate rounded-full bg-white/55 px-3 py-1 text-xs text-ink-soft backdrop-blur-md">
+                {lastUser.text}
+              </span>
+            </div>
+          )}
+          <div className="max-h-[32dvh] overflow-y-auto rounded-3xl bg-white/55 px-4 py-3 backdrop-blur-md">
+            {stage === "thinking" ? (
+              <span className="flex items-center gap-1.5 text-ink-mute">
+                <Dot /> <Dot d="0.15s" /> <Dot d="0.3s" />
+                <span className="ml-1 text-sm">{t.thinking}</span>
+              </span>
+            ) : (
+              <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-ink">{caption}</p>
+            )}
           </div>
-        )}
-        {/* The digital human's spoken text — plain, no card/background box. */}
-        <div className="px-1">
-          {stage === "thinking" ? (
-            <span className="flex items-center gap-1.5 text-ink-mute">
-              <Dot /> <Dot d="0.15s" /> <Dot d="0.3s" />
-              <span className="ml-1 text-sm">{t.thinking}</span>
-            </span>
-          ) : (
-            <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-ink">{caption}</p>
+          {error && (
+            <p className="mt-2 rounded-2xl bg-white/55 px-3 py-1.5 text-sm text-red-600 backdrop-blur-md">
+              {error}
+            </p>
+          )}
+          {/* replay */}
+          {stage === "ready" && !talking && !videoLoading && messages.length > 0 && (
+            <button
+              onClick={replay}
+              className="chip mt-2 bg-white/55 text-ink-soft backdrop-blur-md active:scale-95"
+            >
+              ↻ {t.replay}
+            </button>
           )}
         </div>
-        {error && <p className="mt-2 px-1 text-sm text-red-500">{error}</p>}
-        {/* replay */}
-        {stage === "ready" && !talking && !videoLoading && messages.length > 0 && (
-          <button onClick={replay} className="chip mt-2 bg-white text-ink-soft shadow-soft ring-1 ring-black/5 active:scale-95">
-            ↻ {t.replay}
-          </button>
-        )}
       </div>
 
       {/* ── Compact control bar (collapsible) ─────────────────────── */}
