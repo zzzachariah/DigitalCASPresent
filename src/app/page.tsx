@@ -19,8 +19,11 @@ export default function Home() {
       </p>
 
       <div className="mt-8 w-full space-y-3">
-        <Link href="/admin" className="btn-primary w-full">
-          进入后台 · Admin
+        <Link href="/submit" className="btn-primary w-full">
+          同学提交讲稿 · Submit my talk
+        </Link>
+        <Link href="/admin" className="btn-ghost w-full">
+          老师后台 · Admin
         </Link>
         <p className="text-xs text-ink-mute">
           访客无需从这里进入 —— 直接扫描专属二维码即可。

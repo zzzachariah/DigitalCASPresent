@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { readJson } from "@/lib/http";
 
 export default function LoginForm() {
   const [password, setPassword] = useState("");
@@ -23,8 +24,8 @@ export default function LoginForm() {
       return;
     }
     setLoading(false);
-    const data = await res.json().catch(() => ({}));
-    setError(data.error || "登录失败");
+    const data = await readJson(res);
+    setError(data.error || "登录失败 / Login failed");
   }
 
   return (

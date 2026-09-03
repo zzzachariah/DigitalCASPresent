@@ -1,61 +1,116 @@
 import { promises as fs } from "fs";
 import path from "path";
-import { nanoid } from "nanoid";
 import type { Person } from "./types";
-import { contentTypeForExt, uniqueSlug } from "./store-shared";
+import {
+  buildPerson,
+  contentTypeForExt,
+  newId,
+  safeId,
+  uniqueSlug,
+  type CreatePersonInput,
+} from "./store-shared";
 
-// Filesystem driver — default for local dev (zero external setup).
-// Persists to ./data. NOT used on Vercel (read-only FS); see store-blob.ts.
+// Filesystem driver — default for local dev (zero external setup) and for a
+// single always-on server. One JSON file per person under ./data/people so
+// concurrent writes to different people never clobber each other.
+// NOT used on Vercel (read-only FS); see store-blob.ts.
 
 const DATA_DIR = path.join(process.cwd(), "data");
-const DB_FILE = path.join(DATA_DIR, "people.json");
+const PEOPLE_DIR = path.join(DATA_DIR, "people");
 const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
+/** Pre-refactor single-file store; migrated to per-person files on first use. */
+const LEGACY_DB = path.join(DATA_DIR, "people.json");
+const LEGACY_DONE = path.join(DATA_DIR, "people.legacy.json");
+
+const personFile = (id: string) => path.join(PEOPLE_DIR, `${id}.json`);
 
 async function ensureDirs() {
+  await fs.mkdir(PEOPLE_DIR, { recursive: true });
   await fs.mkdir(UPLOAD_DIR, { recursive: true });
 }
 
-async function readDb(): Promise<Person[]> {
+async function readPersonFile(file: string): Promise<Person | null> {
   try {
-    return JSON.parse(await fs.readFile(DB_FILE, "utf8")) as Person[];
+    return JSON.parse(await fs.readFile(file, "utf8")) as Person;
   } catch {
-    return [];
+    return null;
   }
 }
 
-async function writeDb(people: Person[]): Promise<void> {
+/** Atomic write: temp file + rename, so a crash never leaves a half-written record. */
+async function writePerson(p: Person): Promise<void> {
   await ensureDirs();
-  await fs.writeFile(DB_FILE, JSON.stringify(people, null, 2), "utf8");
+  const file = personFile(p.id);
+  const tmp = `${file}.${newId()}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(p, null, 2), "utf8");
+  await fs.rename(tmp, file);
+}
+
+let migration: Promise<void> | null = null;
+/** One-time split of the old data/people.json into per-person files. */
+function migrateLegacy(): Promise<void> {
+  if (!migration) {
+    migration = (async () => {
+      await ensureDirs();
+      let raw: string;
+      try {
+        raw = await fs.readFile(LEGACY_DB, "utf8");
+      } catch {
+        return; // nothing to migrate
+      }
+      let people: Person[] = [];
+      try {
+        people = JSON.parse(raw) as Person[];
+      } catch {
+        console.error("[store-fs] legacy people.json is not valid JSON; leaving it alone");
+        return;
+      }
+      for (const p of people) {
+        if (!safeId(p?.id)) continue;
+        const exists = await readPersonFile(personFile(p.id));
+        if (!exists) await writePerson(p);
+      }
+      await fs.rename(LEGACY_DB, LEGACY_DONE);
+      console.log(`[store-fs] migrated ${people.length} people from people.json → data/people/`);
+    })().catch((err) => {
+      migration = null; // let the next request retry
+      throw err;
+    });
+  }
+  return migration;
+}
+
+async function readAll(): Promise<Person[]> {
+  await migrateLegacy();
+  let files: string[];
+  try {
+    files = await fs.readdir(PEOPLE_DIR);
+  } catch {
+    return [];
+  }
+  const people = await Promise.all(
+    files.filter((f) => f.endsWith(".json")).map((f) => readPersonFile(path.join(PEOPLE_DIR, f)))
+  );
+  return people.filter((p): p is Person => !!p);
 }
 
 export async function listPeople(): Promise<Person[]> {
-  return (await readDb()).sort((a, b) => a.createdAt - b.createdAt);
+  return (await readAll()).sort((a, b) => a.createdAt - b.createdAt);
 }
 
 export async function getPerson(idOrSlug: string): Promise<Person | null> {
-  const people = await readDb();
-  return people.find((p) => p.id === idOrSlug || p.slug === idOrSlug) ?? null;
+  if (!safeId(idOrSlug)) return null;
+  await migrateLegacy();
+  const byId = await readPersonFile(personFile(idOrSlug));
+  if (byId) return byId;
+  return (await readAll()).find((p) => p.slug === idOrSlug) ?? null;
 }
 
-export async function createPerson(
-  input: Pick<Person, "name" | "subtitle" | "gender" | "script" | "sections" | "language">
-): Promise<Person> {
-  const people = await readDb();
-  const now = Date.now();
-  const person: Person = {
-    id: nanoid(10),
-    slug: uniqueSlug(input.name, new Set(people.map((p) => p.slug))),
-    name: input.name,
-    subtitle: input.subtitle,
-    gender: input.gender,
-    script: input.script,
-    sections: input.sections,
-    language: input.language,
-    createdAt: now,
-    updatedAt: now,
-  };
-  people.push(person);
-  await writeDb(people);
+export async function createPerson(input: CreatePersonInput): Promise<Person> {
+  const taken = new Set((await readAll()).map((p) => p.slug));
+  const slug = await uniqueSlug(input.name, async (s) => taken.has(s));
+  const person = buildPerson(input, slug);
+  await writePerson(person);
   return person;
 }
 
@@ -63,65 +118,90 @@ export async function updatePerson(
   id: string,
   patch: Partial<Omit<Person, "id" | "createdAt">>
 ): Promise<Person | null> {
-  const people = await readDb();
-  const idx = people.findIndex((p) => p.id === id);
-  if (idx === -1) return null;
-  people[idx] = { ...people[idx], ...patch, updatedAt: Date.now() };
-  await writeDb(people);
-  return people[idx];
+  if (!safeId(id)) return null;
+  await migrateLegacy();
+  const current = await readPersonFile(personFile(id));
+  if (!current) return null;
+  const next: Person = { ...current, ...patch, id: current.id, createdAt: current.createdAt, updatedAt: Date.now() };
+  await writePerson(next);
+  return next;
 }
 
-export async function deletePerson(id: string): Promise<boolean> {
-  const people = await readDb();
-  const next = people.filter((p) => p.id !== id);
-  if (next.length === people.length) return false;
-  await writeDb(next);
+async function removeUploads(id: string) {
   try {
     const files = await fs.readdir(UPLOAD_DIR);
     await Promise.all(
-      files
-        .filter((f) => f.startsWith(id + "."))
-        .map((f) => fs.unlink(path.join(UPLOAD_DIR, f)))
+      files.filter((f) => f.startsWith(id + ".")).map((f) => fs.unlink(path.join(UPLOAD_DIR, f)))
     );
   } catch {
     /* ignore */
   }
+}
+
+export async function deletePerson(id: string): Promise<boolean> {
+  if (!safeId(id)) return false;
+  await migrateLegacy();
+  try {
+    await fs.unlink(personFile(id));
+  } catch {
+    return false;
+  }
+  await removeUploads(id);
   return true;
+}
+
+async function unlinkMatching(prefix: string) {
+  try {
+    const files = await fs.readdir(UPLOAD_DIR);
+    await Promise.all(
+      files.filter((f) => f.startsWith(prefix)).map((f) => fs.unlink(path.join(UPLOAD_DIR, f)))
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
+function cleanExt(ext: string, fallback: string): string {
+  return ext.replace(/[^a-z0-9]/gi, "").toLowerCase() || fallback;
 }
 
 export async function savePhoto(id: string, buffer: Buffer, ext: string): Promise<string> {
   await ensureDirs();
-  const safeExt = ext.replace(/[^a-z0-9]/gi, "").toLowerCase() || "jpg";
+  const safeExt = cleanExt(ext, "jpg");
+  // Remove the previous photo (any extension) but keep cartoon/loop files.
   try {
     const files = await fs.readdir(UPLOAD_DIR);
     await Promise.all(
       files
-        .filter((f) => f.startsWith(id + "."))
+        .filter((f) => f.startsWith(id + ".") && !f.includes(".cartoon.") && !f.includes(".loop."))
         .map((f) => fs.unlink(path.join(UPLOAD_DIR, f)))
     );
   } catch {
     /* ignore */
   }
   await fs.writeFile(path.join(UPLOAD_DIR, `${id}.${safeExt}`), buffer);
-  const photoUrl = `/api/photo/${id}`;
+  // Version the URL so browsers/CDNs don't keep showing the replaced photo.
+  const photoUrl = `/api/photo/${id}?v=${Date.now()}`;
   await updatePerson(id, { photoUrl });
   return photoUrl;
 }
 
 export async function saveCartoon(id: string, buffer: Buffer, ext: string): Promise<string> {
   await ensureDirs();
-  const safeExt = ext.replace(/[^a-z0-9]/gi, "").toLowerCase() || "png";
+  const safeExt = cleanExt(ext, "png");
+  await unlinkMatching(`${id}.cartoon.`);
   await fs.writeFile(path.join(UPLOAD_DIR, `${id}.cartoon.${safeExt}`), buffer);
-  const cartoonUrl = `/api/photo/${id}.cartoon`;
+  const cartoonUrl = `/api/photo/${id}.cartoon?v=${Date.now()}`;
   await updatePerson(id, { cartoonUrl });
   return cartoonUrl;
 }
 
 export async function saveLoopVideo(id: string, buffer: Buffer, ext: string): Promise<string> {
   await ensureDirs();
-  const safeExt = ext.replace(/[^a-z0-9]/gi, "").toLowerCase() || "mp4";
+  const safeExt = cleanExt(ext, "mp4");
+  await unlinkMatching(`${id}.loop.`);
   await fs.writeFile(path.join(UPLOAD_DIR, `${id}.loop.${safeExt}`), buffer);
-  const loopVideoUrl = `/api/photo/${id}.loop`;
+  const loopVideoUrl = `/api/photo/${id}.loop?v=${Date.now()}`;
   await updatePerson(id, { loopVideoUrl });
   return loopVideoUrl;
 }
@@ -129,6 +209,7 @@ export async function saveLoopVideo(id: string, buffer: Buffer, ext: string): Pr
 export async function readPhoto(
   id: string
 ): Promise<{ buffer: Buffer; contentType: string } | null> {
+  if (!/^[A-Za-z0-9_-]{1,40}(\.(cartoon|loop))?$/.test(id)) return null;
   try {
     const files = await fs.readdir(UPLOAD_DIR);
     const wantCartoon = id.endsWith(".cartoon");
@@ -137,6 +218,7 @@ export async function readPhoto(
     const file = files.find(
       (f) =>
         f.startsWith(id + ".") &&
+        !f.endsWith(".tmp") &&
         (marker ? f.includes(marker) : !f.includes(".cartoon.") && !f.includes(".loop."))
     );
     if (!file) return null;

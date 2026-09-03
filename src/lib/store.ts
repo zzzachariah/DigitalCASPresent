@@ -6,11 +6,16 @@
 //     environment (resolved by value, so a non-standard env var name still
 //     works, and a runtime-only secret is never baked to undefined at build).
 //   • Filesystem   — otherwise (local dev, or a single always-on server).
+//
+// Both drivers keep ONE record per person, so many people can be created or
+// edited at the same time (e.g. a class submitting at once) without one
+// write overwriting another. Two simultaneous edits of the SAME person still
+// race (last write wins) — acceptable for this tool.
 // ─────────────────────────────────────────────────────────────────────
 
 import * as fsDriver from "./store-fs";
 import * as blobDriver from "./store-blob";
-import { blobConfigured } from "./store-shared";
+import { blobConfigured, type CreatePersonInput } from "./store-shared";
 import type { Person } from "./types";
 
 function driver() {
@@ -23,9 +28,7 @@ export function listPeople(): Promise<Person[]> {
 export function getPerson(idOrSlug: string): Promise<Person | null> {
   return driver().getPerson(idOrSlug);
 }
-export function createPerson(
-  input: Pick<Person, "name" | "subtitle" | "gender" | "script" | "sections" | "language">
-): Promise<Person> {
+export function createPerson(input: CreatePersonInput): Promise<Person> {
   return driver().createPerson(input);
 }
 export function updatePerson(
@@ -52,7 +55,8 @@ export function readPhoto(
   return driver().readPhoto(id);
 }
 
-export { toPublic } from "./store-shared";
+export { toPublic, toOwner, isPublished } from "./store-shared";
+export type { CreatePersonInput } from "./store-shared";
 
 export function storageDriverName(): "vercel-blob" | "filesystem" {
   return blobConfigured() ? "vercel-blob" : "filesystem";
@@ -65,7 +69,7 @@ export function storageWritable(): { ok: true } | { ok: false; reason: string } 
     return {
       ok: false,
       reason:
-        "线上还没有连接持久化存储,无法保存。请在 Vercel 项目里 Storage → Create → Blob,连接到本项目后 Redeploy,再重试。 / No storage connected: create & connect a Vercel Blob store, then redeploy.",
+        "线上还没有连接持久化存储，无法保存。请在 Vercel 项目里 Storage → Create → Blob，连接到本项目后 Redeploy，再重试。 / No storage connected: create & connect a Vercel Blob store, then redeploy.",
     };
   }
   return { ok: true };

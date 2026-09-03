@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { isAdmin } from "@/lib/auth";
+import { adminConfigured, isAdmin } from "@/lib/auth";
 import { storageDriverName } from "@/lib/store";
 import { resolveBlobToken } from "@/lib/store-shared";
 
@@ -22,6 +22,7 @@ export async function GET() {
   return NextResponse.json({
     storage: storageDriverName(), // "vercel-blob" once Blob is wired
     onVercel: !!process.env.VERCEL,
+    adminPasswordSet: adminConfigured(),
     hasBlobTokenStandard: !!process.env.BLOB_READ_WRITE_TOKEN,
     tokenResolved: !!resolveBlobToken(),
     // OIDC path: works without a manually-copied token if both are present.
@@ -31,6 +32,7 @@ export async function GET() {
     aiKeySet: !!process.env.AI_API_KEY,
     aiModel: process.env.AI_MODEL || "(default: claude-opus-4-8)",
     avatarProvider: process.env.AVATAR_PROVIDER || "mock",
+    a2eKeySet: !!process.env.A2E_API_KEY,
     didKeySet: !!process.env.DID_API_KEY,
     baseUrl: process.env.NEXT_PUBLIC_BASE_URL || "(not set)",
   });

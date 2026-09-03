@@ -1,5 +1,12 @@
 // ─── Core data model ────────────────────────────────────────────────
 
+export type AnswerLang = "en" | "zh" | "bilingual";
+export type PersonLanguage = "auto" | AnswerLang;
+/** Publication state of a person's page. */
+export type PersonStatus = "pending" | "approved";
+/** Who created the record. */
+export type PersonSource = "admin" | "student";
+
 /** One logical part of a person's talk that a visitor can choose to hear. */
 export interface Section {
   id: string;
@@ -12,7 +19,7 @@ export interface Section {
   /** Pre-generated explanation text, keyed by resolved answer language, so
    *  opening this section can skip the AI call entirely (instant). Follow-up
    *  questions are always generated live — never cached. */
-  cachedAnswers?: Partial<Record<"en" | "zh" | "bilingual", string>>;
+  cachedAnswers?: Partial<Record<AnswerLang, string>>;
 }
 
 /** A person = one digital human = one QR code. */
@@ -37,13 +44,29 @@ export interface Person {
   /** Script divided into the parts a visitor can pick. */
   sections: Section[];
   /** Preferred default answer language: "auto" follows the visitor. */
-  language: "auto" | "en" | "zh" | "bilingual";
+  language: PersonLanguage;
+  /** Admin-created people are approved immediately; student self-submissions
+   *  start "pending" until an admin approves. Missing = approved (records that
+   *  predate this field). */
+  status?: PersonStatus;
+  source?: PersonSource;
+  /** Secret that lets the submitting student view/edit their own record and
+   *  preview the unpublished visitor page. Never sent to visitors. */
+  editToken?: string;
+  /** When the student last submitted or re-submitted. */
+  submittedAt?: number;
   createdAt: number;
   updatedAt: number;
 }
 
+/** The fields a client is allowed to set when creating / editing a person. */
+export type PersonInput = Pick<
+  Person,
+  "name" | "subtitle" | "gender" | "script" | "sections" | "language"
+>;
+
 /** Public-facing shape (never leaks the full script to the browser wholesale
- *  beyond what's needed; we do send section content so the menu can render). */
+ *  beyond what's needed; we do send section titles so the menu can render). */
 export interface PublicPerson {
   id: string;
   slug: string;
@@ -53,6 +76,7 @@ export interface PublicPerson {
   cartoonUrl?: string;
   loopVideoUrl?: string;
   language: Person["language"];
+  status: PersonStatus;
   sections: { id: string; title: string; hint?: string }[];
 }
 

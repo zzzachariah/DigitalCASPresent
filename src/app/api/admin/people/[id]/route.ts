@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { nanoid } from "nanoid";
 import { isAdmin } from "@/lib/auth";
 import { deletePerson, getPerson, updatePerson, storageWritable } from "@/lib/store";
-import type { Section } from "@/lib/types";
+import { parsePersonInput } from "@/lib/validate";
+import type { Person } from "@/lib/types";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET(
   _req: NextRequest,
@@ -22,35 +23,15 @@ export async function PUT(
 ) {
   if (!isAdmin()) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-  const body = (await req.json().catch(() => ({}))) as {
-    name?: string;
-    subtitle?: string;
-    gender?: string;
-    script?: string;
-    sections?: Partial<Section>[];
-    language?: string;
-    cartoonUrl?: string;
-    loopVideoUrl?: string;
-  };
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const parsed = parsePersonInput(body, { partial: true, allowCachedAnswers: true });
+  if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
 
-  const patch: Record<string, unknown> = {};
-  if (typeof body.name === "string") patch.name = body.name.trim();
-  if (typeof body.subtitle === "string") patch.subtitle = body.subtitle.trim() || undefined;
-  if (body.gender === "male" || body.gender === "female") patch.gender = body.gender;
-  else if (body.gender === "" || body.gender === null) patch.gender = undefined;
-  if (typeof body.script === "string") patch.script = body.script.trim();
-  if (Array.isArray(body.sections)) {
-    patch.sections = body.sections.map((s) => ({
-      id: s.id || nanoid(8),
-      title: s.title?.trim() || "Untitled",
-      hint: s.hint?.trim() || undefined,
-      content: s.content?.trim() || "",
-      cachedAnswers: s.cachedAnswers,
-    }));
-  }
-  if (body.language && ["auto", "en", "zh", "bilingual"].includes(body.language)) {
-    patch.language = body.language;
-  }
+  const patch: Partial<Omit<Person, "id" | "createdAt">> = { ...parsed.value };
+
+  // Publication state (student submissions start "pending").
+  if (body.status === "approved" || body.status === "pending") patch.status = body.status;
+
   // These are generated separately (by the cartoon/loop-video buttons, which
   // already persisted them). Re-asserting them here — instead of relying on
   // an omitted field implying "keep existing" — closes any gap where a save
@@ -81,6 +62,8 @@ export async function DELETE(
   { params }: { params: { id: string } }
 ) {
   if (!isAdmin()) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  const writable = storageWritable();
+  if (!writable.ok) return NextResponse.json({ error: writable.reason }, { status: 503 });
   const ok = await deletePerson(params.id);
   return NextResponse.json({ ok });
 }

@@ -32,3 +32,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# per-person records (new layout) + the renamed legacy file after migration
+/data/people/
+/data/people.legacy.json

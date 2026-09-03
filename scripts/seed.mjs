@@ -4,6 +4,7 @@ import { promises as fs } from "fs";
 import path from "path";
 
 const DATA_DIR = path.join(process.cwd(), "data");
+const PEOPLE_DIR = path.join(DATA_DIR, "people");
 const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 
 function avatarSvg(initials, c1, c2) {
@@ -96,8 +97,8 @@ function splitByKeys(script, sections) {
 
 async function main() {
   await fs.mkdir(UPLOAD_DIR, { recursive: true });
+  await fs.mkdir(PEOPLE_DIR, { recursive: true });
   const now = Date.now();
-  const records = [];
 
   for (const p of people) {
     const contents = splitByKeys(p.script, p.sections);
@@ -114,7 +115,8 @@ async function main() {
       "utf8"
     );
 
-    records.push({
+    // One JSON file per person (see src/lib/store-fs.ts).
+    const record = {
       id: p.id,
       slug: p.slug,
       name: p.name,
@@ -123,17 +125,18 @@ async function main() {
       script: p.script,
       sections,
       language: p.language,
+      status: "approved",
+      source: "admin",
       createdAt: now,
       updatedAt: now,
-    });
+    };
+    await fs.writeFile(
+      path.join(PEOPLE_DIR, `${p.id}.json`),
+      JSON.stringify(record, null, 2),
+      "utf8"
+    );
   }
-
-  await fs.writeFile(
-    path.join(DATA_DIR, "people.json"),
-    JSON.stringify(records, null, 2),
-    "utf8"
-  );
-  console.log(`Seeded ${records.length} people → data/people.json`);
+  console.log(`Seeded ${people.length} people → data/people/*.json`);
   console.log("Visitor pages: /p/emma  and  /p/zhangwei");
 }
 

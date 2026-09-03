@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAdmin } from "@/lib/auth";
 import { getPerson, savePhoto, storageWritable } from "@/lib/store";
+import { readUploadedImage } from "@/lib/image";
 
 export const runtime = "nodejs";
 
@@ -18,25 +19,13 @@ export async function POST(
   const person = await getPerson(params.id);
   if (!person) return NextResponse.json({ error: "not found" }, { status: 404 });
 
-  const form = await req.formData();
-  const file = form.get("photo");
-  if (!(file instanceof File)) {
-    return NextResponse.json({ error: "缺少照片 / No photo provided" }, { status: 400 });
-  }
-  if (file.size > 8 * 1024 * 1024) {
-    return NextResponse.json({ error: "照片过大（<8MB）/ Photo too large" }, { status: 400 });
-  }
-
-  const buffer = Buffer.from(await file.arrayBuffer());
-  const ext =
-    file.type === "image/png"
-      ? "png"
-      : file.type === "image/webp"
-        ? "webp"
-        : file.name.split(".").pop()?.toLowerCase() || "jpg";
+  const form = await req.formData().catch(() => null);
+  if (!form) return NextResponse.json({ error: "缺少照片 / No photo provided" }, { status: 400 });
+  const img = await readUploadedImage(form, "photo");
+  if (!img.ok) return NextResponse.json({ error: img.error }, { status: img.status });
 
   try {
-    const photoUrl = await savePhoto(params.id, buffer, ext);
+    const photoUrl = await savePhoto(person.id, img.buffer, img.kind.ext);
     return NextResponse.json({ photoUrl });
   } catch (err) {
     console.error("[photo:save] failed:", err);

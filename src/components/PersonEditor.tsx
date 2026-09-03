@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Person, Section } from "@/lib/types";
 import { readJson } from "@/lib/http";
+import { adminApi, type EditorApi, type SavePayload } from "@/lib/editor-api";
 import { LoadingOverlay, Spinner } from "./Loading";
 
 const LANGUAGES: { value: Person["language"]; label: string }[] = [
@@ -12,27 +13,66 @@ const LANGUAGES: { value: Person["language"]; label: string }[] = [
   { value: "bilingual", label: "中英双语 (Bilingual)" },
 ];
 
+// Must match the server's magic-byte whitelist (lib/image.ts). Listing the
+// types explicitly (not image/*) also makes iOS convert HEIC → JPEG on pick.
+const PHOTO_ACCEPT = "image/jpeg,image/png,image/webp";
+const PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp"];
+const PHOTO_MAX = 8 * 1024 * 1024;
+
+export type EditorMode = "admin" | "student";
+
 function emptySection(): Section {
   return { id: Math.random().toString(36).slice(2, 10), title: "", hint: "", content: "" };
+}
+
+/** Poll an async generation task (cartoon / loop video) until the server
+ *  returns `doneKey`, reports an error, or we give up (~4 min). */
+async function pollTask(
+  url: string,
+  doneKey: "cartoonUrl" | "loopVideoUrl",
+  everyMs = 3000,
+  maxTries = 80
+): Promise<string> {
+  let lastStatus = "";
+  for (let i = 0; i < maxTries; i++) {
+    await new Promise((r) => setTimeout(r, everyMs));
+    const res = await fetch(url);
+    const data = await readJson(res);
+    if (!res.ok) throw new Error(data.error || "生成失败");
+    if (typeof data[doneKey] === "string" && data[doneKey]) return data[doneKey];
+    if (data.status) lastStatus = String(data.status); // still pending
+  }
+  throw new Error(`生成超时，请重试${lastStatus ? `（最后状态: ${lastStatus}）` : ""}`);
 }
 
 export default function PersonEditor({
   person,
   onSaved,
   onCancel,
+  mode = "admin",
+  api = adminApi,
 }: {
   person: Person | null;
   onSaved: (p: Person) => void;
   onCancel: () => void;
+  /** "student": the self-submission form — no admin-only generation tools. */
+  mode?: EditorMode;
+  api?: EditorApi;
 }) {
-  const isEdit = !!person;
+  const admin = mode === "admin";
+  // Once a brand-new record has been created, further saves in this editor
+  // UPDATE it — so a failed photo upload can be retried without creating a
+  // duplicate person.
+  const [created, setCreated] = useState<Person | null>(null);
+  const existing = person ?? created;
+  const isEdit = !!existing;
+
   const [name, setName] = useState(person?.name ?? "");
   const [subtitle, setSubtitle] = useState(person?.subtitle ?? "");
   const [gender, setGender] = useState<"" | "male" | "female">(person?.gender ?? "");
   const [language, setLanguage] = useState<Person["language"]>(person?.language ?? "auto");
   const [script, setScript] = useState(person?.script ?? "");
   const [sections, setSections] = useState<Section[]>(person?.sections ?? []);
-  const [photoUrl, setPhotoUrl] = useState<string | undefined>(person?.photoUrl);
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoPreview, setPhotoPreview] = useState<string | undefined>(person?.photoUrl);
 
@@ -61,6 +101,10 @@ export default function PersonEditor({
     if (error) errorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [error]);
 
+  function fail(e: unknown, fallback: string) {
+    setError(e instanceof Error ? e.message : fallback);
+  }
+
   function updateSection(id: string, patch: Partial<Section>) {
     // Editing the title/content invalidates any pre-generated answer (it was
     // written for the old text) — clear it so the "预生成" state stays honest.
@@ -75,8 +119,8 @@ export default function PersonEditor({
   }
   // Edit a pre-generated answer directly (does NOT clear the cache like a
   // title/content edit does). An emptied text is kept as "" so the textarea
-  // doesn't vanish mid-edit — the chat route treats empty as "no cache" and
-  // falls back to live generation for that language.
+  // doesn't vanish mid-edit — the server drops empty ones, and the chat route
+  // then falls back to live generation for that language.
   function updateCachedAnswer(id: string, key: "en" | "zh" | "bilingual", text: string) {
     setSections((prev) =>
       prev.map((s) =>
@@ -112,14 +156,9 @@ export default function PersonEditor({
     setError("");
     setParsing(true);
     try {
-      const fd = new FormData();
-      fd.append("file", file);
-      const res = await fetch("/api/admin/parse", { method: "POST", body: fd });
-      const data = await readJson(res);
-      if (!res.ok) throw new Error(data.error || "解析失败");
-      setScript(data.text);
+      setScript(await api.parse(file));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "解析失败");
+      fail(e, "解析失败");
     } finally {
       setParsing(false);
     }
@@ -127,91 +166,70 @@ export default function PersonEditor({
 
   async function autoSection() {
     if (!script.trim()) {
-      setError("请先粘贴或上传讲稿");
+      setError("请先粘贴或上传讲稿 / Paste or upload your script first");
       return;
     }
     setError("");
     setSectioning(true);
     try {
-      const res = await fetch("/api/admin/autosection", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ script }),
-      });
-      const data = await readJson(res);
-      if (!res.ok) throw new Error(data.error || "分段失败");
-      setSections(data.sections);
+      setSections(await api.autosection(script));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "分段失败");
+      fail(e, "分段失败");
     } finally {
       setSectioning(false);
     }
   }
 
   function onPickPhoto(file: File) {
+    if (!PHOTO_TYPES.includes(file.type)) {
+      setError("只支持 JPG / PNG / WebP 图片 / Only JPG, PNG or WebP images");
+      return;
+    }
+    if (file.size > PHOTO_MAX) {
+      setError("照片过大（≤8MB）/ Photo too large (max 8MB)");
+      return;
+    }
+    setError("");
     setPhotoFile(file);
     setPhotoPreview(URL.createObjectURL(file));
   }
 
   async function generateCartoon() {
-    if (!person) return;
+    if (!existing) return;
     setError("");
     setCartooning(true);
     try {
       // Start the (async) render, then poll until the cartoon is ready.
-      const startRes = await fetch(`/api/admin/people/${person.id}/cartoon`, { method: "POST" });
+      const startRes = await fetch(`/api/admin/people/${existing.id}/cartoon`, { method: "POST" });
       const startData = await readJson(startRes);
       if (!startRes.ok) throw new Error(startData.error || "卡通发起失败");
-      const taskId = startData.taskId as string;
-
-      for (let i = 0; i < 80; i++) {
-        await new Promise((r) => setTimeout(r, 3000)); // ~4 min max
-        const pRes = await fetch(
-          `/api/admin/people/${person.id}/cartoon?taskId=${encodeURIComponent(taskId)}`
-        );
-        const pData = await readJson(pRes);
-        if (!pRes.ok) throw new Error(pData.error || "卡通生成失败");
-        if (pData.cartoonUrl) {
-          setCartoonUrl(pData.cartoonUrl);
-          return;
-        }
-        // else { pending: true } → keep polling
-      }
-      throw new Error("卡通生成超时,请重试");
+      const url = await pollTask(
+        `/api/admin/people/${existing.id}/cartoon?taskId=${encodeURIComponent(startData.taskId)}`,
+        "cartoonUrl"
+      );
+      setCartoonUrl(url);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "卡通生成失败");
+      fail(e, "卡通生成失败");
     } finally {
       setCartooning(false);
     }
   }
 
   async function generateLoopVideo() {
-    if (!person) return;
+    if (!existing) return;
     setError("");
     setLoopGenerating(true);
     try {
-      const startRes = await fetch(`/api/admin/people/${person.id}/loop-video`, { method: "POST" });
+      const startRes = await fetch(`/api/admin/people/${existing.id}/loop-video`, { method: "POST" });
       const startData = await readJson(startRes);
       if (!startRes.ok) throw new Error(startData.error || "循环视频发起失败");
-      const taskId = startData.taskId as string;
-
-      let lastStatus = "";
-      for (let i = 0; i < 80; i++) {
-        await new Promise((r) => setTimeout(r, 3000)); // ~4 min max
-        const pRes = await fetch(
-          `/api/admin/people/${person.id}/loop-video?taskId=${encodeURIComponent(taskId)}`
-        );
-        const pData = await readJson(pRes);
-        if (!pRes.ok) throw new Error(pData.error || "循环视频生成失败");
-        if (pData.loopVideoUrl) {
-          setLoopVideoUrl(pData.loopVideoUrl);
-          return;
-        }
-        if (pData.status) lastStatus = pData.status;
-      }
-      throw new Error(`循环视频生成超时,请重试${lastStatus ? `（最后状态: ${lastStatus}）` : ""}`);
+      const url = await pollTask(
+        `/api/admin/people/${existing.id}/loop-video?taskId=${encodeURIComponent(startData.taskId)}`,
+        "loopVideoUrl"
+      );
+      setLoopVideoUrl(url);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "循环视频生成失败");
+      fail(e, "循环视频生成失败");
     } finally {
       setLoopGenerating(false);
     }
@@ -226,101 +244,79 @@ export default function PersonEditor({
     );
   }
 
-  async function pregenerateSection(sectionId: string) {
-    if (!person) return;
+  async function pregenerate(sectionId?: string) {
+    if (!existing) return;
     setError("");
-    setPregenerating((prev) => new Set(prev).add(sectionId));
+    if (sectionId) setPregenerating((prev) => new Set(prev).add(sectionId));
+    else setBulkPregenerating(true);
     try {
-      const res = await fetch(`/api/admin/people/${person.id}/pregenerate`, {
+      const res = await fetch(`/api/admin/people/${existing.id}/pregenerate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sectionId }),
+        body: JSON.stringify(sectionId ? { sectionId } : {}),
       });
       const data = await readJson(res);
       if (!res.ok) throw new Error(data.error || "预生成失败");
       mergeCachedAnswers(data.sections as Section[]);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "预生成失败");
+      fail(e, "预生成失败");
     } finally {
-      setPregenerating((prev) => {
-        const next = new Set(prev);
-        next.delete(sectionId);
-        return next;
-      });
-    }
-  }
-
-  async function pregenerateAll() {
-    if (!person) return;
-    setError("");
-    setBulkPregenerating(true);
-    try {
-      const res = await fetch(`/api/admin/people/${person.id}/pregenerate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      const data = await readJson(res);
-      if (!res.ok) throw new Error(data.error || "预生成失败");
-      mergeCachedAnswers(data.sections as Section[]);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "预生成失败");
-    } finally {
-      setBulkPregenerating(false);
+      if (sectionId) {
+        setPregenerating((prev) => {
+          const next = new Set(prev);
+          next.delete(sectionId);
+          return next;
+        });
+      } else {
+        setBulkPregenerating(false);
+      }
     }
   }
 
   async function save() {
     setError("");
-    if (!name.trim()) return setError("请填写姓名");
-    if (!script.trim()) return setError("请提供讲稿");
+    if (!name.trim()) return setError("请填写姓名 / Name is required");
+    if (!script.trim()) return setError("请提供讲稿 / Script is required");
     setSaving(true);
     try {
-      // Explicitly re-assert the already-generated cartoon/loop-video URLs on
-      // every save. They live in this component's local state (set by the
-      // generate buttons, which already persisted them server-side), but
-      // sending them again here closes any gap where a later "save" could
-      // otherwise clobber them with a stale/omitted value.
-      const payload = {
-        name,
-        subtitle,
-        gender,
-        language,
-        script,
-        sections,
-        cartoonUrl,
-        loopVideoUrl,
-      };
-      const res = await fetch(
-        isEdit ? `/api/admin/people/${person!.id}` : "/api/admin/people",
-        {
-          method: isEdit ? "PUT" : "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        }
-      );
-      const data = await readJson(res);
-      if (!res.ok) throw new Error(data.error || "保存失败");
-      let saved: Person = data.person;
+      const payload: SavePayload = { name, subtitle, gender, language, script, sections };
+      if (admin) {
+        // Re-assert the already-generated assets on every save (they were
+        // persisted by the generate buttons); see the PUT handler. Omitted
+        // when unknown so a stale editor can never clear a newer asset.
+        if (cartoonUrl) payload.cartoonUrl = cartoonUrl;
+        if (loopVideoUrl) payload.loopVideoUrl = loopVideoUrl;
+      }
+      let saved: Person = existing ? await api.update(existing.id, payload) : await api.create(payload);
+      if (!existing) setCreated(saved);
 
       if (photoFile) {
-        const fd = new FormData();
-        fd.append("photo", photoFile);
-        const pres = await fetch(`/api/admin/people/${saved.id}/photo`, {
-          method: "POST",
-          body: fd,
-        });
-        const pdata = await readJson(pres);
-        if (pres.ok) saved = { ...saved, photoUrl: pdata.photoUrl };
-        else throw new Error(pdata.error || "照片上传失败");
+        const photoUrl = await api.uploadPhoto(saved.id, photoFile);
+        saved = { ...saved, photoUrl };
+        setPhotoFile(null);
       }
       onSaved(saved);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "保存失败");
+      fail(e, "保存失败");
     } finally {
       setSaving(false);
     }
   }
+
+  const heading = admin
+    ? isEdit
+      ? "编辑同学"
+      : "新增同学"
+    : isEdit
+      ? "修改我的提交 · Edit"
+      : "提交我的讲稿 · Submit";
+  const saveLabel = admin
+    ? isEdit
+      ? "保存修改"
+      : "创建并生成二维码"
+    : isEdit
+      ? "重新提交审核 / Resubmit"
+      : "提交审核 / Submit";
 
   return (
     <div className="space-y-5 pb-28">
@@ -336,21 +332,23 @@ export default function PersonEditor({
                   : bulkPregenerating
                     ? "正在为所有部分预生成讲解…"
                     : saving
-                      ? "正在保存…"
+                      ? admin
+                        ? "正在保存…"
+                        : "正在提交…"
                       : "正在解析文件…"
           }
           sub={
             sectioning
-              ? "把讲稿分成几个部分，请稍候"
+              ? "把讲稿分成几个部分，请稍候 / Splitting your script"
               : cartooning
-                ? "用照片生成卡通,约 20–40 秒"
+                ? "用照片生成卡通，约 20–40 秒"
                 : loopGenerating
-                  ? "生成说话动作循环视频,约 30–90 秒"
+                  ? "生成说话动作循环视频，约 30–90 秒"
                   : bulkPregenerating
                     ? "让访客选这些部分时能立刻播放，不用等 AI"
                     : saving
-                      ? "上传照片并生成二维码"
-                      : "从 PDF / Word 提取文字"
+                      ? "上传照片并保存 / Uploading photo"
+                      : "从 PDF / Word 提取文字 / Extracting text"
           }
         />
       )}
@@ -359,9 +357,7 @@ export default function PersonEditor({
         <button onClick={onCancel} className="text-sm text-ink-mute hover:text-ink">
           ← 返回
         </button>
-        <h2 className="text-base font-semibold">
-          {isEdit ? "编辑同学" : "新增同学"}
-        </h2>
+        <h2 className="text-base font-semibold">{heading}</h2>
         <span className="w-10" />
       </div>
 
@@ -403,91 +399,107 @@ export default function PersonEditor({
             <input
               ref={fileRef}
               type="file"
-              accept="image/*"
+              accept={PHOTO_ACCEPT}
               hidden
-              onChange={(e) => e.target.files?.[0] && onPickPhoto(e.target.files[0])}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) onPickPhoto(f);
+                e.target.value = "";
+              }}
             />
             <button className="btn-soft" onClick={() => fileRef.current?.click()}>
-              {photoPreview ? "更换照片" : "上传照片"}
+              {photoPreview ? "更换照片 / Replace" : "上传照片 / Upload"}
             </button>
-            <p className="mt-1 text-xs text-ink-mute">建议正脸、清晰、≤8MB</p>
+            <p className="mt-1 text-xs text-ink-mute">
+              正脸、清晰、JPG/PNG/WebP、≤8MB · Clear front-facing photo
+            </p>
+            {!admin && isEdit && (
+              <p className="mt-1 text-xs text-ink-mute">
+                更换照片后，老师需要重新生成卡通形象。
+              </p>
+            )}
           </div>
         </div>
 
-        {/* Cartoon avatar (A2E) — needs the person saved with a photo first. */}
-        <div className="mt-4 flex items-center gap-4 border-t border-black/5 pt-4">
-          <div className="h-20 w-20 shrink-0 overflow-hidden rounded-2xl bg-gray-100 ring-1 ring-black/5">
-            {cartoonUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={cartoonUrl} alt="" className="h-full w-full object-cover" />
-            ) : (
-              <div className="grid h-full w-full place-items-center text-xl text-ink-mute">🎨</div>
-            )}
-          </div>
-          <div>
-            <p className="label">卡通形象 · Cartoon</p>
-            {isEdit ? (
-              <button className="btn-soft" onClick={generateCartoon} disabled={cartooning}>
-                {cartooning ? "生成中…" : cartoonUrl ? "重新生成卡通" : "✨ 生成卡通形象"}
-              </button>
-            ) : (
-              <p className="text-xs text-ink-mute">先保存这位同学,再回来生成卡通形象。</p>
-            )}
-            <p className="mt-1 text-xs text-ink-mute">
-              用本人照片生成轻卡通(还认得出是谁),用于访客端显示和数字人说话。
-            </p>
-          </div>
-        </div>
+        {admin && (
+          <>
+            {/* Cartoon avatar (A2E) — needs the person saved with a photo first. */}
+            <div className="mt-4 flex items-center gap-4 border-t border-black/5 pt-4">
+              <div className="h-20 w-20 shrink-0 overflow-hidden rounded-2xl bg-gray-100 ring-1 ring-black/5">
+                {cartoonUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={cartoonUrl} alt="" className="h-full w-full object-cover" />
+                ) : (
+                  <div className="grid h-full w-full place-items-center text-xl text-ink-mute">🎨</div>
+                )}
+              </div>
+              <div>
+                <p className="label">卡通形象 · Cartoon</p>
+                {isEdit ? (
+                  <button className="btn-soft" onClick={generateCartoon} disabled={cartooning}>
+                    {cartooning ? "生成中…" : cartoonUrl ? "重新生成卡通" : "✨ 生成卡通形象"}
+                  </button>
+                ) : (
+                  <p className="text-xs text-ink-mute">先保存这位同学，再回来生成卡通形象。</p>
+                )}
+                <p className="mt-1 text-xs text-ink-mute">
+                  用本人照片生成轻卡通（还认得出是谁），用于访客端显示和数字人说话。
+                </p>
+              </div>
+            </div>
 
-        {/* Ambient talking-loop video — generated once; makes answers start
-            near-instantly instead of waiting for a per-answer lip-sync render. */}
-        <div className="mt-4 flex items-center gap-4 border-t border-black/5 pt-4">
-          <div className="h-20 w-20 shrink-0 overflow-hidden rounded-2xl bg-gray-100 ring-1 ring-black/5">
-            {loopVideoUrl ? (
-              <video src={loopVideoUrl} muted loop autoPlay playsInline className="h-full w-full object-cover" />
-            ) : (
-              <div className="grid h-full w-full place-items-center text-xl text-ink-mute">🎬</div>
-            )}
-          </div>
-          <div>
-            <p className="label">动态视频 · Talking loop（推荐，秒回）</p>
-            {isEdit ? (
-              <button className="btn-soft" onClick={generateLoopVideo} disabled={loopGenerating}>
-                {loopGenerating ? "生成中…" : loopVideoUrl ? "重新生成动态视频" : "🎬 生成动态视频"}
-              </button>
-            ) : (
-              <p className="text-xs text-ink-mute">先保存这位同学,再回来生成动态视频。</p>
-            )}
-            <p className="mt-1 text-xs text-ink-mute">
-              生成一段几秒的"说话状态"循环视频（一次性）。访客提问时立刻用语音配这段循环播放，
-              无需每次等待渲染，口型不做逐字对齐。建议先生成卡通形象再生成此项。
-            </p>
-          </div>
-        </div>
+            {/* Ambient talking-loop video — generated once; makes answers start
+                near-instantly instead of waiting for a per-answer lip-sync render. */}
+            <div className="mt-4 flex items-center gap-4 border-t border-black/5 pt-4">
+              <div className="h-20 w-20 shrink-0 overflow-hidden rounded-2xl bg-gray-100 ring-1 ring-black/5">
+                {loopVideoUrl ? (
+                  <video src={loopVideoUrl} muted loop autoPlay playsInline className="h-full w-full object-cover" />
+                ) : (
+                  <div className="grid h-full w-full place-items-center text-xl text-ink-mute">🎬</div>
+                )}
+              </div>
+              <div>
+                <p className="label">动态视频 · Talking loop（推荐，秒回）</p>
+                {isEdit ? (
+                  <button className="btn-soft" onClick={generateLoopVideo} disabled={loopGenerating}>
+                    {loopGenerating ? "生成中…" : loopVideoUrl ? "重新生成动态视频" : "🎬 生成动态视频"}
+                  </button>
+                ) : (
+                  <p className="text-xs text-ink-mute">先保存这位同学，再回来生成动态视频。</p>
+                )}
+                <p className="mt-1 text-xs text-ink-mute">
+                  生成一段几秒的“说话状态”循环视频（一次性）。访客提问时立刻用语音配这段循环播放，
+                  无需每次等待渲染，口型不做逐字对齐。建议先生成卡通形象再生成此项。
+                </p>
+              </div>
+            </div>
+          </>
+        )}
       </section>
 
       {/* Basics */}
       <section className="card space-y-4 p-5">
         <div>
           <label className="label">姓名 · Name</label>
-          <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：李雷 / Li Lei" />
+          <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：李雷 / Li Lei" maxLength={60} />
         </div>
         <div>
-          <label className="label">副标题 · Subtitle（可选）</label>
+          <label className="label">副标题 · Subtitle（可选 / optional）</label>
           <input
             className="input"
             value={subtitle}
             onChange={(e) => setSubtitle(e.target.value)}
             placeholder="例如：TOK Exhibition · Knowledge & Technology"
+            maxLength={140}
           />
         </div>
         <div>
           <label className="label">声音性别 · Voice（数字人音色）</label>
           <div className="flex gap-2">
             {[
-              { v: "", t: "默认" },
-              { v: "male", t: "男声" },
-              { v: "female", t: "女声" },
+              { v: "", t: "默认 / Default" },
+              { v: "male", t: "男声 / Male" },
+              { v: "female", t: "女声 / Female" },
             ].map((g) => (
               <button
                 key={g.v}
@@ -525,12 +537,16 @@ export default function PersonEditor({
         <div className="flex items-center justify-between">
           <p className="label mb-0">讲稿 · Script</p>
           <label className="cursor-pointer text-sm text-brand-600 hover:underline">
-            {parsing ? "解析中…" : "上传 pdf/word/txt"}
+            {parsing ? "解析中…" : "上传 pdf / word / txt"}
             <input
               type="file"
               accept=".txt,.pdf,.docx,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
               hidden
-              onChange={(e) => e.target.files?.[0] && onPickScriptFile(e.target.files[0])}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) onPickScriptFile(f);
+                e.target.value = "";
+              }}
             />
           </label>
         </div>
@@ -538,7 +554,7 @@ export default function PersonEditor({
           className="input min-h-[160px] resize-y leading-relaxed"
           value={script}
           onChange={(e) => setScript(e.target.value)}
-          placeholder="直接粘贴讲稿文字，或上传 PDF / Word / txt 自动提取…"
+          placeholder="直接粘贴讲稿文字，或上传 PDF / Word / txt 自动提取… / Paste your talk, or upload a file"
         />
         <button className="btn-primary w-full" onClick={autoSection} disabled={sectioning}>
           {sectioning ? (
@@ -546,11 +562,12 @@ export default function PersonEditor({
               <Spinner light /> AI 分段中…
             </>
           ) : (
-            "✨ AI 智能分段"
+            "✨ AI 智能分段 · Auto-split"
           )}
         </button>
         <p className="text-xs text-ink-mute">
           AI 会把讲稿分成几个“部分”，访客可以选择想先听哪一部分。分段后可手动微调。
+          {!admin && " / AI splits your talk into parts visitors can pick; adjust them below."}
         </p>
       </section>
 
@@ -561,10 +578,10 @@ export default function PersonEditor({
             部分 · Sections（{sections.length}）
           </p>
           <div className="flex items-center gap-3">
-            {isEdit && sections.length > 0 && (
+            {admin && isEdit && sections.length > 0 && (
               <button
                 className="text-sm text-brand-600 hover:underline disabled:opacity-50"
-                onClick={pregenerateAll}
+                onClick={() => pregenerate()}
                 disabled={bulkPregenerating}
               >
                 {bulkPregenerating ? "生成中…" : "⚡ 预生成全部讲解"}
@@ -574,11 +591,11 @@ export default function PersonEditor({
               className="text-sm text-brand-600 hover:underline"
               onClick={() => setSections((p) => [...p, emptySection()])}
             >
-              + 添加
+              + 添加 / Add
             </button>
           </div>
         </div>
-        {isEdit && sections.length > 0 && (
+        {admin && isEdit && sections.length > 0 && (
           <p className="px-1 text-xs text-ink-mute">
             ⚡ 预生成：提前让 AI 写好每部分的讲解，访客选中时立刻播放，不用现场等待。追问仍然是现场实时回答。
           </p>
@@ -586,6 +603,8 @@ export default function PersonEditor({
         {sections.length === 0 && (
           <div className="card p-5 text-center text-sm text-ink-mute">
             还没有分段。先点上面的「AI 智能分段」，或手动添加。
+            <br />
+            No sections yet — use “Auto-split” above, or add them by hand.
           </div>
         )}
         {sections.map((s, i) => (
@@ -599,6 +618,7 @@ export default function PersonEditor({
                 value={s.title}
                 onChange={(e) => updateSection(s.id, { title: e.target.value })}
                 placeholder="标题，如：Object 1 · The Passport"
+                maxLength={80}
               />
               <button onClick={() => moveSection(s.id, -1)} className="px-1 text-ink-mute hover:text-ink" title="上移">↑</button>
               <button onClick={() => moveSection(s.id, 1)} className="px-1 text-ink-mute hover:text-ink" title="下移">↓</button>
@@ -608,19 +628,20 @@ export default function PersonEditor({
               className="input py-2 text-sm"
               value={s.hint ?? ""}
               onChange={(e) => updateSection(s.id, { hint: e.target.value })}
-              placeholder="一句话提示（可选）"
+              placeholder="一句话提示（可选）/ one-line teaser (optional)"
+              maxLength={160}
             />
             <textarea
               className="input min-h-[90px] resize-y text-sm leading-relaxed"
               value={s.content}
               onChange={(e) => updateSection(s.id, { content: e.target.value })}
-              placeholder="这一部分对应的讲稿内容…"
+              placeholder="这一部分对应的讲稿内容… / the script for this part"
             />
-            {isEdit && (
+            {admin && isEdit && (
               <div className="flex items-center gap-2 pt-1">
                 <button
                   className="chip bg-brand-50 text-xs text-brand-700 hover:bg-brand-100 disabled:opacity-50"
-                  onClick={() => pregenerateSection(s.id)}
+                  onClick={() => pregenerate(s.id)}
                   disabled={pregenerating.has(s.id) || bulkPregenerating}
                 >
                   {pregenerating.has(s.id) ? (
@@ -649,7 +670,7 @@ export default function PersonEditor({
               </div>
             )}
             {/* Editable pre-generated answers, one per language variant. */}
-            {isEdit && answersOpen.has(s.id) && s.cachedAnswers && (
+            {admin && isEdit && answersOpen.has(s.id) && s.cachedAnswers && (
               <div className="space-y-2 rounded-2xl bg-brand-50/60 p-3">
                 {(Object.entries(s.cachedAnswers) as ["en" | "zh" | "bilingual", string][]).map(
                   ([key, text]) => (
@@ -674,6 +695,14 @@ export default function PersonEditor({
         ))}
       </section>
 
+      {!admin && (
+        <p className="px-1 text-xs text-ink-mute">
+          提交后老师会审核；通过后你的二维码页面才会对访客开放。提交成功后会得到一个专属修改链接，请务必保存。
+          <br />
+          Your talk goes live after a teacher approves it. You’ll get a private link to edit it later — keep it safe.
+        </p>
+      )}
+
       {/* Sticky save bar */}
       <div className="fixed inset-x-0 bottom-0 z-10 border-t border-black/5 bg-white/90 px-5 py-3 backdrop-blur">
         <div className="mx-auto flex max-w-md gap-3">
@@ -683,12 +712,10 @@ export default function PersonEditor({
           <button className="btn-primary flex-[2]" onClick={save} disabled={saving}>
             {saving ? (
               <>
-                <Spinner light /> 保存中…
+                <Spinner light /> {admin ? "保存中…" : "提交中…"}
               </>
-            ) : isEdit ? (
-              "保存修改"
             ) : (
-              "创建并生成二维码"
+              saveLabel
             )}
           </button>
         </div>

@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { getPerson } from "@/lib/store";
 import { chat } from "@/lib/ai";
 import { explainSectionPrompt, followUpPrompt, systemPrompt } from "@/lib/prompts";
+import { canView } from "@/lib/access";
+import { limitRequest } from "@/lib/ratelimit";
 import type { ChatTurn, Person } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -26,17 +28,27 @@ function resolveAnswerLangKey(
 
 // Generate the spoken ANSWER TEXT (fast). The avatar/video is a separate call.
 export async function POST(req: NextRequest) {
+  const limited = limitRequest(req, "chat");
+  if (limited) return limited;
+
   const body = (await req.json().catch(() => ({}))) as {
     personId?: string;
     mode?: "section" | "followup";
+    /** The section to explain (mode=section) or the one the visitor was just
+     *  hearing (mode=followup, gives the follow-up its context). */
     sectionId?: string;
     question?: string;
     history?: ChatTurn[];
     uiLang?: "en" | "zh";
+    /** Student edit token — lets an unpublished page be previewed. */
+    previewToken?: string;
   };
 
   const person = body.personId ? await getPerson(body.personId) : null;
   if (!person) return NextResponse.json({ error: "not found" }, { status: 404 });
+  if (!canView(person, body.previewToken)) {
+    return NextResponse.json({ error: "尚未发布 / Not published yet" }, { status: 403 });
+  }
 
   let userPrompt: string;
   let currentSectionTitle: string | undefined;
@@ -65,14 +77,22 @@ export async function POST(req: NextRequest) {
       userPrompt += `\n\nSpeak in ${body.uiLang === "zh" ? "Simplified Chinese (简体中文)" : "English"}.`;
     }
   } else {
-    if (!body.question?.trim()) {
+    const question = body.question?.trim();
+    if (!question) {
       return NextResponse.json({ error: "empty question" }, { status: 400 });
     }
-    userPrompt = followUpPrompt(body.question, body.history?.at(-1)?.content);
+    if (question.length > 1000) {
+      return NextResponse.json({ error: "问题太长 / Question too long" }, { status: 400 });
+    }
+    currentSectionTitle = person.sections.find((s) => s.id === body.sectionId)?.title;
+    userPrompt = followUpPrompt(question, currentSectionTitle);
   }
 
-  // Keep a little history for non-repetition, but cap it.
-  const history = (body.history ?? []).slice(-6);
+  // Keep a little history for non-repetition, but cap it (count and size).
+  const history = (Array.isArray(body.history) ? body.history : [])
+    .filter((t) => t && (t.role === "user" || t.role === "assistant") && typeof t.content === "string")
+    .slice(-6)
+    .map((t) => ({ role: t.role, content: t.content.slice(0, 2000) }));
 
   try {
     const text = await chat({

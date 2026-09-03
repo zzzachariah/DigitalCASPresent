@@ -54,9 +54,13 @@ const T = {
 export default function VisitorExperience({
   person,
   avatarStream = false,
+  previewToken,
 }: {
   person: PublicPerson;
   avatarStream?: boolean;
+  /** Student edit token: lets an unpublished page be previewed (sent with
+   *  every AI/avatar request so the server allows them too). */
+  previewToken?: string;
 }) {
   // Deterministic initial value (same on server + first client render) to avoid
   // a hydration mismatch. For "auto"/"bilingual" we refine to the device
@@ -78,6 +82,8 @@ export default function VisitorExperience({
   // Section picker / input starts open; collapses into a small pill after each
   // selection so the avatar + caption get more room, and reopens on tap.
   const [controlsOpen, setControlsOpen] = useState(true);
+  // The section the visitor is currently hearing — gives follow-ups context.
+  const [currentSectionId, setCurrentSectionId] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -236,6 +242,7 @@ export default function VisitorExperience({
   ) {
     setError("");
     setControlsOpen(false);
+    if (payload.mode === "section") setCurrentSectionId(payload.sectionId);
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     // Unlock audio autoplay on strict mobile browsers (e.g. iOS Safari) by
     // calling play() synchronously within this user-gesture-triggered call,
@@ -271,10 +278,11 @@ export default function VisitorExperience({
         body: JSON.stringify({
           personId: person.id,
           mode: payload.mode,
-          sectionId: payload.mode === "section" ? payload.sectionId : undefined,
+          sectionId: payload.mode === "section" ? payload.sectionId : currentSectionId ?? undefined,
           question: payload.mode === "followup" ? payload.question : undefined,
           history: historyTurns(),
           uiLang,
+          previewToken,
         }),
       });
       const chat = await readJson(chatRes);
@@ -301,7 +309,7 @@ export default function VisitorExperience({
           const avRes = await fetch("/api/avatar", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ personId: person.id, text, lang }),
+            body: JSON.stringify({ personId: person.id, text, lang, previewToken }),
           });
           const av = await readJson(avRes);
           if (avRes.ok && av.avatar?.kind === "audio") {
@@ -422,6 +430,12 @@ export default function VisitorExperience({
           </div>
         </div>
       </div>
+
+      {person.status === "pending" && (
+        <div className="shrink-0 bg-amber-50 px-4 py-1.5 text-center text-[11px] text-amber-800">
+          预览模式 · 尚未发布，老师审核通过后访客才能看到 / Preview · not published yet
+        </div>
+      )}
 
       {/* ── Digital human — fills remaining space. Neutral backdrop (no blue
            frame) so the letterboxed area around the contained video blends in. ── */}
