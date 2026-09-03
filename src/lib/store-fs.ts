@@ -173,7 +173,7 @@ export async function savePhoto(id: string, buffer: Buffer, ext: string): Promis
     const files = await fs.readdir(UPLOAD_DIR);
     await Promise.all(
       files
-        .filter((f) => f.startsWith(id + ".") && !f.includes(".cartoon.") && !f.includes(".loop."))
+        .filter((f) => f.startsWith(id + ".") && !f.includes(".cartoon.") && !f.includes(".loop.") && !f.includes(".audio."))
         .map((f) => fs.unlink(path.join(UPLOAD_DIR, f)))
     );
   } catch {

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getPerson, savePhoto, storageWritable, updatePerson } from "@/lib/store";
+import { deleteMediaUrl, getPerson, savePhoto, storageWritable, updatePerson } from "@/lib/store";
 import { ownerTokenValid } from "@/lib/access";
 import { readUploadedImage } from "@/lib/image";
 import { limitRequest } from "@/lib/ratelimit";
@@ -16,7 +16,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   if (!writable.ok) return NextResponse.json({ error: writable.reason }, { status: 503 });
 
   const person = await getPerson(params.id);
-  const token = req.headers.get("x-edit-token") || req.nextUrl.searchParams.get("token");
+  const token = req.headers.get("x-edit-token");
   if (!person || person.source !== "student" || !ownerTokenValid(person, token)) {
     return NextResponse.json(NOT_FOUND, { status: 404 });
   }
@@ -36,6 +36,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       status: "pending",
       submittedAt: Date.now(),
     });
+    for (const u of [person.cartoonUrl, person.loopVideoUrl]) if (u) await deleteMediaUrl(u).catch(() => {});
     return NextResponse.json({ photoUrl });
   } catch (err) {
     console.error("[submit:photo] failed:", err);

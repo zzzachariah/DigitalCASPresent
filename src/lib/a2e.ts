@@ -21,11 +21,12 @@ export interface A2eResult {
   json: any;
 }
 
-export async function a2e(path: string, method = "POST", body?: unknown): Promise<A2eResult> {
+export async function a2e(path: string, method = "POST", body?: unknown, signal?: AbortSignal): Promise<A2eResult> {
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: { Authorization: `Bearer ${key()}`, "Content-Type": "application/json" },
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal: signal ?? AbortSignal.timeout(20_000),
   });
   const text = await res.text();
   let json: any;
@@ -83,11 +84,19 @@ async function a2eHostedImage(srcUrl: string): Promise<string> {
 
 /** Text-to-speech: returns an audio URL. This call is synchronous/fast (no
  *  polling needed) — this is what makes the "fast" avatar path near-instant. */
-export async function a2eTts(text: string, gender?: "male" | "female"): Promise<string> {
-  const tts = await a2e("/api/v1/video/send_tts", "POST", { msg: text, tts_id: voiceFor(gender) });
-  const audioUrl = typeof tts.json?.data === "string" ? tts.json.data : findUrl(tts.json);
-  if (!audioUrl) throw new Error("send_tts returned no audio: " + JSON.stringify(tts.json).slice(0, 200));
+export async function a2eTts(text: string, gender?: "male" | "female", signal?: AbortSignal): Promise<string> {
+  const tts = await a2e("/api/v1/video/send_tts", "POST", { msg: text, tts_id: voiceFor(gender) }, signal);
+  if (!tts.ok) throw new Error(`send_tts failed (${tts.httpStatus}): ${JSON.stringify(tts.json).slice(0, 200)}`);
+  const audioUrl = typeof tts.json?.data === "string" ? tts.json.data : findUrl(tts.json?.data);
+  if (!audioUrl || !/^https?:\/\//.test(audioUrl)) {
+    throw new Error("send_tts returned no audio: " + JSON.stringify(tts.json).slice(0, 200));
+  }
   return audioUrl;
+}
+
+/** Task ids are interpolated into API paths — keep them to a safe shape. */
+export function safeTaskId(id: string | null | undefined): string | null {
+  return typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : null;
 }
 
 /** Create a talking-photo (lip-sync) task: TTS the text, then animate the photo.

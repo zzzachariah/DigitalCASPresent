@@ -14,8 +14,9 @@ interface Msg {
   id: string;
   role: "user" | "assistant";
   text: string;
-  /** For user turns: a menu pick vs a typed question. */
-  kind?: "section" | "question";
+  /** For user turns: a menu pick vs a typed question. For assistant turns:
+   *  "error" renders as a failure with a retry chip. */
+  kind?: "section" | "question" | "error";
 }
 
 /** 8 samples of silence. Played inside the tap that starts an answer so iOS
@@ -46,6 +47,11 @@ const T = {
     preview: "预览模式 · 尚未发布，老师审核通过后访客才能看到",
     exhibition: "TOK Exhibition",
     empty: "选一个部分开始，讲完可以追问。",
+    noParts: "还没有内容",
+    error: "出错了，请重试",
+    retry: "重试",
+    soundHint: "打开声音，数字人会开口讲解",
+    speaksIn: (l: "en" | "zh" | "bilingual") => (l === "en" ? "TA 用英文讲解" : l === "zh" ? "TA 用中文讲解" : "TA 用中英双语讲解"),
   },
   en: {
     greeting: (n: string) => `Hi, I'm ${n}.`,
@@ -68,6 +74,11 @@ const T = {
     preview: "Preview · not published yet — visitors will see this page once a teacher approves it",
     exhibition: "TOK Exhibition",
     empty: "Pick a part to begin; you can ask follow-ups afterwards.",
+    noParts: "Nothing here yet",
+    error: "Something went wrong — please try again",
+    retry: "Retry",
+    soundHint: "Turn your sound on — the guide speaks",
+    speaksIn: (l: "en" | "zh" | "bilingual") => (l === "en" ? "This guide speaks English" : l === "zh" ? "This guide speaks Chinese" : "This guide speaks both languages"),
   },
 };
 
@@ -127,6 +138,9 @@ export default function VisitorExperience({
   const silencedRunRef = useRef(-1);
   const unlockedRef = useRef(false);
   const captionRef = useRef<HTMLDivElement>(null);
+  const timersRef = useRef<Set<number>>(new Set());
+  const lastPayloadRef = useRef<Parameters<typeof run>[0] | null>(null);
+  const [warmMedia, setWarmMedia] = useState(false);
 
   const transcriptRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -179,8 +193,17 @@ export default function VisitorExperience({
       setUiLang("zh");
       setLastLang("zh");
     }
+    const timers = timersRef.current; // stable Set instance
+    return () => {
+      abortRef.current?.abort();
+      timers.forEach((t) => window.clearTimeout(t));
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    document.documentElement.lang = uiLang === "zh" ? "zh-CN" : "en";
+  }, [uiLang]);
 
   useEffect(() => {
     transcriptRef.current?.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: streaming ? "auto" : "smooth" });
@@ -216,7 +239,7 @@ export default function VisitorExperience({
   /** Browser voice for one chunk of text. Utterances queue natively, so
    *  streamed sentences can be handed over as they complete. */
   function speak(text: string, lang: "en" | "zh") {
-    if (!("speechSynthesis" in window)) {
+    if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
       setStage("ready");
       return;
     }
@@ -236,13 +259,18 @@ export default function VisitorExperience({
     u.onerror = finish;
     setStage("speaking");
     synth.speak(u);
-    // Safety net: if the engine never starts (no matching voice), don't get stuck.
-    window.setTimeout(() => {
+    // Safety net: if the engine never starts (no matching voice), don't get
+    // stuck — but only for the run that queued this utterance.
+    const forRun = runIdRef.current;
+    const timer = window.setTimeout(() => {
+      timersRef.current.delete(timer);
+      if (runIdRef.current !== forRun) return;
       if (!synth.speaking && !synth.pending) {
         ttsCountRef.current = 0;
         setStage("ready");
       }
     }, 1200);
+    timersRef.current.add(timer);
   }
 
   function speakAll(text: string, lang: "en" | "zh") {
@@ -268,6 +296,10 @@ export default function VisitorExperience({
     q.next++;
     if (!item.url) {
       // TTS failed for this sentence: let the browser voice it, then continue.
+      if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
+        queuePlayNext();
+        return;
+      }
       q.busy = true;
       setNarrating(true);
       const u = new SpeechSynthesisUtterance(item.text);
@@ -276,8 +308,7 @@ export default function VisitorExperience({
         q.busy = false;
         queuePlayNext();
       };
-      if ("speechSynthesis" in window) window.speechSynthesis.speak(u);
-      else u.onend?.(new Event("end") as SpeechSynthesisEvent);
+      window.speechSynthesis.speak(u);
       return;
     }
     q.busy = true;
@@ -315,6 +346,8 @@ export default function VisitorExperience({
    *  an answer still streaming keeps arriving; it just won't be voiced. */
   function stopSpeaking() {
     silencedRunRef.current = runIdRef.current;
+    timersRef.current.forEach((t) => window.clearTimeout(t));
+    timersRef.current.clear();
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     ttsCountRef.current = 0;
     queueReset();
@@ -351,6 +384,10 @@ export default function VisitorExperience({
     const myRun = ++runIdRef.current;
     const alive = () => runIdRef.current === myRun;
     const silenced = () => silencedRunRef.current === myRun;
+    lastPayloadRef.current = payload;
+    timersRef.current.forEach((t) => window.clearTimeout(t));
+    timersRef.current.clear();
+    setWarmMedia(true);
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     ttsCountRef.current = 0;
     queueReset();
@@ -398,20 +435,68 @@ export default function VisitorExperience({
     const audioUrls: string[] = [];
     let gotAny = false;
 
+    // Deltas arrive many times a second; paint them once per frame.
+    let frame = 0;
+    let shown = "";
+    const paint = () => {
+      frame = 0;
+      const snapshot = text;
+      if (snapshot === shown) return;
+      shown = snapshot;
+      setMessages((m) => m.map((x) => (x.id === assistantId ? { ...x, text: snapshot } : x)));
+    };
     const appendText = (piece: string) => {
+      text += piece;
       if (!gotAny) {
         gotAny = true;
+        shown = text;
         setStreaming(true);
-        setMessages((m) => [...m, { id: assistantId, role: "assistant", text: piece }]);
-      } else {
-        setMessages((m) => m.map((x) => (x.id === assistantId ? { ...x, text: x.text + piece } : x)));
+        setMessages((m) => [...m, { id: assistantId, role: "assistant", text }]);
+      } else if (!frame) {
+        frame = requestAnimationFrame(paint);
       }
-      text += piece;
       if (st.avatar === "tts" && !avatarStream && !silenced()) {
         pendingTts += piece;
         const { chunks, rest } = takeSentences(pendingTts);
         pendingTts = rest;
         chunks.forEach((c) => speak(c, /[一-鿿]/.test(c) ? "zh" : st.lang));
+      }
+    };
+
+    // Runs as soon as the text is complete (audio clips may still trail).
+    let finalized = false;
+    const finalize = async (doneText: string, doneLang: "en" | "zh", chunks: number) => {
+      if (finalized || !alive()) return;
+      finalized = true;
+      if (frame) cancelAnimationFrame(frame);
+      text = doneText.trim() || text;
+      shown = text;
+      setMessages((m) => m.map((x) => (x.id === assistantId ? { ...x, text } : x)));
+      st.lang = doneLang;
+      setStreaming(false);
+      setLastText(text);
+      setLastLang(st.lang);
+      if (silenced()) {
+        setStage("ready");
+        return;
+      }
+      if (streamUsable) {
+        setStage("ready");
+        const ok = await sayStream(text, st.lang);
+        if (!ok && alive() && !silenced()) speakAll(text, st.lang);
+      } else if (avatarStream) {
+        speakAll(text, st.lang);
+      } else if (st.avatar === "audio") {
+        setStage("ready");
+        queueFinish(chunks);
+        if (chunks === 0) speakAll(text, st.lang);
+      } else if (st.avatar === "video") {
+        await renderVideo(text, st.lang, ac, alive, silenced);
+      } else {
+        const { chunks: tail } = takeSentences(pendingTts, true);
+        pendingTts = "";
+        tail.forEach((c) => speak(c, /[一-鿿]/.test(c) ? "zh" : st.lang));
+        if (ttsCountRef.current === 0) setStage("ready");
       }
     };
 
@@ -451,7 +536,10 @@ export default function VisitorExperience({
             appendText(String(ev.text || ""));
             break;
           case "audio":
-            if (typeof ev.url === "string") audioUrls.push(ev.url);
+            if (typeof ev.url === "string") {
+              audioUrls.push(ev.url);
+              setLastAudio([...audioUrls]);
+            }
             if (!silenced()) queueAdd(Number(ev.seq), typeof ev.url === "string" ? ev.url : null, String(ev.text || ""));
             break;
           case "suggestions":
@@ -459,14 +547,10 @@ export default function VisitorExperience({
             break;
           case "done":
             finished = true;
-            if (ev.lang === "zh" || ev.lang === "en") st.lang = ev.lang;
-            if (typeof ev.text === "string" && ev.text.trim()) {
-              text = ev.text;
-              setMessages((m) => m.map((x) => (x.id === assistantId ? { ...x, text: ev.text } : x)));
-            }
+            void finalize(typeof ev.text === "string" ? ev.text : "", ev.lang === "zh" ? "zh" : "en", Number(ev.chunks) || 0);
             break;
           case "error":
-            throw new Error(String(ev.message || "AI error"));
+            throw new Error(String(ev.message || t.error));
         }
       };
       while (true) {
@@ -483,75 +567,71 @@ export default function VisitorExperience({
       }
       if (buf.trim()) handle(JSON.parse(buf.trim()));
       if (!alive()) return;
-      if (!finished && !text.trim()) throw new Error("AI error");
-      setStreaming(false);
-      setLastText(text);
-      setLastLang(st.lang);
-      setLastAudio(audioUrls);
-      if (silenced()) {
-        setStage("ready");
-        return;
-      }
-
-      // ── Voice the answer ──
-      if (streamUsable) {
-        setStage("ready");
-        const ok = await sayStream(text, st.lang);
-        if (!ok && alive() && !silenced()) speakAll(text, st.lang);
-      } else if (avatarStream) {
-        speakAll(text, st.lang);
-      } else if (st.avatar === "audio") {
-        // Narration arrives as per-sentence audio events; finish the queue.
-        setStage("ready");
-        queueFinish(queueRef.current.items.size);
-        if (audioUrls.length === 0 && queueRef.current.items.size === 0) speakAll(text, st.lang);
-      } else if (st.avatar === "video") {
-        setStage("ready");
-        setVideoLoading(true);
-        try {
-          const avRes = await fetch("/api/avatar", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            signal: ac.signal,
-            body: JSON.stringify({ personId: person.id, text, lang: st.lang, previewToken }),
-          });
-          const av = await readJson(avRes);
-          if (!alive()) return;
-          if (avRes.ok && av.avatar?.kind === "video-pending") {
-            const url = await pollForVideo(av.avatar.id);
-            if (!alive()) return;
-            setVideoLoading(false);
-            if (url && !silenced()) {
-              setVideoUrl(url);
-              setStage("speaking");
-            } else if (!silenced()) {
-              speakAll(text, st.lang);
-            }
-          } else if (avRes.ok && av.avatar?.kind === "audio") {
-            setVideoLoading(false);
-            if (!silenced()) playNarration([av.avatar.audioUrl], text, st.lang);
-          } else {
-            setVideoLoading(false);
-            if (!silenced()) speakAll(text, st.lang);
-          }
-        } catch {
-          if (!alive()) return;
-          setVideoLoading(false);
-          if (!silenced()) speakAll(text, st.lang);
-        }
-      } else {
-        // Browser voice: whatever sentence is still unfinished.
-        const { chunks } = takeSentences(pendingTts, true);
-        chunks.forEach((c) => speak(c, /[一-鿿]/.test(c) ? "zh" : st.lang));
-        if (ttsCountRef.current === 0) setStage("ready");
+      if (!finished) {
+        if (!text.trim()) throw new Error(t.error);
+        await finalize(text, st.lang, queueRef.current.items.size);
       }
     } catch (e) {
       if (!alive() || (e instanceof DOMException && e.name === "AbortError")) return;
+      if (frame) cancelAnimationFrame(frame);
       setStreaming(false);
-      setError(e instanceof Error ? e.message : "出错了，请重试");
+      const raw = e instanceof Error ? e.message : "";
+      const message = raw && raw !== "AI error" ? raw : t.error;
+      // The failure becomes the latest turn (so the caption never shows the
+      // previous answer as if it were the reply); the question is restored.
+      setMessages((m) => [...m.filter((x) => x.id !== assistantId), { id: assistantId, role: "assistant", text: message, kind: "error" }]);
+      if (payload.mode === "followup") setInput(payload.question);
       setVideoLoading(false);
       setStage("ready");
     }
+  }
+
+  /** Per-answer video render (A2E precise / D-ID): starts after the text. */
+  async function renderVideo(
+    text: string,
+    lang: "en" | "zh",
+    ac: AbortController,
+    alive: () => boolean,
+    silenced: () => boolean
+  ) {
+    setStage("ready");
+    setVideoLoading(true);
+    try {
+      const avRes = await fetch("/api/avatar", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: ac.signal,
+        body: JSON.stringify({ personId: person.id, text, lang, previewToken }),
+      });
+      const av = await readJson(avRes);
+      if (!alive()) return;
+      if (avRes.ok && av.avatar?.kind === "video-pending") {
+        const url = await pollForVideo(av.avatar.id);
+        if (!alive()) return;
+        setVideoLoading(false);
+        if (url && !silenced()) {
+          setVideoUrl(url);
+          setStage("speaking");
+        } else if (!silenced()) {
+          speakAll(text, lang);
+        }
+      } else if (avRes.ok && av.avatar?.kind === "audio") {
+        setVideoLoading(false);
+        if (!silenced()) playNarration([av.avatar.audioUrl], text, lang);
+      } else {
+        setVideoLoading(false);
+        if (!silenced()) speakAll(text, lang);
+      }
+    } catch {
+      if (!alive()) return;
+      setVideoLoading(false);
+      if (!silenced()) speakAll(text, lang);
+    }
+  }
+
+  function retry() {
+    const p = lastPayloadRef.current;
+    if (p) run(p);
   }
 
   async function pollForVideo(id: string): Promise<string | null> {
@@ -597,7 +677,8 @@ export default function VisitorExperience({
   const statusMeta =
     currentSection && currentIndex >= 0 ? `${pad(currentIndex)} · ${currentSection.title}` : t.exhibition;
 
-  const langToggle = (
+  const fixedLanguage = person.language === "en" || person.language === "zh";
+  const langToggle = fixedLanguage ? null : (
     <div className="seg" role="group" aria-label="Language">
       <button
         type="button"
@@ -659,7 +740,7 @@ export default function VisitorExperience({
         {/* phone: identity block */}
         <div className="min-w-0 lg:hidden">
           <h1 className="truncate font-display text-[22px] font-semibold leading-tight tracking-[-0.01em]">{person.name}</h1>
-          {person.subtitle && <p className="truncate text-[13px] leading-snug text-ink-2">“{person.subtitle}”</p>}
+          {person.subtitle && <p className="line-clamp-2 text-[13px] leading-snug text-ink-2">“{person.subtitle}”</p>}
           <p className="eyebrow mt-1">
             {t.exhibition} · {t.parts(person.sections.length)}
           </p>
@@ -674,12 +755,13 @@ export default function VisitorExperience({
           {t.parts(person.sections.length)}
           {messages.length > 0 && ` · ${t.turns(messages.length)}`}
         </p>
-        <div className="shrink-0">{langToggle}</div>
+        {langToggle && <div className="shrink-0">{langToggle}</div>}
       </header>
 
       {/* ── Stage: the digital human ── */}
       <section
-        className={`visitor-stage [grid-area:stage] relative mx-5 flex min-h-0 flex-col overflow-hidden rounded-xl border border-line bg-surface-2 transition-shadow duration-500 ease-out lg:mx-0 ${
+        data-compact={messages.length > 0 ? "true" : undefined}
+        className={`visitor-stage [grid-area:stage] relative mx-5 flex min-h-0 flex-col overflow-hidden rounded-xl border border-line bg-surface-2 transition-[box-shadow,height] duration-500 ease-out lg:mx-0 ${
           talking ? "animate-speaking-ring" : ""
         }`}
       >
@@ -725,6 +807,18 @@ export default function VisitorExperience({
               playsInline
               controls={false}
               onEnded={() => setStage("ready")}
+              onError={() => {
+                setStage("ready");
+                if (lastText) speakAll(lastText, lastLang);
+              }}
+              ref={(el) => {
+                // Autoplay with sound can be refused outside a gesture: fall back to the voice.
+                el?.play().catch(() => {
+                  setVideoUrl(null);
+                  setStage("ready");
+                  if (lastText) speakAll(lastText, lastLang);
+                });
+              }}
               className="absolute inset-0 h-full w-full object-contain"
             />
           ) : person.loopVideoUrl ? (
@@ -736,7 +830,7 @@ export default function VisitorExperience({
                 muted
                 loop
                 playsInline
-                preload="auto"
+                preload={warmMedia ? "auto" : "metadata"}
                 onLoadedData={() => setLoopVideoReady(true)}
                 className={`absolute inset-0 h-full w-full object-contain transition-opacity duration-500 ease-out ${
                   loopVideoReady ? "opacity-100" : "opacity-0"
@@ -775,12 +869,12 @@ export default function VisitorExperience({
             <span className="truncate text-[12px] text-ink-3">{statusMeta}</span>
           </div>
           {talking && !avatarStream ? (
-            <button type="button" onClick={stopSpeaking} className="chip !py-1 text-ink-3">
-              <IconStop size={14} /> {t.stop}
+            <button type="button" onClick={stopSpeaking} className="chip min-h-[36px] text-ink-2">
+              <IconStop size={15} /> {t.stop}
             </button>
           ) : canReplay ? (
-            <button type="button" onClick={replay} className="chip !py-1 text-ink-3">
-              <IconReplay size={14} /> {t.replay}
+            <button type="button" onClick={replay} className="chip min-h-[36px] text-ink-3">
+              <IconReplay size={15} /> {t.replay}
             </button>
           ) : null}
         </div>
@@ -798,10 +892,23 @@ export default function VisitorExperience({
             <p className="flex items-center gap-2 text-[15px] text-ink-3">
               <ThinkingDots /> {t.thinking}…
             </p>
+          ) : lastAssistant?.kind === "error" ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="text-[14px] text-danger">{lastAssistant.text}</p>
+              <button type="button" onClick={retry} className="chip min-h-[36px]">
+                <IconReplay size={14} /> {t.retry}
+              </button>
+            </div>
           ) : (
             <p className="text-[15px] leading-[1.6] text-ink [text-wrap:pretty]">
               {caption}
               {streaming && <span className="caret" aria-hidden />}
+            </p>
+          )}
+          {messages.length === 0 && (
+            <p className="mt-1.5 text-[12px] text-ink-3">
+              {t.soundHint}
+              {fixedLanguage || person.language === "bilingual" ? ` · ${t.speaksIn(person.language as "en" | "zh" | "bilingual")}` : ""}
             </p>
           )}
           {error && <p className="mt-2 text-[13px] text-danger">{error}</p>}
@@ -819,7 +926,7 @@ export default function VisitorExperience({
             <span className="eyebrow">{t.index}</span>
             <span className="eyebrow">{messages.length === 0 ? t.pick : t.other}</span>
           </div>
-          <div className="stagger min-h-0 overflow-y-auto">
+          <div className="stagger scroll-fade min-h-0 overflow-y-auto">
             {person.sections.map((s, i) => {
               const active = s.id === currentSectionId;
               return (
@@ -835,7 +942,7 @@ export default function VisitorExperience({
                 >
                   <span className={`w-6 shrink-0 font-mono text-[11px] ${active ? "text-accent" : "text-ink-4"}`}>{pad(i)}</span>
                   <span className="min-w-0 flex-1">
-                    <span className={`block truncate text-[14px] font-medium ${active ? "text-ink" : "text-ink-2"}`}>{s.title}</span>
+                    <span className={`block text-[14px] font-medium leading-snug [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] overflow-hidden ${active ? "text-ink" : "text-ink-2"}`}>{s.title}</span>
                     {s.hint && <span className="block truncate text-[12px] text-ink-3">{s.hint}</span>}
                   </span>
                   {active && <span className="dot bg-accent" />}
@@ -843,7 +950,7 @@ export default function VisitorExperience({
               );
             })}
             {person.sections.length === 0 && (
-              <p className="px-3.5 py-6 text-center text-[13px] text-ink-3">（暂无分段）</p>
+              <p className="px-3.5 py-6 text-center text-[13px] text-ink-3">{t.noParts}</p>
             )}
           </div>
         </div>
@@ -863,7 +970,12 @@ export default function VisitorExperience({
             </p>
           )}
           {messages.map((m) =>
-            m.role === "user" ? (
+            m.kind === "error" ? (
+              <div key={m.id} className="flex flex-wrap items-center gap-2 animate-rise">
+                <p className="text-[14px] text-danger">{m.text}</p>
+                <button type="button" onClick={retry} className="chip"><IconReplay size={14} /> {t.retry}</button>
+              </div>
+            ) : m.role === "user" ? (
               <div key={m.id} className="max-w-[85%] self-end rounded-lg bg-accent-soft px-3 py-1.5 text-[13px] text-accent animate-rise">
                 {m.text}
               </div>
@@ -899,8 +1011,10 @@ export default function VisitorExperience({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder={t.askPlaceholder(person.name)}
-            disabled={busy}
-            aria-label={t.send}
+            aria-label={t.askPlaceholder(person.name)}
+            enterKeyHint="send"
+            inputMode="text"
+            autoComplete="off"
           />
           <button
             type="submit"

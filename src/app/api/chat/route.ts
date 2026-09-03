@@ -11,6 +11,8 @@ import type { ChatTurn, Person, Section } from "@/lib/types";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
+const PUBLIC_AI_ERROR = "数字人暂时没能回答，请稍后再试 / The guide couldn't answer just now — please try again";
+
 function looksChinese(s: string): boolean {
   return /[一-鿿]/.test(s);
 }
@@ -38,6 +40,37 @@ function avatarMode(): AvatarMode {
   return "tts";
 }
 
+// ── TTS: a small per-instance cache (same sentence, same voice → same clip
+//    for a while) and a concurrency cap so a hall of phones can't fan out
+//    into hundreds of simultaneous synth calls.
+const TTS_CACHE_MAX = 300;
+const TTS_CACHE_MS = 30 * 60_000;
+const ttsCache = new Map<string, { url: string; at: number }>();
+let ttsInFlight = 0;
+const ttsWaiters: (() => void)[] = [];
+const TTS_MAX_CONCURRENT = 6;
+
+async function withTtsSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (ttsInFlight >= TTS_MAX_CONCURRENT) await new Promise<void>((r) => ttsWaiters.push(r));
+  ttsInFlight++;
+  try {
+    return await fn();
+  } finally {
+    ttsInFlight--;
+    ttsWaiters.shift()?.();
+  }
+}
+
+async function synth(text: string, gender: Person["gender"], signal: AbortSignal): Promise<string> {
+  const key = `${gender || ""}|${text}`;
+  const hit = ttsCache.get(key);
+  if (hit && Date.now() - hit.at < TTS_CACHE_MS) return hit.url;
+  const url = await withTtsSlot(() => a2eTts(text, gender, AbortSignal.any([signal, AbortSignal.timeout(15_000)])));
+  if (ttsCache.size >= TTS_CACHE_MAX) ttsCache.delete(ttsCache.keys().next().value as string);
+  ttsCache.set(key, { url, at: Date.now() });
+  return url;
+}
+
 interface Body {
   personId?: string;
   mode?: "section" | "followup";
@@ -53,6 +86,9 @@ interface Body {
 // Generate the spoken ANSWER TEXT — streamed as NDJSON events when
 // `stream` is set, with narration audio synthesized sentence by sentence
 // so the digital human starts talking after the first sentence.
+//
+// Event order: meta → delta* → suggestions → done → audio* (audio clips may
+// trail `done`; `done.chunks` says how many to expect).
 export async function POST(req: NextRequest) {
   const limited = limitRequest(req, "chat");
   if (limited) return limited;
@@ -65,6 +101,13 @@ export async function POST(req: NextRequest) {
   }
 
   const langKey = resolveAnswerLangKey(person, body.uiLang);
+  // Earlier turns come from the browser: capped, and used only as quoted
+  // context inside the prompt (never as real assistant turns).
+  const history: ChatTurn[] = (Array.isArray(body.history) ? body.history : [])
+    .filter((t) => t && (t.role === "user" || t.role === "assistant") && typeof t.content === "string")
+    .slice(-6)
+    .map((t) => ({ role: t.role, content: t.content.slice(0, 1200) }));
+
   let userPrompt: string;
   let section: Section | undefined;
 
@@ -81,7 +124,7 @@ export async function POST(req: NextRequest) {
     if (!question) return NextResponse.json({ error: "empty question" }, { status: 400 });
     if (question.length > 1000) return NextResponse.json({ error: "问题太长 / Question too long" }, { status: 400 });
     const current = person.sections.find((s) => s.id === body.sectionId);
-    userPrompt = followUpPrompt(question, current);
+    userPrompt = followUpPrompt(question, current, history);
   }
 
   const cachedText = section?.cachedAnswers?.[langKey];
@@ -89,18 +132,19 @@ export async function POST(req: NextRequest) {
   const cachedSuggestions = section?.cachedSuggestions?.[langKey] ?? [];
   const sectionTitle = section?.title;
 
-  // Keep a little history for non-repetition, but cap it (count and size).
-  const history: ChatTurn[] = (Array.isArray(body.history) ? body.history : [])
-    .filter((t) => t && (t.role === "user" || t.role === "assistant") && typeof t.content === "string")
-    .slice(-6)
-    .map((t) => ({ role: t.role, content: t.content.slice(0, 2000) }));
+  // Live (un-cached) answers spend money: a second, hourly brake.
+  if (!cachedText) {
+    const brake = limitRequest(req, "chatLive");
+    if (brake) return brake;
+  }
 
   const opts = {
     system: systemPrompt(person, body.uiLang),
-    messages: [...history, { role: "user" as const, content: userPrompt }],
+    messages: [{ role: "user" as const, content: userPrompt }],
     temperature: body.mode === "section" ? 0.6 : 0.55,
     maxTokens: body.mode === "section" ? 600 : 400,
     live: true,
+    signal: req.signal,
   };
 
   // ── One-shot JSON (tests, simple clients) ──
@@ -119,7 +163,8 @@ export async function POST(req: NextRequest) {
       const { answer, suggestions } = splitAnswer(await chat(opts));
       return NextResponse.json({ text: answer, lang: looksChinese(answer) ? "zh" : "en", sectionTitle, suggestions });
     } catch (err) {
-      return NextResponse.json({ error: err instanceof Error ? err.message : "AI error" }, { status: 500 });
+      console.error("[chat] failed:", err);
+      return NextResponse.json({ error: PUBLIC_AI_ERROR }, { status: 502 });
     }
   }
 
@@ -128,17 +173,25 @@ export async function POST(req: NextRequest) {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const send = (obj: Record<string, unknown>) => controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
+      let closed = false;
+      const send = (obj: Record<string, unknown>) => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
+        } catch {
+          closed = true;
+        }
+      };
       let seq = 0;
       const ttsJobs: Promise<void>[] = [];
       const narrate = (text: string) => {
-        if (mode !== "audio") return;
+        if (mode !== "audio" || req.signal.aborted) return;
         const s = seq++;
         ttsJobs.push(
-          a2eTts(text, person.gender)
+          synth(text, person.gender, req.signal)
             .then((url) => send({ type: "audio", seq: s, url, text }))
             .catch((err) => {
-              console.error("[chat] tts failed:", err);
+              if (!req.signal.aborted) console.error("[chat] tts failed:", err);
               send({ type: "audio", seq: s, url: null, text });
             })
         );
@@ -146,16 +199,16 @@ export async function POST(req: NextRequest) {
 
       try {
         if (cachedText) {
-          send({ type: "meta", lang: looksChinese(cachedText) ? "zh" : "en", sectionTitle, cached: true, avatar: mode });
+          const lang = looksChinese(cachedText) ? "zh" : "en";
+          send({ type: "meta", lang, sectionTitle, cached: true, avatar: mode });
           send({ type: "delta", text: cachedText });
           if (mode === "audio" && cachedAudio) {
             send({ type: "audio", seq: seq++, url: cachedAudio, text: cachedText });
           } else {
             takeSentences(cachedText, true).chunks.forEach(narrate);
           }
-          await Promise.all(ttsJobs);
           send({ type: "suggestions", items: cachedSuggestions });
-          send({ type: "done", chunks: seq, lang: looksChinese(cachedText) ? "zh" : "en", text: cachedText });
+          send({ type: "done", chunks: seq, lang, text: cachedText });
           return;
         }
 
@@ -165,6 +218,7 @@ export async function POST(req: NextRequest) {
         let trailer = false;
         let pending = "";
         for await (const delta of chatStream(opts)) {
+          if (req.signal.aborted) return;
           buf += delta;
           if (trailer) continue;
           const from = Math.max(0, emitted - SUGGESTION_MARKER.length);
@@ -193,13 +247,22 @@ export async function POST(req: NextRequest) {
         }
         takeSentences(pending, true).chunks.forEach(narrate);
         const { answer, suggestions } = splitAnswer(buf);
-        await Promise.all(ttsJobs);
+        // Text is complete: tell the client now; audio clips trail as they finish.
         send({ type: "suggestions", items: suggestions });
         send({ type: "done", chunks: seq, lang: looksChinese(answer) ? "zh" : "en", text: answer });
       } catch (err) {
-        send({ type: "error", message: err instanceof Error ? err.message : "AI error" });
+        if (!req.signal.aborted) {
+          console.error("[chat] stream failed:", err);
+          send({ type: "error", message: PUBLIC_AI_ERROR });
+        }
       } finally {
-        controller.close();
+        await Promise.allSettled(ttsJobs);
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          /* already closed */
+        }
       }
     },
   });

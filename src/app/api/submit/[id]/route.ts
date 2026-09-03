@@ -8,23 +8,24 @@ import type { Person, Section } from "@/lib/types";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** The student's secret, from the x-edit-token header or ?token=. */
-function tokenFrom(req: NextRequest): string | null {
-  return req.headers.get("x-edit-token") || req.nextUrl.searchParams.get("token");
+/** The student's secret. Reads accept ?token= (the link they were given);
+ *  writes require the header so the secret never sits in a logged URL. */
+function tokenFrom(req: NextRequest, allowQuery: boolean): string | null {
+  return req.headers.get("x-edit-token") || (allowQuery ? req.nextUrl.searchParams.get("token") : null);
 }
 
 /** Load the record only if the caller holds its edit token. A wrong token
  *  gets the same 404 as a missing record, so ids can't be probed. */
-async function loadOwned(req: NextRequest, id: string): Promise<Person | null> {
+async function loadOwned(req: NextRequest, id: string, allowQuery: boolean): Promise<Person | null> {
   const person = await getPerson(id);
-  if (!person || person.source !== "student" || !ownerTokenValid(person, tokenFrom(req))) return null;
+  if (!person || person.source !== "student" || !ownerTokenValid(person, tokenFrom(req, allowQuery))) return null;
   return person;
 }
 
 const NOT_FOUND = { error: "链接无效或已失效 / This link is invalid or has expired" };
 
 export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
-  const person = await loadOwned(req, params.id);
+  const person = await loadOwned(req, params.id, true);
   if (!person) return NextResponse.json(NOT_FOUND, { status: 404 });
   return NextResponse.json({ person: toOwner(person), previewToken: previewTokenFor(person) });
 }
@@ -46,7 +47,7 @@ export async function PUT(req: NextRequest, { params }: { params: { id: string }
   const writable = storageWritable();
   if (!writable.ok) return NextResponse.json({ error: writable.reason }, { status: 503 });
 
-  const person = await loadOwned(req, params.id);
+  const person = await loadOwned(req, params.id, false);
   if (!person) return NextResponse.json(NOT_FOUND, { status: 404 });
 
   const body = await req.json().catch(() => ({}));

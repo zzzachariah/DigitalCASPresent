@@ -64,7 +64,10 @@ export function verifyToken(token: string | undefined, now = Date.now()): boolea
 
 export function checkPassword(input: string): boolean {
   if (!adminConfigured()) return false;
-  return safeEqual(input || "", adminPassword());
+  // Compare fixed-length digests so a length mismatch doesn't short-circuit.
+  const a = createHmac("sha256", "pw").update(input || "").digest("hex");
+  const b = createHmac("sha256", "pw").update(adminPassword()).digest("hex");
+  return safeEqual(a, b);
 }
 
 /** Cookie options shared by login (set) and logout (clear). */

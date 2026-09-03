@@ -5,7 +5,7 @@
 // renamed to .jpg would otherwise be served from our origin with script).
 // ─────────────────────────────────────────────────────────────────────
 
-export const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+export const IMAGE_MAX_BYTES = 4 * 1024 * 1024;
 export const IMAGE_ACCEPT = "image/jpeg,image/png,image/webp";
 
 export type ImageKind = { ext: "jpg" | "png" | "webp"; contentType: string };
@@ -44,7 +44,7 @@ export async function readUploadedImage(
     return { ok: false, error: "缺少照片 / No photo provided", status: 400 };
   }
   if (file.size > IMAGE_MAX_BYTES) {
-    return { ok: false, error: "照片过大（≤8MB）/ Photo too large (max 8MB)", status: 400 };
+    return { ok: false, error: "照片过大（≤4MB）/ Photo too large (max 4MB)", status: 400 };
   }
   const buffer = Buffer.from(await file.arrayBuffer());
   const kind = sniffImage(buffer);

@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import type { Section } from "@/lib/types";
 import { pad2 } from "@/lib/format";
 import { Spinner } from "./Loading";
@@ -24,6 +25,7 @@ export default function SectionList({
   onMove,
   admin,
   compact = false,
+  focusId = null,
 }: {
   sections: Section[];
   onUpdate: (id: string, patch: Partial<Section>) => void;
@@ -31,14 +33,29 @@ export default function SectionList({
   onMove: (id: string, dir: -1 | 1) => void;
   admin?: SectionAdminTools;
   compact?: boolean;
+  /** Id of a part just added: scrolled into view and its title focused. */
+  focusId?: string | null;
 }) {
+  const titleRefs = useRef(new Map<string, HTMLInputElement>());
+  useEffect(() => {
+    if (!focusId) return;
+    const el = titleRefs.current.get(focusId);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.focus({ preventScroll: true });
+  }, [focusId, sections.length]);
+
   return (
     <div className="stagger space-y-3">
       {sections.map((s, i) => (
-        <div key={s.id} className="card space-y-2.5 p-4" style={{ ["--i" as string]: i }}>
+        <div key={s.id} className="card space-y-2.5 p-4" style={{ ["--i" as string]: Math.min(i, 6) }}>
           <div className="flex items-center gap-2">
             <span className="w-6 shrink-0 font-mono text-[11px] text-ink-4">{pad2(i)}</span>
             <input
+              ref={(el) => {
+                if (el) titleRefs.current.set(s.id, el);
+                else titleRefs.current.delete(s.id);
+              }}
               className="input flex-1 py-2"
               value={s.title}
               onChange={(e) => onUpdate(s.id, { title: e.target.value })}

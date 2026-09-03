@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Person } from "@/lib/types";
 import { adminApi, type EditorApi } from "@/lib/editor-api";
 import { LoadingOverlay, Spinner } from "./Loading";
@@ -59,6 +59,22 @@ export default function PersonEditor({
   const d = usePersonDraft({ person, api, admin: true });
   const fileRef = useRef<HTMLInputElement>(null);
   const errorRef = useRef<HTMLDivElement>(null);
+  const [focusId, setFocusId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!d.dirty) return;
+    const h = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", h);
+    return () => window.removeEventListener("beforeunload", h);
+  }, [d.dirty]);
+
+  function cancel() {
+    if (d.dirty && !confirm("放弃未保存的修改？")) return;
+    onCancel();
+  }
 
   useEffect(() => {
     if (d.error) errorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -79,7 +95,8 @@ export default function PersonEditor({
     { v: "female", t: "女声 · Female" },
   ];
 
-  const busy = d.sectioning || d.saving || d.parsing || d.cartooning || d.loopGenerating || d.bulkPregenerating;
+  // Long generation jobs show inline; only the short blocking steps use the overlay.
+  const busy = d.sectioning || d.saving || d.parsing || d.bulkPregenerating;
 
   return (
     <div className="relative space-y-4">
@@ -88,34 +105,28 @@ export default function PersonEditor({
           label={
             d.sectioning
               ? "AI 正在智能分段…"
-              : d.cartooning
-                ? "正在生成卡通形象…"
-                : d.loopGenerating
-                  ? "正在生成动态视频…"
-                  : d.bulkPregenerating
-                    ? "正在为所有部分预生成讲解…"
-                    : d.saving
-                      ? "正在保存…"
-                      : "正在解析文件…"
+              : d.bulkPregenerating
+                ? "正在为所有部分预生成讲解…"
+                : d.saving
+                  ? d.uploadProgress !== null
+                    ? `正在上传照片 ${Math.round(d.uploadProgress * 100)}%`
+                    : "正在保存…"
+                  : "正在解析文件…"
           }
           sub={
             d.sectioning
               ? "把讲稿分成几个部分，请稍候"
-              : d.cartooning
-                ? "用照片生成卡通，约 20–40 秒"
-                : d.loopGenerating
-                  ? "生成说话动作循环视频，约 30–90 秒"
-                  : d.bulkPregenerating
-                    ? "让访客选这些部分时能立刻播放，不用等 AI"
-                    : d.saving
-                      ? "上传照片并保存"
-                      : "从 PDF / Word 提取文字"
+              : d.bulkPregenerating
+                ? "让访客选这些部分时能立刻播放，不用等 AI"
+                : d.saving
+                  ? "保存资料并上传照片"
+                  : "从 PDF / Word 提取文字"
           }
         />
       )}
 
       <div className="flex items-center justify-between">
-        <button type="button" onClick={onCancel} className="btn-ghost -ml-2 px-2">
+        <button type="button" onClick={cancel} className="btn-ghost -ml-2 px-2">
           <IconArrowLeft size={16} /> 返回
         </button>
         <div className="text-right">
@@ -128,7 +139,7 @@ export default function PersonEditor({
         <div ref={errorRef} className="flex items-start gap-2.5 rounded-lg bg-danger-soft px-4 py-3 text-[13px] text-danger animate-rise">
           <IconWarning size={16} className="mt-0.5 shrink-0" />
           <p className="min-w-0 flex-1 break-words">{d.error}</p>
-          <button type="button" onClick={() => d.setError("")} className="shrink-0 opacity-70 hover:opacity-100" aria-label="关闭">
+          <button type="button" onClick={() => d.setError("")} className="btn-icon -mr-2 h-8 w-8 shrink-0 text-current hover:bg-transparent" aria-label="关闭">
             <IconClose size={16} />
           </button>
         </div>
@@ -179,11 +190,12 @@ export default function PersonEditor({
               <p className="text-[12px] leading-relaxed text-ink-3">用本人照片生成轻卡通（还认得出是谁），用于访客端显示和数字人说话。</p>
             </div>
             {d.isEdit ? (
-              <button type="button" className="btn-secondary shrink-0" onClick={d.generateCartoon} disabled={d.cartooning}>
-                {d.cartoonUrl ? "重新生成" : "生成"}
+              <button type="button" className="btn-secondary shrink-0" onClick={d.generateCartoon} disabled={d.cartooning || d.loopGenerating}>
+                {d.cartooning ? <Spinner /> : null}
+                {d.cartooning ? "生成中，约 30 秒" : d.cartoonUrl ? "重新生成" : "生成"}
               </button>
             ) : (
-              <span className="shrink-0 text-[12px] text-ink-4">先保存</span>
+              <span className="shrink-0 text-[12px] text-ink-3">先保存</span>
             )}
           </div>
           <div className="flex items-center gap-4 py-4">
@@ -199,11 +211,12 @@ export default function PersonEditor({
               <p className="text-[12px] leading-relaxed text-ink-3">几秒的说话状态循环视频，只生成一次；访客提问时语音配它播放，秒回。建议先生成卡通。</p>
             </div>
             {d.isEdit ? (
-              <button type="button" className="btn-secondary shrink-0" onClick={d.generateLoopVideo} disabled={d.loopGenerating}>
-                {d.loopVideoUrl ? "重新生成" : "生成"}
+              <button type="button" className="btn-secondary shrink-0" onClick={d.generateLoopVideo} disabled={d.loopGenerating || d.cartooning}>
+                {d.loopGenerating ? <Spinner /> : null}
+                {d.loopGenerating ? "生成中，约 1 分钟" : d.loopVideoUrl ? "重新生成" : "生成"}
               </button>
             ) : (
-              <span className="shrink-0 text-[12px] text-ink-4">先保存</span>
+              <span className="shrink-0 text-[12px] text-ink-3">先保存</span>
             )}
           </div>
         </div>
@@ -297,7 +310,7 @@ export default function PersonEditor({
                 <IconBolt size={15} /> 预生成全部
               </button>
             )}
-            <button type="button" className="btn-ghost px-2.5 py-1.5 text-[13px]" onClick={d.addSection}>
+            <button type="button" className="btn-ghost px-2.5 py-2 text-[13px]" onClick={() => setFocusId(d.addSection())}>
               <IconPlus size={15} /> 添加
             </button>
           </div>
@@ -316,6 +329,7 @@ export default function PersonEditor({
           onUpdate={d.updateSection}
           onRemove={d.removeSection}
           onMove={d.moveSection}
+          focusId={focusId}
           admin={
             d.isEdit
               ? {
@@ -334,7 +348,7 @@ export default function PersonEditor({
       {/* Sticky action bar */}
       <div className="sticky bottom-0 z-10 -mx-1 mt-2 border-t border-line bg-bg/85 px-1 py-3 backdrop-blur">
         <div className="flex gap-2">
-          <button type="button" className="btn-secondary flex-1" onClick={onCancel}>取消</button>
+          <button type="button" className="btn-secondary flex-1" onClick={cancel}>取消</button>
           <button type="button" className="btn-primary flex-[2]" onClick={save} disabled={d.saving}>
             {d.saving ? <Spinner light /> : null}
             {d.saving ? "保存中…" : d.isEdit ? "保存修改" : "创建并生成二维码"}

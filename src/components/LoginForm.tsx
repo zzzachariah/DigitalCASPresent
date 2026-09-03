@@ -13,20 +13,25 @@ export default function LoginForm() {
     e.preventDefault();
     setLoading(true);
     setError("");
-    const res = await fetch("/api/admin/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password }),
-    });
-    if (res.ok) {
-      // Hard navigation so the browser sends the freshly-set cookie to the
-      // server-rendered /admin page (avoids the App Router cache/cookie race).
-      window.location.href = "/admin";
-      return;
+    try {
+      const res = await fetch("/api/admin/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (res.ok) {
+        // Hard navigation so the browser sends the freshly-set cookie to the
+        // server-rendered /admin page (avoids the App Router cache/cookie race).
+        window.location.href = "/admin";
+        return;
+      }
+      const data = await readJson(res);
+      setError(data.error || "登录失败 / Login failed");
+    } catch {
+      setError("网络错误，请重试 · Network error, please retry");
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
-    const data = await readJson(res);
-    setError(data.error || "登录失败 / Login failed");
   }
 
   return (

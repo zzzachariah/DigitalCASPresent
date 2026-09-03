@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import QRCode from "qrcode";
 import { IconCopy, IconCheck, IconExternal } from "./icons";
 
@@ -19,6 +19,14 @@ export default function QrModal({
 }) {
   const [dataUrl, setDataUrl] = useState("");
   const [copied, setCopied] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Move focus into the dialog; give it back when closing.
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    dialogRef.current?.focus();
+    return () => previous?.focus?.();
+  }, []);
 
   useEffect(() => {
     QRCode.toDataURL(link, {
@@ -35,9 +43,13 @@ export default function QrModal({
   }, [onClose]);
 
   async function copy() {
-    await navigator.clipboard.writeText(link);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      prompt("复制链接 / Copy this link:", link);
+    }
   }
 
   return (
@@ -49,7 +61,9 @@ export default function QrModal({
       aria-label={title}
     >
       <div
-        className="card w-full max-w-sm animate-rise rounded-b-none p-6 shadow-2 sm:rounded-xl"
+        ref={dialogRef}
+        tabIndex={-1}
+        className="card w-full max-w-sm animate-rise rounded-b-none p-6 shadow-2 outline-none sm:rounded-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-5">
@@ -73,7 +87,12 @@ export default function QrModal({
             {copied ? <IconCheck size={16} /> : <IconCopy size={16} />}
             {copied ? "已复制" : "复制链接"}
           </button>
-          <a className="btn-secondary" href={dataUrl} download={`${downloadName}.png`}>
+          <a
+            className={`btn-secondary ${dataUrl ? "" : "pointer-events-none opacity-50"}`}
+            href={dataUrl || undefined}
+            download={`${downloadName}.png`}
+            aria-disabled={!dataUrl}
+          >
             下载二维码
           </a>
         </div>

@@ -26,6 +26,14 @@ export interface ChatOptions {
   maxTokens?: number;
   /** Use the faster live model (default: the quality model). */
   live?: boolean;
+  /** Aborted when the visitor leaves or taps something else. */
+  signal?: AbortSignal;
+}
+
+/** Upstream request signal: the caller's abort, plus a hard timeout. */
+function upstreamSignal(signal: AbortSignal | undefined, ms: number): AbortSignal {
+  const timeout = AbortSignal.timeout(ms);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
 function requestBody(opts: ChatOptions, stream: boolean) {
@@ -50,6 +58,7 @@ export async function chat(opts: ChatOptions): Promise<string> {
     method: "POST",
     headers: HEADERS(),
     body: requestBody(opts, false),
+    signal: upstreamSignal(opts.signal, 90_000),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -78,6 +87,7 @@ export async function* chatStream(opts: ChatOptions): AsyncGenerator<string> {
     method: "POST",
     headers: HEADERS(),
     body: requestBody(opts, true),
+    signal: upstreamSignal(opts.signal, 60_000),
   });
   if (!res.ok || !res.body) {
     const body = await res.text().catch(() => "");

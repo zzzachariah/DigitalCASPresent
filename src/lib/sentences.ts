@@ -36,7 +36,7 @@ export function markerHoldback(buf: string): number {
   return 0;
 }
 
-const END = /[。！？!?]+["'”’)）]*|[.;；]+(?=\s|$)["'”’)）]*|\n+/g;
+const END = /[。！？!?]+["'”’)）]*|[.;；]+["'”’)）]*(?=\s|$)|\n+/g;
 const MIN = 12;
 const MAX = 140;
 
@@ -52,6 +52,9 @@ export function takeSentences(buf: string, flush = false): { chunks: string[]; r
     const m = END.exec(rest);
     if (!m) break;
     const end = m.index + m[0].length;
+    // A "." or ";" at the very end of a still-growing buffer may be the middle
+    // of "3.5" or an abbreviation — wait for more text (or the final flush).
+    if (!flush && end === rest.length && /^[.;；]/.test(m[0])) break;
     current += rest.slice(0, end);
     rest = rest.slice(end);
     if (current.trim().length >= MIN) {

@@ -61,7 +61,7 @@ export function useDidStream(personId: string, enabled: boolean) {
               sdpMid: e.candidate.sdpMid,
               sdpMLineIndex: e.candidate.sdpMLineIndex,
             },
-          });
+          }).catch(() => {});
         }
       });
       pc.addEventListener("connectionstatechange", () => {

@@ -6,7 +6,7 @@ import { readJson } from "@/lib/http";
 import { studentApi, type StudentTokens } from "@/lib/editor-api";
 import SubmitWizard, { readStoredDraft } from "./SubmitWizard";
 import DraftPreview, { type Draft } from "./DraftPreview";
-import { IconArrowRight, IconCheck, IconCopy, IconEdit, IconExternal } from "./icons";
+import { IconArrowRight, IconCheck, IconCopy, IconEdit, IconExternal, IconLink } from "./icons";
 
 // ─────────────────────────────────────────────────────────────────────
 // Student self-submission flow:
@@ -21,7 +21,8 @@ type Stage =
   | { kind: "loading" }
   | { kind: "invalid" }
   | { kind: "edit"; person: Person | null }
-  | { kind: "done"; person: Person };
+  /** `justSubmitted`: show the success moment; otherwise a status overview. */
+  | { kind: "done"; person: Person; justSubmitted: boolean };
 
 const STORAGE_KEY = "dcp_my_submissions";
 interface Remembered {
@@ -72,13 +73,16 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
   const [copied, setCopied] = useState("");
   const [draft, setDraft] = useState<Draft>({ name: "", subtitle: "", sections: [] });
 
+  // Intro: refresh what this device remembers whenever we come back to it.
   useEffect(() => {
-    if (!id) {
-      setMine(remembered());
-      const dr = readStoredDraft();
-      setDraftName(dr ? dr.name.trim() || "未命名" : null);
-      return;
-    }
+    if (stage.kind !== "intro") return;
+    setMine(remembered());
+    const dr = readStoredDraft();
+    setDraftName(dr ? dr.name.trim() || "未命名" : null);
+  }, [stage.kind]);
+
+  useEffect(() => {
+    if (!id) return;
     if (!token) {
       setStage({ kind: "invalid" });
       return;
@@ -88,16 +92,39 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
         const data = await readJson(res);
         if (!res.ok) throw new Error(data.error);
         tokenBox.preview = data.previewToken ?? null;
+        remember({ id, token, name: data.person.name, at: Date.now() });
+        // Keep the secret out of the address bar / history / screenshots.
+        try {
+          window.history.replaceState(null, "", `/submit/${id}`);
+        } catch {
+          /* ignore */
+        }
         setStage({ kind: "edit", person: data.person });
       })
       .catch(() => setStage({ kind: "invalid" }));
   }, [id, token, tokenBox]);
 
+  // The record exists on the server from this moment: remember its link even
+  // if the photo upload that follows fails.
+  function onCreated(p: Person) {
+    const t = tokenBox.current;
+    if (t) remember({ id: p.id, token: t, name: p.name, at: Date.now() });
+  }
+
   function onSaved(p: Person) {
     const t = tokenBox.current;
     if (t) remember({ id: p.id, token: t, name: p.name, at: Date.now() });
-    setStage({ kind: "done", person: p });
+    setStage({ kind: "done", person: p, justSubmitted: true });
     window.scrollTo({ top: 0 });
+  }
+
+  async function share(url: string) {
+    try {
+      if (navigator.share) await navigator.share({ title: "我的 TOK 数字人 · 修改链接", url });
+      else window.location.href = `mailto:?subject=${encodeURIComponent("我的 TOK 数字人修改链接")}&body=${encodeURIComponent(url)}`;
+    } catch {
+      /* cancelled */
+    }
   }
 
   async function copy(text: string, key: string) {
@@ -169,9 +196,11 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
             <SubmitWizard
               person={p}
               api={api}
+              tokens={tokenBox}
               onSaved={onSaved}
+              onCreated={onCreated}
               onDraftChange={setDraft}
-              onCancel={() => (p ? setStage({ kind: "done", person: p }) : setStage({ kind: "intro" }))}
+              onCancel={() => (p ? setStage({ kind: "done", person: p, justSubmitted: false }) : setStage({ kind: "intro" }))}
             />
           </div>
           <aside className="hidden lg:block">
@@ -188,22 +217,28 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
     const p = stage.person;
     const t = tokenBox.current || "";
     const editLink = `${base}/submit/${p.id}?token=${encodeURIComponent(t)}`;
-    const previewLink = `${base}/p/${p.slug}?preview=${encodeURIComponent(tokenBox.preview || t)}`;
+    const previewLink = tokenBox.preview ? `${base}/p/${p.slug}?preview=${encodeURIComponent(tokenBox.preview)}` : null;
+    const approved = p.status === "approved";
     return (
       <main className="mx-auto max-w-2xl px-5 py-8 lg:py-12">
         {topbar}
         <div className="stagger mt-10 space-y-4">
           <div style={{ ["--i" as string]: 0 }}>
-            <div className="mb-5 h-16 w-16 animate-pop">
-              <svg viewBox="0 0 64 64" className="h-16 w-16" aria-hidden>
-                <circle cx="32" cy="32" r="30" className="fill-success-soft" />
-                <path d="M20 33l8 8 16-17" fill="none" stroke="var(--success)" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" className="check-draw" />
-              </svg>
-            </div>
-            <p className="eyebrow">Submitted</p>
-            <h1 className="mt-2 font-display text-[30px] font-semibold leading-tight tracking-[-0.015em]">已提交，等待老师审核</h1>
+            {stage.justSubmitted && (
+              <div className="mb-5 h-16 w-16 animate-pop">
+                <svg viewBox="0 0 64 64" className="h-16 w-16" aria-hidden>
+                  <circle cx="32" cy="32" r="30" className="fill-success-soft" />
+                  <path d="M20 33l8 8 16-17" fill="none" stroke="var(--success)" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" className="check-draw" />
+                </svg>
+              </div>
+            )}
+            <p className="eyebrow">{stage.justSubmitted ? "Submitted" : "My submission"}</p>
+            <h1 className="mt-2 font-display text-[30px] font-semibold leading-tight tracking-[-0.015em]">
+              {stage.justSubmitted ? "已提交，等待老师审核" : approved ? "我的数字人已发布" : "我的提交 · 等待审核"}
+            </h1>
             <p className="mt-2 text-[15px] text-ink-2">
-              {p.name} · {p.sections.length} 个部分{p.photoUrl ? "" : " · 还没有照片"}。老师通过后，你的二维码页面就会对访客开放。
+              {p.name} · {p.sections.length} 个部分{p.photoUrl ? "" : " · 还没有照片"}。
+              {approved && !stage.justSubmitted ? "访客扫你的二维码就能看到。修改并重新提交后会暂时下线，等老师再次审核。" : "老师通过后，你的二维码页面就会对访客开放。"}
             </p>
           </div>
 
@@ -215,22 +250,35 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
               The only way to edit later — keep it, don’t share it.
             </p>
             <p className="mt-3 break-all rounded-lg bg-surface-2 px-3 py-2 font-mono text-[12px] text-ink-2">{editLink}</p>
-            <div className="mt-3 grid grid-cols-2 gap-2">
+            <div className="mt-3 grid grid-cols-3 gap-2">
               <button type="button" className="btn-secondary" onClick={() => copy(editLink, "edit")}>
-                {copied === "edit" ? <IconCheck size={15} /> : <IconCopy size={15} />} {copied === "edit" ? "已复制" : "复制链接"}
+                {copied === "edit" ? <IconCheck size={15} /> : <IconCopy size={15} />} {copied === "edit" ? "已复制" : "复制"}
+              </button>
+              <button type="button" className="btn-secondary" onClick={() => share(editLink)}>
+                <IconLink size={15} /> 发给自己
               </button>
               <button type="button" className="btn-secondary" onClick={() => setStage({ kind: "edit", person: p })}>
-                <IconEdit size={15} /> 继续修改
+                <IconEdit size={15} /> 修改
               </button>
             </div>
           </div>
 
           <div className="card p-5" style={{ ["--i" as string]: 2 }}>
-            <p className="text-[15px] font-semibold">预览我的数字人 · Preview</p>
-            <p className="mt-1 text-[13px] leading-relaxed text-ink-3">这个链接只能看、不能改，可以发给同学帮你看看；老师审核通过后，访客扫码才能看到。</p>
-            <a href={previewLink} target="_blank" rel="noreferrer" className="btn-primary mt-3 w-full">
-              打开预览 <IconExternal size={15} />
-            </a>
+            <p className="text-[15px] font-semibold">{approved ? "我的数字人页面 · My page" : "预览我的数字人 · Preview"}</p>
+            <p className="mt-1 text-[13px] leading-relaxed text-ink-3">
+              {approved ? "这就是访客扫码看到的页面。" : "这个链接只能看、不能改，可以发给同学帮你看看；老师审核通过后，访客扫码才能看到。"}
+            </p>
+            {approved ? (
+              <a href={`${base}/p/${p.slug}`} target="_blank" rel="noreferrer" className="btn-primary mt-3 w-full">
+                打开页面 <IconExternal size={15} />
+              </a>
+            ) : previewLink ? (
+              <a href={previewLink} target="_blank" rel="noreferrer" className="btn-primary mt-3 w-full">
+                打开预览 <IconExternal size={15} />
+              </a>
+            ) : (
+              <p className="mt-3 text-[13px] text-ink-3">预览链接会在通过专属修改链接重新打开后显示。</p>
+            )}
           </div>
         </div>
       </main>
@@ -259,7 +307,7 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
             <button type="button" className="btn-primary px-5 py-3" onClick={() => setStage({ kind: "edit", person: null })}>
               {draftName ? "继续上次的草稿 · Continue" : "开始填写 · Start"} <IconArrowRight size={16} />
             </button>
-            <span className="text-[12px] text-ink-4">
+            <span className="text-[12px] text-ink-3">
               {draftName ? `这台设备上有未提交的草稿：${draftName}` : "大约 5 分钟 · about 5 minutes"}
             </span>
           </div>

@@ -7,17 +7,38 @@ const DATA_DIR = path.join(process.cwd(), "data");
 const PEOPLE_DIR = path.join(DATA_DIR, "people");
 const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 
-function avatarSvg(initials, c1, c2) {
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
-  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-    <stop offset="0" stop-color="${c1}"/><stop offset="1" stop-color="${c2}"/>
-  </linearGradient></defs>
-  <rect width="400" height="400" fill="url(#g)"/>
-  <circle cx="200" cy="160" r="70" fill="rgba(255,255,255,0.92)"/>
-  <rect x="96" y="248" width="208" height="150" rx="104" fill="rgba(255,255,255,0.92)"/>
-  <text x="200" y="182" font-family="Inter,Arial,sans-serif" font-size="64" font-weight="700"
-    fill="${c1}" text-anchor="middle">${initials}</text>
-</svg>`;
+import zlib from "zlib";
+
+// Minimal PNG writer (no dependencies): a soft two-tone portrait placeholder.
+function png(width, height, pixelAt) {
+  const raw = Buffer.alloc((width * 3 + 1) * height);
+  for (let y = 0; y < height; y++) {
+    raw[y * (width * 3 + 1)] = 0; // filter: none
+    for (let x = 0; x < width; x++) {
+      const [r, g, b] = pixelAt(x, y);
+      const o = y * (width * 3 + 1) + 1 + x * 3;
+      raw[o] = r; raw[o + 1] = g; raw[o + 2] = b;
+    }
+  }
+  const crcTable = [...Array(256)].map((_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+  const crc = (buf) => { let c = 0xffffffff; for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (type, data) => { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const td = Buffer.concat([Buffer.from(type), data]); const c = Buffer.alloc(4); c.writeUInt32BE(crc(td)); return Buffer.concat([len, td, c]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4); ihdr[8] = 8; ihdr[9] = 2; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
+}
+
+function hex(c) { return [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16)]; }
+
+/** 400×400 portrait placeholder: gradient background, light head + shoulders. */
+function avatarPng(c1, c2) {
+  const a = hex(c1), b = hex(c2), light = [246, 247, 250];
+  return png(400, 400, (x, y) => {
+    const head = (x - 200) ** 2 + (y - 160) ** 2 <= 70 ** 2;
+    const body = y >= 250 && ((x - 200) ** 2) / (104 ** 2) + ((y - 320) ** 2) / (75 ** 2) <= 1;
+    if (head || body) return light;
+    const t = (x + y) / 800;
+    return [0, 1, 2].map((i) => Math.round(a[i] * (1 - t) + b[i] * t));
+  });
 }
 
 const people = [
@@ -109,11 +130,7 @@ async function main() {
       content: contents[i],
     }));
 
-    await fs.writeFile(
-      path.join(UPLOAD_DIR, `${p.id}.svg`),
-      avatarSvg(p.avatar.initials, p.avatar.c1, p.avatar.c2),
-      "utf8"
-    );
+    await fs.writeFile(path.join(UPLOAD_DIR, `${p.id}.png`), avatarPng(p.avatar.c1, p.avatar.c2));
 
     // One JSON file per person (see src/lib/store-fs.ts).
     const record = {

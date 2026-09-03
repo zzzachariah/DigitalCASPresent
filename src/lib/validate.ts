@@ -27,14 +27,20 @@ function str(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 
-function sectionFrom(raw: unknown, allowCachedAnswers: boolean): Section | null {
+/** "第 3 部分" / "Part 3", picked by the language of the text around it. */
+export function defaultSectionTitle(index: number, sample: string): string {
+  return /[一-鿿]/.test(sample) ? `第 ${index + 1} 部分` : `Part ${index + 1}`;
+}
+
+function sectionFrom(raw: unknown, index: number, allowCachedAnswers: boolean): Section | null {
   if (!raw || typeof raw !== "object") return null;
   const s = raw as Record<string, unknown>;
   const id = str(s.id);
+  const content = (str(s.content) || "").trim().slice(0, LIMITS.sectionContent);
   const section: Section = {
     id: id && /^[A-Za-z0-9_-]{1,32}$/.test(id) ? id : nanoid(8),
-    title: (str(s.title) || "").trim().slice(0, LIMITS.sectionTitle) || "Untitled",
-    content: (str(s.content) || "").trim().slice(0, LIMITS.sectionContent),
+    title: (str(s.title) || "").trim().slice(0, LIMITS.sectionTitle) || defaultSectionTitle(index, content),
+    content,
   };
   const hint = (str(s.hint) || "").trim().slice(0, LIMITS.sectionHint);
   if (hint) section.hint = hint;
@@ -112,7 +118,7 @@ export function parsePersonInput(
       return { ok: false, error: `分段太多（≤${LIMITS.sections} 个）/ Too many sections` };
     }
     out.sections = raw
-      .map((s) => sectionFrom(s, opts.allowCachedAnswers))
+      .map((s, i) => sectionFrom(s, i, opts.allowCachedAnswers))
       .filter((s): s is Section => !!s);
   }
   return { ok: true, value: out };

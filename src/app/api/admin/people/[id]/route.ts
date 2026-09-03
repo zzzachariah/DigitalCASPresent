@@ -36,8 +36,10 @@ export async function PUT(
   // already persisted them). Re-asserting them here — instead of relying on
   // an omitted field implying "keep existing" — closes any gap where a save
   // could otherwise clobber a just-generated asset.
-  if (typeof body.cartoonUrl === "string") patch.cartoonUrl = body.cartoonUrl || undefined;
-  if (typeof body.loopVideoUrl === "string") patch.loopVideoUrl = body.loopVideoUrl || undefined;
+  const ownMedia = (u: unknown): string | undefined =>
+    typeof u === "string" && u.length <= 500 && /^(\/api\/photo\/|https:\/\/[a-z0-9.-]+\.blob\.vercel-storage\.com\/)/.test(u) ? u : undefined;
+  if (typeof body.cartoonUrl === "string") patch.cartoonUrl = ownMedia(body.cartoonUrl);
+  if (typeof body.loopVideoUrl === "string") patch.loopVideoUrl = ownMedia(body.loopVideoUrl);
 
   const writable = storageWritable();
   if (!writable.ok) {

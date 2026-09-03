@@ -12,14 +12,18 @@ import { NextRequest, NextResponse } from "next/server";
 // ─────────────────────────────────────────────────────────────────────
 
 const RATE = {
-  /** Visitor answer generation. */
-  chat: { limit: 90, windowMs: 60_000, global: 600 },
-  /** Talking-avatar / TTS synthesis. */
+  /** Visitor answers (a whole hall of phones may share one IP). */
+  chat: { limit: 150, windowMs: 60_000, global: 900 },
+  /** Live, un-cached AI answers per hour — a spend brake per instance. Cached
+   *  section plays never count. */
+  chatLive: { limit: 600, windowMs: 60 * 60_000, global: 1200 },
+  /** Talking-avatar / TTS synthesis (per-answer video path, D-ID stream). */
   avatar: { limit: 90, windowMs: 60_000, global: 600 },
-  /** Student submission writes (create / update / photo). */
-  submitWrite: { limit: 40, windowMs: 10 * 60_000, global: 400 },
+  /** Student submission writes (create / update / photo): a class of 30
+   *  submits ~3 writes each within minutes. */
+  submitWrite: { limit: 400, windowMs: 10 * 60_000, global: 1500 },
   /** Student-triggered AI (auto-sectioning) and file parsing. */
-  submitAi: { limit: 40, windowMs: 10 * 60_000, global: 300 },
+  submitAi: { limit: 200, windowMs: 10 * 60_000, global: 300 },
   /** Admin login attempts. */
   login: { limit: 10, windowMs: 60_000, global: 200 },
 } as const;
@@ -57,10 +61,21 @@ export function rateLimit(
   return { ok: true };
 }
 
+/** Only believe proxy headers where a proxy actually sets them (Vercel, or a
+ *  self-hosted deployment that opts in with TRUST_PROXY=1); otherwise a client
+ *  could mint a fresh "IP" per request. */
+function trustProxy(): boolean {
+  return !!process.env.VERCEL || process.env.TRUST_PROXY === "1";
+}
+
 export function clientIp(req: NextRequest): string {
-  const xff = req.headers.get("x-forwarded-for");
-  if (xff) return xff.split(",")[0].trim();
-  return req.headers.get("x-real-ip") || req.ip || "unknown";
+  if (trustProxy()) {
+    const xff = req.headers.get("x-forwarded-for");
+    if (xff) return xff.split(",")[0].trim();
+    const real = req.headers.get("x-real-ip");
+    if (real) return real;
+  }
+  return req.ip || "shared";
 }
 
 /** Apply a scope's per-IP and global limits. Returns a 429 response to send,
@@ -71,9 +86,11 @@ export function limitRequest(req: NextRequest, scope: RateScope): NextResponse |
   const global = rateLimit(`${scope}:*`, cfg.global, cfg.windowMs);
   const blocked = !perIp.ok ? perIp : !global.ok ? global : null;
   if (!blocked) return null;
+  const secs = blocked.retryAfterSec;
+  const wait = secs >= 90 ? `${Math.ceil(secs / 60)} 分钟 / ${Math.ceil(secs / 60)} min` : `${secs} 秒 / ${secs}s`;
   return NextResponse.json(
-    { error: "请求太频繁，请稍后再试 / Too many requests, please slow down" },
-    { status: 429, headers: { "Retry-After": String(blocked.retryAfterSec) } }
+    { error: `请求太频繁，请 ${wait} 后再试 / Too many requests, please try again in ${wait.split(" / ")[1]}`, retryAfter: secs },
+    { status: 429, headers: { "Retry-After": String(secs) } }
   );
 }
 

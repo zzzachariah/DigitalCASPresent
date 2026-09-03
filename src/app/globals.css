@@ -185,7 +185,7 @@
     @apply inline-flex overflow-hidden rounded-lg border border-line-strong bg-surface text-[12px] font-medium;
   }
   .seg > * {
-    @apply px-3 py-1.5 text-ink-3 transition-[background-color,color] duration-200 ease-out;
+    @apply min-h-[36px] min-w-[44px] px-3 py-1.5 text-ink-3 transition-[background-color,color] duration-200 ease-out;
   }
   .seg > [data-on="true"] {
     @apply bg-ink text-bg;
@@ -238,6 +238,10 @@
 .visitor-stage {
   height: clamp(240px, 38dvh, 480px);
 }
+/* Once the visitor is in a conversation, give the caption and index more room. */
+.visitor-stage[data-compact="true"] {
+  height: clamp(200px, 30dvh, 400px);
+}
 @media (min-width: 1024px) {
   .visitor-shell {
     grid-template-columns: 300px minmax(0, 1fr) 400px;
@@ -260,6 +264,12 @@
     column-gap: 32px;
     padding: 0 56px 32px;
   }
+}
+
+/* Soft fade at the bottom of a scrolling list, hinting there is more. */
+.scroll-fade {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
 }
 
 /* Streaming caret at the end of an answer still being written. */

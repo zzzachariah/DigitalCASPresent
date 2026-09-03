@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Person } from "@/lib/types";
 import type { EditorApi } from "@/lib/editor-api";
 import { pad2 } from "@/lib/format";
+import { LIMITS } from "@/lib/validate";
 import { Spinner } from "./Loading";
 import DraftPreview, { type Draft } from "./DraftPreview";
 import SectionList from "./SectionList";
@@ -49,6 +50,11 @@ interface StoredDraft {
   step: number;
   reached: number;
   at: number;
+  /** Set once the server has created the record (before the photo went up),
+   *  so a restored draft updates that record instead of creating another. */
+  createdId?: string;
+  editToken?: string;
+  previewToken?: string;
 }
 export function readStoredDraft(): StoredDraft | null {
   try {
@@ -83,14 +89,20 @@ export default function SubmitWizard({
   onSaved,
   onCancel,
   onDraftChange,
+  onCreated,
+  tokens,
 }: {
   person: Person | null;
   api: EditorApi;
   onSaved: (p: Person) => void;
   onCancel: () => void;
   onDraftChange?: (d: Draft) => void;
+  /** The record now exists on the server (photo may still be uploading). */
+  onCreated?: (p: Person) => void;
+  /** Student credentials box (shared with the API), for draft persistence. */
+  tokens?: { current: string | null; preview: string | null };
 }) {
-  const d = usePersonDraft({ person, api, admin: false });
+  const d = usePersonDraft({ person, api, admin: false, onCreated });
   // Editing an existing submission opens on the review page; from there the
   // student jumps to whichever page needs a change.
   const [step, setStep] = useState(person ? LAST : 0);
@@ -98,6 +110,9 @@ export default function SubmitWizard({
   const [reached, setReached] = useState(person ? LAST : 0);
   const [dragging, setDragging] = useState(false);
   const [restored, setRestored] = useState(false);
+  const [sectionsDirty, setSectionsDirty] = useState(false);
+  const [scriptAtSplit, setScriptAtSplit] = useState<string | null>(person ? person.script : null);
+  const [focusId, setFocusId] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const topRef = useRef<HTMLDivElement>(null);
   const hydratedRef = useRef(false);
@@ -120,6 +135,25 @@ export default function SubmitWizard({
       d.setLanguage(dr.language || "auto");
       d.setScript(dr.script || "");
       d.setSections(Array.isArray(dr.sections) ? dr.sections : []);
+      if (Array.isArray(dr.sections) && dr.sections.length) setScriptAtSplit(dr.script || "");
+      if (dr.createdId && dr.editToken && tokens) {
+        // The record already exists: continue as an update of it.
+        tokens.current = dr.editToken;
+        tokens.preview = dr.previewToken ?? null;
+        d.adoptCreated({
+          id: dr.createdId,
+          slug: "",
+          name: dr.name || "",
+          subtitle: dr.subtitle,
+          script: dr.script || "",
+          sections: Array.isArray(dr.sections) ? dr.sections : [],
+          language: dr.language || "auto",
+          status: "pending",
+          source: "student",
+          createdAt: dr.at,
+          updatedAt: dr.at,
+        });
+      }
       const st = Math.min(Math.max(0, dr.step || 0), LAST);
       setStep(st);
       setReached(Math.min(Math.max(st, dr.reached || 0), LAST));
@@ -146,6 +180,9 @@ export default function SubmitWizard({
           step,
           reached,
           at: Date.now(),
+          createdId: d.existing?.id,
+          editToken: d.existing && tokens?.current ? tokens.current : undefined,
+          previewToken: d.existing && tokens?.preview ? tokens.preview : undefined,
         };
         localStorage.setItem(DRAFT_KEY, JSON.stringify(stored));
       } catch {
@@ -153,13 +190,37 @@ export default function SubmitWizard({
       }
     }, 400);
     return () => clearTimeout(t);
-  }, [person, d.name, d.subtitle, d.gender, d.language, d.script, d.sections, step, reached]);
+  }, [person, d.name, d.subtitle, d.gender, d.language, d.script, d.sections, step, reached, d.existing, tokens]);
+
+  // Warn before the tab is closed with unsaved changes.
+  useEffect(() => {
+    if (!d.dirty) return;
+    const h = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", h);
+    return () => window.removeEventListener("beforeunload", h);
+  }, [d.dirty]);
 
   const hasContent = !!(d.name.trim() || d.script.trim() || d.sections.length || d.photoPreview);
   function cancel() {
-    if (!person && hasContent && !confirm("放弃已填写的内容？（草稿仍会保留在这台设备上）\nDiscard what you've entered?")) return;
+    if (person) {
+      if (d.dirty && !confirm("放弃这次的修改？\nDiscard your changes?")) return;
+    } else if (hasContent && !confirm("放弃已填写的内容？（草稿仍会保留在这台设备上）\nDiscard what you've entered?")) {
+      return;
+    }
     onCancel();
   }
+  async function resplit() {
+    if (d.sections.length && (sectionsDirty || d.isEdit) && !confirm("重新分段会替换你现在的所有部分（包括手动修改）。继续？\nThis replaces all current parts. Continue?")) return;
+    const ok = await d.autoSection();
+    if (ok) {
+      setSectionsDirty(false);
+      setScriptAtSplit(d.script);
+    }
+  }
+  const staleParts = d.sections.length > 0 && scriptAtSplit !== null && d.script.trim() !== scriptAtSplit.trim();
   function startOver() {
     if (!confirm("清空草稿，从头开始？ / Clear the draft and start over?")) return;
     clearStoredDraft();
@@ -178,7 +239,9 @@ export default function SubmitWizard({
   function blocker(i: number): string | null {
     if (i === 1 && !d.name.trim()) return "请填写姓名 · Name is required";
     if (i === 2 && !d.script.trim()) return "请先粘贴或上传讲稿 · Add your script first";
+    if (i === 2 && d.script.length > LIMITS.script) return `讲稿超过 ${LIMITS.script.toLocaleString()} 字，请精简 · Script is too long`;
     if (i === 3 && d.sections.length === 0) return "至少需要一个部分 · Add at least one part";
+    if (i === 3 && d.sections.some((s) => !s.title.trim())) return "每个部分都需要标题 · Every part needs a title";
     return null;
   }
 
@@ -205,7 +268,10 @@ export default function SubmitWizard({
       // let the AI split run there (skeletons while it works).
       if (i === 2 && d.sections.length === 0) {
         show(3, 1);
-        await d.autoSection();
+        if (await d.autoSection()) {
+          setSectionsDirty(false);
+          setScriptAtSplit(d.script);
+        }
         return;
       }
     }
@@ -287,7 +353,7 @@ export default function SubmitWizard({
           <button type="button" onClick={startOver} className="shrink-0 text-[12px] underline-offset-2 hover:underline">
             清空重来
           </button>
-          <button type="button" onClick={() => setRestored(false)} className="shrink-0 opacity-70 hover:opacity-100" aria-label="关闭">
+          <button type="button" onClick={() => setRestored(false)} className="btn-icon -mr-2 h-8 w-8 shrink-0 text-current hover:bg-transparent" aria-label="关闭">
             <IconClose size={15} />
           </button>
         </div>
@@ -297,7 +363,7 @@ export default function SubmitWizard({
         <div className="mb-4 flex items-start gap-2.5 rounded-lg bg-danger-soft px-4 py-3 text-[13px] text-danger animate-rise">
           <IconWarning size={16} className="mt-0.5 shrink-0" />
           <p className="min-w-0 flex-1 break-words">{d.error}</p>
-          <button type="button" onClick={() => d.setError("")} className="shrink-0 opacity-70 hover:opacity-100" aria-label="关闭">
+          <button type="button" onClick={() => d.setError("")} className="btn-icon -mr-2 h-8 w-8 shrink-0 text-current hover:bg-transparent" aria-label="关闭">
             <IconClose size={16} />
           </button>
         </div>
@@ -358,7 +424,7 @@ export default function SubmitWizard({
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center">
                   <span className="grid h-12 w-12 place-items-center rounded-full bg-surface text-ink-3 shadow-1"><IconUpload size={20} /></span>
                   <p className="text-[14px] font-medium text-ink-2">点击上传，或把照片拖进来</p>
-                  <p className="text-[12px] text-ink-4">Click to upload, or drop a photo here</p>
+                  <p className="text-[12px] text-ink-3">Click to upload, or drop a photo here</p>
                 </div>
               )}
             </div>
@@ -388,7 +454,7 @@ export default function SubmitWizard({
               />
             </div>
             <div>
-              <label className="label" htmlFor="sw-sub">副标题 · Subtitle <span className="text-ink-4">可选，通常写你的知识问题</span></label>
+              <label className="label" htmlFor="sw-sub">副标题 · Subtitle <span className="font-normal text-ink-3">可选，通常写你的知识问题</span></label>
               <input id="sw-sub" className="input" value={d.subtitle} onChange={(e) => d.setSubtitle(e.target.value)} placeholder="例如：Why do we seek knowledge?" maxLength={140} />
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -453,7 +519,9 @@ export default function SubmitWizard({
               autoFocus
             />
             <div className="mt-2 flex items-center justify-between">
-              <span className="eyebrow">{d.script.length} chars</span>
+              <span className={`eyebrow ${d.script.length > LIMITS.script ? "!text-danger" : ""}`}>
+                {d.script.length.toLocaleString()} / {LIMITS.script.toLocaleString()}
+              </span>
               {d.parsing && <span className="flex items-center gap-2 text-[12px] text-ink-3"><Spinner /> 正在提取文字…</span>}
             </div>
           </section>
@@ -469,14 +537,29 @@ export default function SubmitWizard({
                 </p>
               </div>
               <div className="flex items-center gap-1">
-                <button type="button" className="btn-ghost px-2.5 py-1.5 text-[13px]" onClick={() => d.autoSection()} disabled={d.sectioning}>
-                  <IconSparkle size={15} /> 重新分段
+                <button type="button" className="btn-ghost px-2.5 py-2 text-[13px]" onClick={resplit} disabled={d.sectioning}>
+                  <IconSparkle size={15} /> {d.sections.length ? "重新分段" : "AI 分段"}
                 </button>
-                <button type="button" className="btn-ghost px-2.5 py-1.5 text-[13px]" onClick={d.addSection} disabled={d.sectioning}>
+                <button
+                  type="button"
+                  className="btn-ghost px-2.5 py-2 text-[13px]"
+                  onClick={() => {
+                    setFocusId(d.addSection());
+                    setSectionsDirty(true);
+                  }}
+                  disabled={d.sectioning}
+                >
                   <IconPlus size={15} /> 添加
                 </button>
               </div>
             </div>
+            {staleParts && !d.sectioning && (
+              <div className="flex flex-wrap items-center gap-2 rounded-lg bg-warning-soft px-4 py-2.5 text-[13px] text-warning animate-rise">
+                <span className="dot bg-current" />
+                <p className="min-w-0 flex-1">讲稿在分段之后改过，下面的部分可能已经对不上了。</p>
+                <button type="button" onClick={resplit} className="underline-offset-2 hover:underline">重新分段</button>
+              </div>
+            )}
             {d.sectioning ? (
               <div className="stagger space-y-3">
                 {[0, 1, 2, 3].map((i) => (
@@ -492,10 +575,26 @@ export default function SubmitWizard({
                 {d.sections.length === 0 && (
                   <div className="card px-5 py-8 text-center">
                     <p className="text-[14px] text-ink-2">还没有分段</p>
-                    <p className="mt-1 text-[12px] text-ink-3">点「重新分段」让 AI 来切，或手动添加。</p>
+                    <p className="mt-1 text-[12px] text-ink-3">点「AI 分段」让 AI 来切，或手动添加。</p>
                   </div>
                 )}
-                <SectionList sections={d.sections} onUpdate={d.updateSection} onRemove={d.removeSection} onMove={d.moveSection} compact />
+                <SectionList
+                  sections={d.sections}
+                  onUpdate={(id, patch) => {
+                    d.updateSection(id, patch);
+                    setSectionsDirty(true);
+                  }}
+                  onRemove={(id) => {
+                    d.removeSection(id);
+                    setSectionsDirty(true);
+                  }}
+                  onMove={(id, dir) => {
+                    d.moveSection(id, dir);
+                    setSectionsDirty(true);
+                  }}
+                  focusId={focusId}
+                  compact
+                />
               </>
             )}
           </section>
@@ -516,20 +615,40 @@ export default function SubmitWizard({
                   ["姓名 · Name", d.name.trim() || "—", 1, !!d.name.trim()],
                   ["副标题 · Subtitle", d.subtitle.trim() || "未填写", 1, true],
                   ["讲稿 · Script", d.script.trim() ? `${d.script.trim().length} 字` : "—", 2, !!d.script.trim()],
-                  ["部分 · Parts", d.sections.length ? d.sections.map((s, i) => `${pad2(i)} ${s.title || "未命名"}`).join(" · ") : "—", 3, d.sections.length > 0],
                 ] as [string, string, number, boolean][]
               ).map(([label, value, target, ok], i) => (
                 <div key={label} className="flex items-start gap-3 px-5 py-3.5 animate-rise" style={{ animationDelay: `${80 + i * 50}ms` }}>
                   <span className={`dot mt-2 ${ok ? "bg-success" : "bg-line-strong"}`} />
                   <div className="min-w-0 flex-1">
                     <p className="text-[12px] text-ink-3">{label}</p>
-                    <p className="truncate text-[14px] text-ink">{value}</p>
+                    <p className="line-clamp-2 text-[14px] text-ink">{value}</p>
                   </div>
-                  <button type="button" onClick={() => go(target)} className="btn-ghost -mr-2 px-2 py-1 text-[12px]">
+                  <button type="button" onClick={() => go(target)} className="btn-ghost -mr-2 px-2.5 py-2 text-[12px]">
                     <IconEdit size={13} /> 修改
                   </button>
                 </div>
               ))}
+              <div className="flex items-start gap-3 px-5 py-3.5 animate-rise" style={{ animationDelay: "280ms" }}>
+                <span className={`dot mt-2 ${d.sections.length ? "bg-success" : "bg-line-strong"}`} />
+                <div className="min-w-0 flex-1">
+                  <p className="text-[12px] text-ink-3">部分 · Parts</p>
+                  {d.sections.length ? (
+                    <ol className="mt-1 space-y-1">
+                      {d.sections.map((s, i) => (
+                        <li key={s.id} className="flex items-baseline gap-2 text-[14px] text-ink">
+                          <span className="font-mono text-[11px] text-ink-4">{pad2(i)}</span>
+                          <span className="min-w-0 truncate">{s.title.trim() || "（无标题）"}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : (
+                    <p className="text-[14px] text-ink">—</p>
+                  )}
+                </div>
+                <button type="button" onClick={() => go(3)} className="btn-ghost -mr-2 px-2.5 py-2 text-[12px]">
+                  <IconEdit size={13} /> 修改
+                </button>
+              </div>
             </div>
             <div className="lg:hidden animate-rise" style={{ animationDelay: "320ms" }}>
               <DraftPreview draft={d.draft} title="访客会看到 · Preview" />
@@ -560,7 +679,13 @@ export default function SubmitWizard({
           ) : (
             <button type="button" className="btn-primary flex-1" onClick={submit} disabled={d.saving}>
               {d.saving ? <Spinner light /> : <IconCheck size={15} />}
-              {d.saving ? "提交中…" : d.isEdit ? "重新提交审核 · Resubmit" : "提交审核 · Submit"}
+              {d.saving
+                ? d.uploadProgress !== null
+                  ? `上传照片 ${Math.round(d.uploadProgress * 100)}%`
+                  : "提交中…"
+                : d.isEdit
+                  ? "重新提交审核 · Resubmit"
+                  : "提交审核 · Submit"}
             </button>
           )}
         </div>

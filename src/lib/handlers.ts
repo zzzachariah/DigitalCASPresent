@@ -3,7 +3,7 @@ import { nanoid } from "nanoid";
 import { chat, extractJson } from "./ai";
 import { autoSectionPrompt } from "./prompts";
 import { extractText } from "./parse";
-import { LIMITS } from "./validate";
+import { LIMITS, defaultSectionTitle } from "./validate";
 import type { Section } from "./types";
 
 // Request handlers shared by the admin and the student (self-submission)
@@ -16,12 +16,17 @@ export async function handleParse(req: NextRequest): Promise<NextResponse> {
   if (!(file instanceof File)) {
     return NextResponse.json({ error: "未找到文件 / No file" }, { status: 400 });
   }
-  if (file.size > 15 * 1024 * 1024) {
-    return NextResponse.json({ error: "文件过大（<15MB）/ File too large" }, { status: 400 });
+  if (file.size > 4 * 1024 * 1024) {
+    return NextResponse.json({ error: "文件过大（≤4MB）— 请粘贴文字，或导出更小的文件 / File too large (max 4MB)" }, { status: 400 });
   }
   try {
     const buffer = Buffer.from(await file.arrayBuffer());
-    const text = (await extractText(buffer, file.name, file.type)).slice(0, LIMITS.script);
+    const text = (
+      await Promise.race([
+        extractText(buffer, file.name, file.type),
+        new Promise<string>((_, reject) => setTimeout(() => reject(new Error("解析超时，请粘贴文字 / Parsing timed out")), 15_000)),
+      ])
+    ).slice(0, LIMITS.script);
     if (!text.trim()) {
       return NextResponse.json(
         { error: "未能从文件中提取到文字 / Could not extract text" },
@@ -59,9 +64,9 @@ export async function handleAutosection(req: NextRequest): Promise<NextResponse>
     const sections: Section[] = (parsed.sections ?? [])
       .filter((s) => s.content?.trim())
       .slice(0, LIMITS.sections)
-      .map((s) => ({
+      .map((s, i) => ({
         id: nanoid(8),
-        title: s.title?.trim() || "Untitled",
+        title: s.title?.trim() || defaultSectionTitle(i, s.content!),
         hint: s.hint?.trim() || undefined,
         content: s.content!.trim(),
       }));
@@ -73,9 +78,10 @@ export async function handleAutosection(req: NextRequest): Promise<NextResponse>
 
     return NextResponse.json({ sections });
   } catch (err) {
+    console.error("[autosection] failed:", err);
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "分段失败 / Sectioning failed" },
-      { status: 500 }
+      { error: "AI 分段暂时不可用，请稍后再试或手动添加部分 / AI split is unavailable right now — try again or add parts by hand" },
+      { status: 502 }
     );
   }
 }

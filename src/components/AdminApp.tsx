@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { Person } from "@/lib/types";
 import { readJson } from "@/lib/http";
+import { generateAsset } from "@/lib/editor-api";
 import { pad2, timeAgo } from "@/lib/format";
 import { useMediaQuery } from "@/lib/use-media-query";
 import PersonEditor from "./PersonEditor";
@@ -19,6 +20,7 @@ import {
   IconExternal,
   IconFilm,
   IconImage,
+  IconSparkle,
   IconInbox,
   IconLink,
   IconLogout,
@@ -63,6 +65,14 @@ export default function AdminApp() {
   const [copied, setCopied] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [pregenId, setPregenId] = useState<string | null>(null);
+  // Long jobs per person ("卡通…", "视频…", "讲解 2/3…") so several students
+  // can be processed at once while the list stays usable.
+  const [jobs, setJobs] = useState<Record<string, string>>({});
+  const [toast, setToast] = useState("");
+  function notify(msg: string) {
+    setToast(msg);
+    window.setTimeout(() => setToast(""), 2200);
+  }
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -137,10 +147,80 @@ export default function AdminApp() {
       const data = await readJson(res);
       if (!res.ok) throw new Error(data.error || "操作失败");
       setPeople((list) => list.map((x) => (x.id === p.id ? data.person : x)));
+      notify(status === "approved" ? `已发布：${p.name}` : `已下线：${p.name}`);
+      // Reviewing the queue: jump to the next pending student.
+      if (status === "approved" && filter === "pending") {
+        const nextPending = people.find((x) => x.id !== p.id && x.status === "pending");
+        setSelectedId(nextPending ? nextPending.id : null);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "操作失败");
     } finally {
       setBusyId(null);
+    }
+  }
+
+  function setJob(id: string, label: string | null) {
+    setJobs((j) => {
+      const next = { ...j };
+      if (label) next[id] = label;
+      else delete next[id];
+      return next;
+    });
+  }
+
+  /** Cartoon / loop video straight from the detail panel. */
+  async function generate(p: Person, kind: "cartoon" | "loop-video") {
+    setJob(p.id, kind === "cartoon" ? "卡通生成中，约 30 秒…" : "动态视频生成中，约 1 分钟…");
+    setError("");
+    try {
+      const url = await generateAsset(p.id, kind);
+      setPeople((list) => list.map((x) => (x.id === p.id ? { ...x, [kind === "cartoon" ? "cartoonUrl" : "loopVideoUrl"]: url } : x)));
+      notify(kind === "cartoon" ? `卡通已生成：${p.name}` : `动态视频已生成：${p.name}`);
+    } catch (e) {
+      setError(`${p.name}：${e instanceof Error ? e.message : "生成失败"}`);
+    } finally {
+      setJob(p.id, null);
+    }
+  }
+
+  /** Everything a student needs before the event, in order: cartoon → loop
+   *  video → pre-generated explanations with audio. Skips what exists. */
+  async function prepareAll(p: Person) {
+    setError("");
+    const steps: string[] = [];
+    if (!p.cartoonUrl) steps.push("cartoon");
+    if (!p.loopVideoUrl) steps.push("loop-video");
+    steps.push("pregenerate");
+    let current = p;
+    try {
+      for (let i = 0; i < steps.length; i++) {
+        const step = steps[i];
+        const prefix = `${i + 1}/${steps.length} · `;
+        if (step === "cartoon" || step === "loop-video") {
+          setJob(p.id, prefix + (step === "cartoon" ? "卡通生成中…" : "动态视频生成中…"));
+          const url = await generateAsset(p.id, step);
+          current = { ...current, [step === "cartoon" ? "cartoonUrl" : "loopVideoUrl"]: url };
+          setPeople((list) => list.map((x) => (x.id === p.id ? current : x)));
+        } else {
+          setJob(p.id, prefix + "讲解与语音预生成中…");
+          const res = await fetch(`/api/admin/people/${p.id}/pregenerate`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+          });
+          const data = await readJson(res);
+          if (!res.ok) throw new Error(data.error || "预生成失败");
+          current = { ...current, sections: data.sections };
+          setPeople((list) => list.map((x) => (x.id === p.id ? current : x)));
+          if (data.failed) notify(`${p.name}：有 ${data.failed} 个部分没生成成功，可再点一次`);
+        }
+      }
+      notify(`素材已就绪：${p.name}`);
+    } catch (e) {
+      setError(`${p.name}：${e instanceof Error ? e.message : "准备素材失败"}`);
+    } finally {
+      setJob(p.id, null);
     }
   }
 
@@ -158,6 +238,7 @@ export default function AdminApp() {
       const data = await readJson(res);
       if (!res.ok) throw new Error(data.error || "预生成失败");
       setPeople((list) => list.map((x) => (x.id === p.id ? { ...x, sections: data.sections } : x)));
+      notify(data.failed ? `${p.name}：有 ${data.failed} 个部分没生成成功` : `讲解与语音已就绪：${p.name}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "预生成失败");
     } finally {
@@ -315,20 +396,49 @@ export default function AdminApp() {
             </button>
           )}
         </div>
+      </div>
+
+      {/* Assets: what the digital human needs before the event */}
+      <div className="rounded-lg border border-line bg-surface-2/60 p-3">
+        <div className="flex items-center justify-between">
+          <span className="eyebrow">素材 · Assets</span>
+          {jobs[selected.id] && (
+            <span className="flex items-center gap-1.5 text-[12px] text-accent"><Spinner /> {jobs[selected.id]}</span>
+          )}
+        </div>
         <button
           type="button"
-          className="btn-secondary w-full"
-          onClick={() => pregenerateAll(selected)}
-          disabled={pregenId === selected.id || selected.sections.length === 0}
-          title="提前生成每个部分的讲解文字和语音，访客选中时零等待"
+          className="btn-primary mt-2 w-full"
+          onClick={() => prepareAll(selected)}
+          disabled={!!jobs[selected.id] || pregenId === selected.id || !selected.photoUrl || selected.sections.length === 0}
+          title={!selected.photoUrl ? "需要先有照片" : "卡通 → 动态视频 → 讲解与语音，已有的会跳过"}
         >
-          {pregenId === selected.id ? <Spinner /> : <IconBolt size={15} />}
-          {pregenId === selected.id ? "预生成中，约 1 分钟…" : "预生成讲解与语音"}
+          <IconSparkle size={15} /> 一键准备素材
         </button>
-        <button type="button" className="btn-danger w-full" onClick={() => remove(selected)} disabled={busyId === selected.id}>
-          <IconTrash size={15} /> 删除
-        </button>
+        <div className="mt-2 grid grid-cols-3 gap-2">
+          <button type="button" className="btn-secondary px-2 text-[12px]" onClick={() => generate(selected, "cartoon")} disabled={!!jobs[selected.id] || !selected.photoUrl}>
+            {selected.cartoonUrl ? "重做卡通" : "生成卡通"}
+          </button>
+          <button type="button" className="btn-secondary px-2 text-[12px]" onClick={() => generate(selected, "loop-video")} disabled={!!jobs[selected.id] || !selected.photoUrl}>
+            {selected.loopVideoUrl ? "重做视频" : "生成视频"}
+          </button>
+          <button
+            type="button"
+            className="btn-secondary px-2 text-[12px]"
+            onClick={() => pregenerateAll(selected)}
+            disabled={!!jobs[selected.id] || pregenId === selected.id || selected.sections.length === 0}
+            title="提前生成每个部分的讲解文字和语音，访客选中时零等待"
+          >
+            {pregenId === selected.id ? <Spinner /> : <IconBolt size={14} />}
+            {pregenId === selected.id ? "生成中…" : "讲解与语音"}
+          </button>
+        </div>
+        {!selected.photoUrl && <p className="mt-2 text-[12px] text-ink-3">这位同学还没有照片，先补照片再生成卡通和视频。</p>}
       </div>
+
+      <button type="button" className="btn-danger w-full" onClick={() => remove(selected)} disabled={busyId === selected.id}>
+        <IconTrash size={15} /> 删除
+      </button>
 
       <div className="border-t border-line pt-4">
         <div className="flex items-center justify-between">
@@ -358,7 +468,7 @@ export default function AdminApp() {
       </button>
       <button type="button" onClick={() => setFilter("pending")} className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] transition-colors ${filter === "pending" ? "bg-surface font-medium text-ink shadow-1" : "text-ink-2 hover:bg-surface"}`}>
         <IconInbox size={16} /> 待审核
-        {pendingCount > 0 && <span className="ml-auto rounded-full bg-warning px-1.5 font-mono text-[10px] font-medium text-white">{pendingCount}</span>}
+        {pendingCount > 0 && <span className="ml-auto rounded-full bg-warning px-1.5 font-mono text-[10px] font-medium text-bg">{pendingCount}</span>}
       </button>
       <button type="button" onClick={openSubmitQr} className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] text-ink-2 transition-colors hover:bg-surface">
         <IconQr size={16} /> 学生提交入口
@@ -448,7 +558,7 @@ export default function AdminApp() {
           </div>
         ) : (
           <div className="card overflow-hidden">
-            <div className="hidden grid-cols-[44px_minmax(0,1fr)_56px_96px_minmax(0,170px)_104px] items-center gap-3 border-b border-line px-4 py-2.5 lg:grid">
+            <div className="hidden grid-cols-[44px_minmax(0,1fr)_56px_96px_minmax(0,170px)_156px] items-center gap-3 border-b border-line px-4 py-2.5 lg:grid">
               <span />
               <span className="eyebrow">姓名</span>
               <span className="eyebrow">部分</span>
@@ -464,7 +574,7 @@ export default function AdminApp() {
                     key={p.id}
                     style={{ ["--i" as string]: Math.min(i, 12) }}
                     onClick={() => setSelectedId(p.id)}
-                    className={`grid cursor-pointer grid-cols-[40px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 transition-colors duration-200 ease-out lg:grid-cols-[44px_minmax(0,1fr)_56px_96px_minmax(0,170px)_104px] ${
+                    className={`grid cursor-pointer grid-cols-[40px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 transition-colors duration-200 ease-out lg:grid-cols-[44px_minmax(0,1fr)_56px_96px_minmax(0,170px)_156px] ${
                       isSel ? "bg-accent-soft/60" : "hover:bg-surface-2"
                     }`}
                   >
@@ -483,10 +593,10 @@ export default function AdminApp() {
                     </div>
                     <span className="hidden text-[13px] text-ink-2 lg:block">{p.sections.length}</span>
                     <span className="hidden lg:block">{statusBadge(p)}</span>
-                    <span className="hidden truncate text-[12px] text-ink-3 lg:block">{assetSummary(p).join(" · ")}</span>
+                    <span className={`hidden truncate text-[12px] lg:block ${jobs[p.id] ? "text-accent" : "text-ink-3"}`}>{jobs[p.id] || assetSummary(p).join(" · ")}</span>
                     <div className="flex items-center justify-end gap-0.5" onClick={(e) => e.stopPropagation()}>
                       {p.status === "pending" && (
-                        <button type="button" onClick={() => setStatus(p, "approved")} disabled={busyId === p.id} className="btn-primary mr-1 px-2.5 py-1.5 text-[12px] lg:hidden">通过</button>
+                        <button type="button" onClick={() => setStatus(p, "approved")} disabled={busyId === p.id} className="btn-primary mr-1 px-2.5 py-1.5 text-[12px]">通过</button>
                       )}
                       <button type="button" onClick={() => openQrFor(p)} className="btn-icon hidden lg:inline-flex" title="二维码" aria-label="二维码"><IconQr size={16} /></button>
                       <button type="button" onClick={() => setView({ kind: "edit", person: p })} className="btn-icon" title="编辑" aria-label="编辑"><IconEdit size={16} /></button>
@@ -522,6 +632,13 @@ export default function AdminApp() {
       )}
 
       {qr && <QrModal {...qr} onClose={() => setQr(null)} />}
+      {toast && (
+        <div className="pointer-events-none fixed inset-x-0 bottom-6 z-50 flex justify-center px-4">
+          <div className="card flex items-center gap-2 px-4 py-2.5 text-[13px] shadow-2 animate-rise">
+            <IconCheck size={15} className="text-success" /> {toast}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

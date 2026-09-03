@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAdmin } from "@/lib/auth";
 import { getPerson, saveCartoon, storageWritable } from "@/lib/store";
-import { a2eConfigured, a2eCartoonStart, a2eCartoonPoll } from "@/lib/a2e";
+import { a2eConfigured, a2eCartoonStart, a2eCartoonPoll, safeTaskId } from "@/lib/a2e";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -42,8 +42,8 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
 // it permanently → { cartoonUrl }. Otherwise { pending: true } or { error }.
 export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
   if (!isAdmin()) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  const taskId = req.nextUrl.searchParams.get("taskId");
-  if (!taskId) return NextResponse.json({ error: "no taskId" }, { status: 400 });
+  const taskId = safeTaskId(req.nextUrl.searchParams.get("taskId"));
+  if (!taskId) return NextResponse.json({ error: "bad taskId" }, { status: 400 });
 
   const poll = await a2eCartoonPoll(taskId);
   if ("error" in poll) return NextResponse.json({ error: "卡通生成失败: " + poll.error }, { status: 502 });

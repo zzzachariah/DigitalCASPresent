@@ -82,28 +82,44 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
 
   const body = (await req.json().catch(() => ({}))) as { sectionId?: string };
 
-  try {
-    let sections: Section[];
-    if (body.sectionId) {
-      const idx = person.sections.findIndex((s) => s.id === body.sectionId);
-      if (idx === -1) return NextResponse.json({ error: "bad section" }, { status: 400 });
-      sections = [...person.sections];
-      sections[idx] = await generateForSection(person, sections[idx], idx);
-    } else {
-      sections = await Promise.all(person.sections.map((s, i) => generateForSection(person, s, i)));
-    }
-    // Re-read before writing: the generation took a while and the record
-    // may have been edited meanwhile — only the cached fields are ours.
-    const fresh = (await getPerson(params.id)) ?? person;
-    const merged = fresh.sections.map((s) => {
-      const g = sections.find((x) => x.id === s.id);
-      return g && g.title === s.title && g.content === s.content
+  const targets = body.sectionId
+    ? person.sections.map((s, i) => [s, i] as const).filter(([s]) => s.id === body.sectionId)
+    : person.sections.map((s, i) => [s, i] as const);
+  if (body.sectionId && targets.length === 0) return NextResponse.json({ error: "bad section" }, { status: 400 });
+
+  /** Persist one generated part immediately (re-reading first, so an edit
+   *  made meanwhile is never overwritten and only unchanged parts get caches). */
+  async function persist(g: Section) {
+    const fresh = (await getPerson(params.id)) ?? person!;
+    const merged = fresh.sections.map((s) =>
+      s.id === g.id && s.title === g.title && s.content === g.content
         ? { ...s, cachedAnswers: g.cachedAnswers, cachedAudio: g.cachedAudio, cachedSuggestions: g.cachedSuggestions }
-        : s;
-    });
-    const updated = await updatePerson(params.id, { sections: merged });
-    return NextResponse.json({ sections: updated?.sections ?? merged });
-  } catch (e) {
-    return NextResponse.json({ error: e instanceof Error ? e.message : "预生成失败" }, { status: 500 });
+        : s
+    );
+    await updatePerson(params.id, { sections: merged });
   }
+
+  // A few parts at a time (each is an LLM call + TTS); partial progress
+  // survives a timeout because every part is saved as soon as it's done.
+  const errors: string[] = [];
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(3, targets.length) }, async () => {
+      while (next < targets.length) {
+        const [s, i] = targets[next++];
+        try {
+          await persist(await generateForSection(person!, s, i));
+        } catch (e) {
+          errors.push(`${s.title}: ${e instanceof Error ? e.message : "failed"}`);
+        }
+      }
+    })
+  );
+  const final = (await getPerson(params.id)) ?? person;
+  if (errors.length === targets.length) {
+    console.error("[pregenerate] all parts failed:", errors);
+    return NextResponse.json({ error: "预生成失败，请稍后再试 / Pre-generation failed", sections: final.sections }, { status: 502 });
+  }
+  if (errors.length) console.error("[pregenerate] some parts failed:", errors);
+  return NextResponse.json({ sections: final.sections, failed: errors.length });
 }

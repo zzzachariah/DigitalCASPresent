@@ -1,9 +1,11 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { Person, Section } from "@/lib/types";
 import { readJson } from "@/lib/http";
-import type { EditorApi, SavePayload } from "@/lib/editor-api";
+import { generateAsset, type EditorApi, type SavePayload } from "@/lib/editor-api";
+import { downscaleImage } from "@/lib/image-client";
+import { LIMITS, defaultSectionTitle } from "@/lib/validate";
 import type { Draft } from "./DraftPreview";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -15,37 +17,41 @@ import type { Draft } from "./DraftPreview";
 // types explicitly (not image/*) also makes iOS convert HEIC → JPEG on pick.
 export const PHOTO_ACCEPT = "image/jpeg,image/png,image/webp";
 const PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp"];
-const PHOTO_MAX = 8 * 1024 * 1024;
+const PHOTO_MAX = 20 * 1024 * 1024; // originals are downscaled before upload
 
 export function emptySection(): Section {
   return { id: Math.random().toString(36).slice(2, 10), title: "", hint: "", content: "" };
 }
 
-/** Poll an async generation task (cartoon / loop video) until the server
- *  returns `doneKey`, reports an error, or we give up (~4 min). */
-async function pollTask(
-  url: string,
-  doneKey: "cartoonUrl" | "loopVideoUrl",
-  everyMs = 3000,
-  maxTries = 80
-): Promise<string> {
-  let lastStatus = "";
-  for (let i = 0; i < maxTries; i++) {
-    await new Promise((r) => setTimeout(r, everyMs));
-    const res = await fetch(url);
-    const data = await readJson(res);
-    if (!res.ok) throw new Error(data.error || "生成失败");
-    if (typeof data[doneKey] === "string" && data[doneKey]) return data[doneKey];
-    if (data.status) lastStatus = String(data.status);
+/** Offline fallback for the AI split: one part per blank-line paragraph,
+ *  extras folded into the last part so the count stays within limits. */
+export function paragraphSections(script: string): Section[] {
+  const paras = script.split(/\n\s*\n/).map((t) => t.trim()).filter(Boolean);
+  if (paras.length > LIMITS.sections) {
+    paras.splice(LIMITS.sections - 1, paras.length, paras.slice(LIMITS.sections - 1).join("\n\n"));
   }
-  throw new Error(`生成超时，请重试${lastStatus ? `（最后状态: ${lastStatus}）` : ""}`);
+  return paras.map((content, i) => ({ ...emptySection(), title: defaultSectionTitle(i, content), content }));
 }
 
-export function usePersonDraft({ person, api, admin }: { person: Person | null; api: EditorApi; admin: boolean }) {
+export function usePersonDraft({
+  person,
+  api,
+  admin,
+  onCreated,
+}: {
+  person: Person | null;
+  api: EditorApi;
+  admin: boolean;
+  /** Fires as soon as a brand-new record exists on the server (before the
+   *  photo upload), so the caller can remember its id / edit token. */
+  onCreated?: (p: Person) => void;
+}) {
   // Once a brand-new record has been created, further saves UPDATE it — so
   // a failed photo upload can be retried without creating a duplicate.
   const [created, setCreated] = useState<Person | null>(null);
   const existing = person ?? created;
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const addedIdRef = useRef<string | null>(null);
 
   const [name, setName] = useState(person?.name ?? "");
   const [subtitle, setSubtitle] = useState(person?.subtitle ?? "");
@@ -117,7 +123,16 @@ export function usePersonDraft({ person, api, admin }: { person: Person | null; 
       return next;
     });
   }, []);
-  const addSection = useCallback(() => setSections((p) => [...p, emptySection()]), []);
+  /** Append an empty part; returns its id so the UI can focus it. */
+  const addSection = useCallback((): string => {
+    const s = emptySection();
+    addedIdRef.current = s.id;
+    setSections((p) => [...p, s]);
+    return s.id;
+  }, []);
+  /** A restored draft that had already been created on the server continues
+   *  as an update of that record. */
+  const adoptCreated = useCallback((p: Person) => setCreated(p), []);
 
   // ── script ──
   const pickScriptFile = useCallback(
@@ -147,26 +162,37 @@ export function usePersonDraft({ person, api, admin }: { person: Person | null; 
       setSections(await api.autosection(script));
       return true;
     } catch (e) {
-      fail(e, "分段失败");
+      const why = e instanceof Error && e.message ? e.message : "分段失败";
+      // First split failed (AI down, rate-limited…): never leave the student
+      // stuck — split by paragraphs locally and say so. A re-split over parts
+      // they already edited must not silently replace them, so no fallback there.
+      const parts = sections.length === 0 ? paragraphSections(script) : [];
+      if (parts.length) {
+        setSections(parts);
+        setError(`AI 分段暂时不可用（${why}）。已先按段落切好，可以手动调整，或稍后再点「重新分段」。`);
+        return true;
+      }
+      setError(why);
       return false;
     } finally {
       setSectioning(false);
     }
-  }, [api, fail, script]);
+  }, [api, script, sections.length]);
 
   // ── photo ──
-  const pickPhoto = useCallback((file: File): boolean => {
+  const pickPhoto = useCallback(async (file: File): Promise<boolean> => {
     if (!PHOTO_TYPES.includes(file.type)) {
       setError("只支持 JPG / PNG / WebP 图片 · Only JPG, PNG or WebP images");
       return false;
     }
     if (file.size > PHOTO_MAX) {
-      setError("照片过大（≤8MB）· Photo too large (max 8MB)");
+      setError("照片过大（≤20MB）· Photo too large");
       return false;
     }
     setError("");
-    setPhotoFile(file);
+    // Show the original immediately; upload the downscaled copy.
     setPhotoPreview(URL.createObjectURL(file));
+    setPhotoFile(await downscaleImage(file));
     return true;
   }, []);
 
@@ -176,12 +202,7 @@ export function usePersonDraft({ person, api, admin }: { person: Person | null; 
     setError("");
     setCartooning(true);
     try {
-      const startRes = await fetch(`/api/admin/people/${existing.id}/cartoon`, { method: "POST" });
-      const startData = await readJson(startRes);
-      if (!startRes.ok) throw new Error(startData.error || "卡通发起失败");
-      setCartoonUrl(
-        await pollTask(`/api/admin/people/${existing.id}/cartoon?taskId=${encodeURIComponent(startData.taskId)}`, "cartoonUrl")
-      );
+      setCartoonUrl(await generateAsset(existing.id, "cartoon"));
     } catch (e) {
       fail(e, "卡通生成失败");
     } finally {
@@ -194,12 +215,7 @@ export function usePersonDraft({ person, api, admin }: { person: Person | null; 
     setError("");
     setLoopGenerating(true);
     try {
-      const startRes = await fetch(`/api/admin/people/${existing.id}/loop-video`, { method: "POST" });
-      const startData = await readJson(startRes);
-      if (!startRes.ok) throw new Error(startData.error || "循环视频发起失败");
-      setLoopVideoUrl(
-        await pollTask(`/api/admin/people/${existing.id}/loop-video?taskId=${encodeURIComponent(startData.taskId)}`, "loopVideoUrl")
-      );
+      setLoopVideoUrl(await generateAsset(existing.id, "loop-video"));
     } catch (e) {
       fail(e, "循环视频生成失败");
     } finally {
@@ -222,12 +238,17 @@ export function usePersonDraft({ person, api, admin }: { person: Person | null; 
         const data = await readJson(res);
         if (!res.ok) throw new Error(data.error || "预生成失败");
         const updated = data.sections as Section[];
+        // Only adopt caches for parts whose text matches what the server
+        // generated from — an unsaved local edit keeps its "not generated" state.
         setSections((prev) =>
           prev.map((s) => {
             const u = updated.find((x) => x.id === s.id);
-            return u ? { ...s, cachedAnswers: u.cachedAnswers, cachedAudio: u.cachedAudio, cachedSuggestions: u.cachedSuggestions } : s;
+            return u && u.title === s.title && u.content === s.content
+              ? { ...s, cachedAnswers: u.cachedAnswers, cachedAudio: u.cachedAudio, cachedSuggestions: u.cachedSuggestions }
+              : s;
           })
         );
+        if (data.failed) setError(`有 ${data.failed} 个部分没有生成成功，可以再点一次重试。`);
       } catch (e) {
         fail(e, "预生成失败");
       } finally {
@@ -266,11 +287,25 @@ export function usePersonDraft({ person, api, admin }: { person: Person | null; 
         if (loopVideoUrl) payload.loopVideoUrl = loopVideoUrl;
       }
       let saved: Person = existing ? await api.update(existing.id, payload) : await api.create(payload);
-      if (!existing) setCreated(saved);
+      if (!existing) {
+        setCreated(saved);
+        onCreated?.(saved);
+      }
       if (photoFile) {
-        const photoUrl = await api.uploadPhoto(saved.id, photoFile);
-        saved = { ...saved, photoUrl };
-        setPhotoFile(null);
+        try {
+          setUploadProgress(0);
+          const photoUrl = await api.uploadPhoto(saved.id, photoFile, setUploadProgress);
+          saved = { ...saved, photoUrl };
+          setPhotoFile(null);
+        } catch (e) {
+          // The record is saved; only the photo is missing. Say so, and let
+          // the next save retry just the upload (it updates, never duplicates).
+          const why = e instanceof Error ? e.message : "照片上传失败";
+          setError(`资料已保存，但照片没有传上：${why}。请再点一次提交，只会重试上传，不会重复创建。`);
+          return null;
+        } finally {
+          setUploadProgress(null);
+        }
       }
       return saved;
     } catch (e) {
@@ -279,13 +314,33 @@ export function usePersonDraft({ person, api, admin }: { person: Person | null; 
     } finally {
       setSaving(false);
     }
-  }, [admin, api, cartoonUrl, existing, fail, gender, language, loopVideoUrl, name, photoFile, script, sections, subtitle]);
+  }, [admin, api, cartoonUrl, existing, fail, gender, language, loopVideoUrl, name, onCreated, photoFile, script, sections, subtitle]);
 
   const draft = useMemo<Draft>(() => ({ name, subtitle, photo: photoPreview, sections }), [name, subtitle, photoPreview, sections]);
+
+  /** True when the form differs from the record it started from. */
+  const dirty = useMemo(() => {
+    if (photoFile) return true;
+    const base = person;
+    if (!base) return !!(name.trim() || subtitle.trim() || script.trim() || sections.length);
+    const same =
+      name === base.name &&
+      (subtitle || "") === (base.subtitle || "") &&
+      (gender || "") === (base.gender || "") &&
+      language === base.language &&
+      script === base.script &&
+      JSON.stringify(sections.map((s) => [s.id, s.title, s.hint || "", s.content])) ===
+        JSON.stringify(base.sections.map((s) => [s.id, s.title, s.hint || "", s.content]));
+    return !same;
+  }, [gender, language, name, person, photoFile, script, sections, subtitle]);
 
   return {
     existing,
     isEdit: !!existing,
+    dirty,
+    uploadProgress,
+    lastAddedId: addedIdRef,
+    adoptCreated,
     name, setName,
     subtitle, setSubtitle,
     gender, setGender,
