@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import QRCode from "qrcode";
+import { IconCopy, IconCheck, IconExternal } from "./icons";
 
 export default function QrModal({
   title,
@@ -23,9 +24,15 @@ export default function QrModal({
     QRCode.toDataURL(link, {
       width: 720,
       margin: 2,
-      color: { dark: "#1c1c1e", light: "#ffffff" },
+      color: { dark: "#15181c", light: "#ffffff" },
     }).then(setDataUrl);
   }, [link]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   async function copy() {
     await navigator.clipboard.writeText(link);
@@ -35,41 +42,45 @@ export default function QrModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-0 backdrop-blur-sm sm:items-center sm:p-6"
+      className="fixed inset-0 z-50 flex items-end justify-center bg-[var(--overlay)] p-0 backdrop-blur-sm animate-fade sm:items-center sm:p-6"
       onClick={onClose}
+      role="dialog"
+      aria-modal
+      aria-label={title}
     >
       <div
-        className="w-full max-w-sm animate-fade-up rounded-t-3xl bg-white p-6 shadow-lift sm:rounded-3xl"
+        className="card w-full max-w-sm animate-rise rounded-b-none p-6 shadow-2 sm:rounded-xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="mb-4 text-center">
-          <h3 className="text-lg font-semibold">{title}</h3>
-          {subtitle && <p className="text-sm text-ink-mute">{subtitle}</p>}
+        <div className="mb-5">
+          <p className="eyebrow">{subtitle || "QR"}</p>
+          <h3 className="mt-1 font-display text-xl font-semibold tracking-[-0.01em]">{title}</h3>
         </div>
 
-        <div className="mx-auto grid place-items-center rounded-3xl bg-white p-4 ring-1 ring-black/5">
+        <div className="mx-auto grid place-items-center rounded-xl bg-white p-4 ring-1 ring-line">
           {dataUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={dataUrl} alt="QR" className="h-56 w-56" />
           ) : (
-            <div className="h-56 w-56 animate-pulse rounded-2xl bg-gray-100" />
+            <div className="skeleton h-56 w-56" />
           )}
         </div>
 
-        <p className="mt-3 break-all text-center text-xs text-ink-mute">{link}</p>
+        <p className="mt-3 break-all rounded-lg bg-surface-2 px-3 py-2 font-mono text-[11px] text-ink-3">{link}</p>
 
-        <div className="mt-5 grid grid-cols-2 gap-3">
-          <button className="btn-ghost" onClick={copy}>
-            {copied ? "已复制 ✓" : "复制链接"}
+        <div className="mt-4 grid grid-cols-2 gap-2">
+          <button className="btn-secondary" onClick={copy}>
+            {copied ? <IconCheck size={16} /> : <IconCopy size={16} />}
+            {copied ? "已复制" : "复制链接"}
           </button>
-          <a className="btn-soft" href={dataUrl} download={`${downloadName}.png`}>
+          <a className="btn-secondary" href={dataUrl} download={`${downloadName}.png`}>
             下载二维码
           </a>
         </div>
-        <a href={link} target="_blank" rel="noreferrer" className="btn-primary mt-3 w-full">
-          打开页面 →
+        <a href={link} target="_blank" rel="noreferrer" className="btn-primary mt-2 w-full">
+          打开页面 <IconExternal size={15} />
         </a>
-        <button onClick={onClose} className="mt-3 w-full py-2 text-sm text-ink-mute">
+        <button onClick={onClose} className="btn-ghost mt-1 w-full">
           关闭
         </button>
       </div>

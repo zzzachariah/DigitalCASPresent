@@ -5,6 +5,8 @@ import type { Person } from "@/lib/types";
 import { readJson } from "@/lib/http";
 import { studentApi, type StudentTokens } from "@/lib/editor-api";
 import PersonEditor from "./PersonEditor";
+import DraftPreview, { type Draft } from "./DraftPreview";
+import { IconArrowRight, IconCheck, IconCopy, IconEdit, IconExternal } from "./icons";
 
 // ─────────────────────────────────────────────────────────────────────
 // Student self-submission flow:
@@ -53,14 +55,21 @@ function baseUrl(): string {
   );
 }
 
+const STEPS: [string, string, string][] = [
+  ["01", "上传照片", "一张清晰的正脸照片，JPG 或 PNG。"],
+  ["02", "放入讲稿", "粘贴文字，或上传 PDF / Word / txt 自动提取。"],
+  ["03", "AI 分段", "自动分成引入、每个物品、结论几个部分，可以手动调整。"],
+  ["04", "提交审核", "保存好你的专属修改链接；老师审核通过后页面上线。"],
+];
+
 export default function SubmitApp({ id, token }: { id?: string; token?: string }) {
-  // Shared box: studentApi.create() fills it; later calls read it.
   const tokenBox = useRef<StudentTokens>({ current: token ?? null, preview: null }).current;
   const api = useMemo(() => studentApi(tokenBox), [tokenBox]);
 
   const [stage, setStage] = useState<Stage>(id ? { kind: "loading" } : { kind: "intro" });
   const [mine, setMine] = useState<Remembered[]>([]);
   const [copied, setCopied] = useState("");
+  const [draft, setDraft] = useState<Draft>({ name: "", subtitle: "", sections: [] });
 
   useEffect(() => {
     if (!id) {
@@ -100,14 +109,18 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
 
   const base = baseUrl();
 
+  const topbar = (
+    <header className="flex items-center justify-between">
+      <span className="eyebrow">IBDP · TOK Exhibition</span>
+      <a href="/submit" className="text-[13px] text-ink-3 transition-colors hover:text-ink">提交讲稿 · Submit</a>
+    </header>
+  );
+
   if (stage.kind === "loading") {
     return (
-      <main className="mx-auto max-w-md px-5 py-6">
-        <div className="space-y-3">
-          {[0, 1, 2].map((i) => (
-            <div key={i} className="card h-24 animate-pulse" />
-          ))}
-        </div>
+      <main className="mx-auto max-w-2xl px-5 py-8">
+        {topbar}
+        <div className="mt-8 space-y-3">{[0, 1, 2].map((i) => <div key={i} className="skeleton h-28" />)}</div>
       </main>
     );
   }
@@ -115,17 +128,11 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
   if (stage.kind === "invalid") {
     return (
       <main className="mx-auto flex min-h-dvh max-w-md flex-col items-center justify-center px-6 text-center">
-        <div className="mb-4 text-4xl">🔗</div>
-        <h1 className="text-xl font-semibold">链接无效或已失效</h1>
-        <p className="mt-2 text-sm text-ink-mute">
-          请使用提交成功时保存的专属修改链接；找不到的话请联系老师。
-        </p>
-        <p className="mt-1 text-xs text-ink-mute">
-          This edit link is invalid. Use the private link you saved when submitting, or ask your teacher.
-        </p>
-        <a href="/submit" className="btn-ghost mt-6">
-          重新提交 / Submit again
-        </a>
+        <p className="eyebrow">Invalid link</p>
+        <h1 className="mt-3 font-display text-[26px] font-semibold leading-tight tracking-[-0.01em]">链接无效或已失效</h1>
+        <p className="mt-3 text-[15px] leading-relaxed text-ink-2">请使用提交成功时保存的专属修改链接；找不到的话请联系老师。</p>
+        <p className="mt-1 text-[13px] text-ink-3">Use the private link you saved when submitting, or ask your teacher.</p>
+        <a href="/submit" className="btn-secondary mt-8">重新提交 · Submit again</a>
       </main>
     );
   }
@@ -133,33 +140,44 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
   if (stage.kind === "edit") {
     const p = stage.person;
     return (
-      <main className="mx-auto max-w-md px-5 py-6">
+      <main className="mx-auto max-w-6xl px-5 py-6 lg:px-10 lg:py-8">
         {p && (
           <div
-            className={`mb-4 rounded-2xl px-4 py-3 text-sm ring-1 ${
-              p.status === "approved"
-                ? "bg-green-50 text-green-800 ring-green-200"
-                : "bg-amber-50 text-amber-800 ring-amber-200"
+            className={`mb-5 flex items-start gap-2.5 rounded-lg px-4 py-3 text-[13px] animate-rise ${
+              p.status === "approved" ? "bg-success-soft text-success" : "bg-warning-soft text-warning"
             }`}
           >
-            {p.status === "approved" ? (
-              <>
-                <b>已发布 · Published.</b> 修改并重新提交后，页面会暂时下线，等老师再次审核。
-              </>
-            ) : (
-              <>
-                <b>待审核 · Pending review.</b> 你仍可以修改；老师通过后页面才会开放。
-              </>
-            )}
+            <span className="dot mt-1.5 bg-current" />
+            <p>
+              {p.status === "approved" ? (
+                <>
+                  <b>已发布 · Published.</b> 修改并重新提交后，页面会暂时下线，等老师再次审核。
+                </>
+              ) : (
+                <>
+                  <b>待审核 · Pending review.</b> 你仍可以修改；老师通过后页面才会开放。
+                </>
+              )}
+            </p>
           </div>
         )}
-        <PersonEditor
-          person={p}
-          mode="student"
-          api={api}
-          onSaved={onSaved}
-          onCancel={() => (p ? setStage({ kind: "done", person: p }) : setStage({ kind: "intro" }))}
-        />
+        <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_320px] lg:gap-10">
+          <div className="min-w-0">
+            <PersonEditor
+              person={p}
+              mode="student"
+              api={api}
+              onSaved={onSaved}
+              onDraftChange={setDraft}
+              onCancel={() => (p ? setStage({ kind: "done", person: p }) : setStage({ kind: "intro" }))}
+            />
+          </div>
+          <aside className="hidden lg:block">
+            <div className="sticky top-8">
+              <DraftPreview draft={draft} />
+            </div>
+          </aside>
+        </div>
       </main>
     );
   }
@@ -170,97 +188,99 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
     const editLink = `${base}/submit/${p.id}?token=${encodeURIComponent(t)}`;
     const previewLink = `${base}/p/${p.slug}?preview=${encodeURIComponent(tokenBox.preview || t)}`;
     return (
-      <main className="mx-auto max-w-md px-5 py-8">
-        <div className="card p-6 text-center">
-          <div className="mb-3 text-4xl">🎉</div>
-          <h1 className="text-xl font-semibold">已提交，等待老师审核</h1>
-          <p className="mt-1 text-sm text-ink-mute">Submitted — your teacher will review it soon.</p>
-          <p className="mt-4 text-sm text-ink-soft">
-            {p.name} · {p.sections.length} 个部分{p.photoUrl ? "" : " · 还没有照片"}
-          </p>
-        </div>
+      <main className="mx-auto max-w-2xl px-5 py-8 lg:py-12">
+        {topbar}
+        <div className="stagger mt-10 space-y-4">
+          <div style={{ ["--i" as string]: 0 }}>
+            <p className="eyebrow">Submitted</p>
+            <h1 className="mt-2 font-display text-[30px] font-semibold leading-tight tracking-[-0.015em]">已提交，等待老师审核</h1>
+            <p className="mt-2 text-[15px] text-ink-2">
+              {p.name} · {p.sections.length} 个部分{p.photoUrl ? "" : " · 还没有照片"}。老师通过后，你的二维码页面就会对访客开放。
+            </p>
+          </div>
 
-        <div className="card mt-4 p-5">
-          <p className="text-sm font-semibold">🔑 你的专属修改链接 · Your private edit link</p>
-          <p className="mt-1 text-xs text-ink-mute">
-            这是以后修改内容的唯一入口，请截图或收藏保存，不要发给别人。
-            <br />
-            Keep this link — it’s the only way to edit your submission later. Don’t share it.
-          </p>
-          <p className="mt-2 break-all rounded-xl bg-gray-50 px-3 py-2 text-xs text-ink-soft">{editLink}</p>
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <button className="btn-ghost py-2 text-sm" onClick={() => copy(editLink, "edit")}>
-              {copied === "edit" ? "已复制 ✓" : "复制链接 / Copy"}
-            </button>
-            <button className="btn-soft py-2 text-sm" onClick={() => setStage({ kind: "edit", person: p })}>
-              继续修改 / Edit
-            </button>
+          <div className="card p-5" style={{ ["--i" as string]: 1 }}>
+            <p className="text-[15px] font-semibold">你的专属修改链接 · Private edit link</p>
+            <p className="mt-1 text-[13px] leading-relaxed text-ink-3">
+              这是以后修改内容的唯一入口，请截图或收藏保存，不要发给别人。
+              <br />
+              The only way to edit later — keep it, don’t share it.
+            </p>
+            <p className="mt-3 break-all rounded-lg bg-surface-2 px-3 py-2 font-mono text-[12px] text-ink-2">{editLink}</p>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <button type="button" className="btn-secondary" onClick={() => copy(editLink, "edit")}>
+                {copied === "edit" ? <IconCheck size={15} /> : <IconCopy size={15} />} {copied === "edit" ? "已复制" : "复制链接"}
+              </button>
+              <button type="button" className="btn-secondary" onClick={() => setStage({ kind: "edit", person: p })}>
+                <IconEdit size={15} /> 继续修改
+              </button>
+            </div>
+          </div>
+
+          <div className="card p-5" style={{ ["--i" as string]: 2 }}>
+            <p className="text-[15px] font-semibold">预览我的数字人 · Preview</p>
+            <p className="mt-1 text-[13px] leading-relaxed text-ink-3">这个链接只能看、不能改，可以发给同学帮你看看；老师审核通过后，访客扫码才能看到。</p>
+            <a href={previewLink} target="_blank" rel="noreferrer" className="btn-primary mt-3 w-full">
+              打开预览 <IconExternal size={15} />
+            </a>
           </div>
         </div>
-
-        <div className="card mt-4 p-5">
-          <p className="text-sm font-semibold">👀 预览我的数字人 · Preview</p>
-          <p className="mt-1 text-xs text-ink-mute">
-            这个链接只能看、不能改，可以发给同学帮你看看；老师审核通过后，访客扫码才能看到。
-          </p>
-          <a href={previewLink} target="_blank" rel="noreferrer" className="btn-primary mt-3 w-full">
-            打开预览 / Open preview →
-          </a>
-        </div>
-
-        <a href="/submit" className="mt-6 block text-center text-sm text-ink-mute hover:text-ink">
-          返回 / Back
-        </a>
       </main>
     );
   }
 
-  // intro
+  // ── Intro ──
   return (
-    <main className="mx-auto flex min-h-dvh max-w-md flex-col px-6 py-10">
-      <div className="mb-6 text-center">
-        <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-3xl bg-brand-500 text-xl text-white shadow-lift">
-          ✦
+    <main className="mx-auto flex min-h-dvh max-w-5xl flex-col px-5 py-8 lg:px-10">
+      {topbar}
+      <section className="flex flex-1 flex-col justify-center py-12 lg:grid lg:grid-cols-[minmax(0,1fr)_400px] lg:items-center lg:gap-16">
+        <div className="stagger">
+          <p className="eyebrow" style={{ ["--i" as string]: 0 }}>Submit your talk</p>
+          <h1 className="mt-3 font-display text-[36px] font-semibold leading-[1.05] tracking-[-0.02em] lg:text-[52px]" style={{ ["--i" as string]: 1 }}>
+            提交我的
+            <br />
+            TOK 展览讲稿
+          </h1>
+          <p className="mt-5 max-w-md text-[16px] leading-relaxed text-ink-2" style={{ ["--i" as string]: 2 }}>
+            提交后，系统会为你生成一个“数字人”：访客扫你的专属二维码，就能听你讲解自己的展览，还可以追问。
+          </p>
+          <p className="mt-2 max-w-md text-[13px] leading-relaxed text-ink-3" style={{ ["--i" as string]: 3 }}>
+            Upload a photo and your script; visitors will scan your code, hear your talk part by part, and ask questions.
+          </p>
+          <div className="mt-8 flex flex-wrap items-center gap-3" style={{ ["--i" as string]: 4 }}>
+            <button type="button" className="btn-primary px-5 py-3" onClick={() => setStage({ kind: "edit", person: null })}>
+              开始填写 · Start <IconArrowRight size={16} />
+            </button>
+            <span className="text-[12px] text-ink-4">大约 5 分钟 · about 5 minutes</span>
+          </div>
+          {mine.length > 0 && (
+            <div className="mt-8 rounded-lg border border-line bg-surface-2/60 p-4" style={{ ["--i" as string]: 5 }}>
+              <p className="eyebrow">这台设备上之前的提交</p>
+              <ul className="mt-2 space-y-1.5">
+                {mine.map((m) => (
+                  <li key={m.id}>
+                    <a href={`/submit/${m.id}?token=${encodeURIComponent(m.token)}`} className="inline-flex items-center gap-1.5 text-[14px] text-accent hover:underline">
+                      {m.name} <IconArrowRight size={14} /> 继续修改
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
-        <h1 className="text-2xl font-semibold tracking-tight">提交我的 TOK 展览讲稿</h1>
-        <p className="mt-1 text-sm text-ink-mute">Submit your TOK Exhibition talk</p>
-      </div>
 
-      <div className="card space-y-3 p-5 text-sm text-ink-soft">
-        <p>提交后，系统会为你生成一个“数字人”：访客扫你的专属二维码，就能听你讲解自己的展览，还可以追问。</p>
-        <ol className="list-decimal space-y-1.5 pl-5">
-          <li>上传一张清晰的正脸照片（JPG / PNG）。</li>
-          <li>粘贴或上传你的讲稿（PDF / Word / txt 都可以）。</li>
-          <li>点“AI 智能分段”，检查每个部分的标题和内容。</li>
-          <li>提交后保存好你的专属修改链接；老师审核通过后页面上线。</li>
+        <ol className="mt-12 space-y-2 lg:mt-0" aria-label="Steps">
+          {STEPS.map(([n, h, d], i) => (
+            <li key={n} className="card flex gap-4 p-4 animate-rise" style={{ animationDelay: `${240 + i * 60}ms` }}>
+              <span className="font-mono text-[11px] text-accent">{n}</span>
+              <div>
+                <p className="text-[14px] font-medium">{h}</p>
+                <p className="mt-0.5 text-[12px] leading-relaxed text-ink-3">{d}</p>
+              </div>
+            </li>
+          ))}
         </ol>
-        <p className="text-xs text-ink-mute">
-          Upload a clear front-facing photo, paste or upload your script, let the AI split it into parts,
-          then submit. Your page goes live once a teacher approves it.
-        </p>
-      </div>
-
-      <button className="btn-primary mt-5 w-full" onClick={() => setStage({ kind: "edit", person: null })}>
-        开始填写 / Start →
-      </button>
-
-      {mine.length > 0 && (
-        <div className="card mt-5 p-4">
-          <p className="text-sm font-semibold">这台设备上之前的提交 · Your earlier submissions</p>
-          <ul className="mt-2 space-y-1.5">
-            {mine.map((m) => (
-              <li key={m.id}>
-                <a
-                  href={`/submit/${m.id}?token=${encodeURIComponent(m.token)}`}
-                  className="text-sm text-brand-600 hover:underline"
-                >
-                  {m.name} → 继续修改 / Edit
-                </a>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      </section>
     </main>
   );
 }

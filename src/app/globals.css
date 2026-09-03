@@ -2,69 +2,236 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ─────────────────────────────────────────────────────────────────────
+   Design tokens — "Archive" direction: cool neutral surfaces, one ink-blue
+   accent, mono metadata. Light is the default; dark follows the system.
+   ───────────────────────────────────────────────────────────────────── */
 :root {
-  --bg: #f6f7f9;
-  --card: #ffffff;
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --surface-2: #eef0f3;
+  --surface-3: #e3e6eb;
+  --line: #e2e5e9;
+  --line-strong: #c8cdd4;
+  --ink: #15181c;
+  --ink-2: #3b4148;
+  --ink-3: #6a7280;
+  --ink-4: #9aa2ab;
+  --accent: #24356b;
+  --accent-hover: #1b2a57;
+  --accent-soft: #e8edf8;
+  --on-accent: #ffffff;
+  --accent-ring: rgba(36, 53, 107, 0.16);
+  --accent-ring-strong: rgba(36, 53, 107, 0.55);
+  --success: #1f7a4d;
+  --success-soft: #e3f3ea;
+  --warning: #8a5a00;
+  --warning-soft: #fbf0d9;
+  --danger: #b42318;
+  --danger-soft: #fce8e6;
+  --overlay: rgba(21, 24, 28, 0.42);
+  --shadow-1: 0 1px 2px rgba(21, 24, 28, 0.05), 0 1px 1px rgba(21, 24, 28, 0.03);
+  --shadow-2: 0 6px 24px rgba(21, 24, 28, 0.07), 0 1px 3px rgba(21, 24, 28, 0.05);
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  color-scheme: light dark;
 }
 
-html,
-body {
-  max-width: 100vw;
-  overflow-x: hidden;
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1013;
+    --surface: #15181d;
+    --surface-2: #1c2026;
+    --surface-3: #242930;
+    --line: #262b32;
+    --line-strong: #353b44;
+    --ink: #edeff2;
+    --ink-2: #c5cad1;
+    --ink-3: #8b939d;
+    --ink-4: #5f6772;
+    --accent: #93a8f0;
+    --accent-hover: #a9b9f4;
+    --accent-soft: #1d2440;
+    --on-accent: #0e1013;
+    --accent-ring: rgba(147, 168, 240, 0.18);
+    --accent-ring-strong: rgba(147, 168, 240, 0.6);
+    --success: #5ec48d;
+    --success-soft: #14291f;
+    --warning: #e0b04f;
+    --warning-soft: #2e2410;
+    --danger: #f0776b;
+    --danger-soft: #35171a;
+    --overlay: rgba(0, 0, 0, 0.6);
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35);
+    --shadow-2: 0 8px 28px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
+  }
 }
 
-body {
-  background: var(--bg);
-  color: theme("colors.ink.DEFAULT");
-  -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
-}
-
-/* Mobile-first: keep tap targets comfortable, avoid iOS input zoom. */
-input,
-textarea,
-select,
-button {
-  font-size: 16px;
-}
-
-/* Thin, unobtrusive scrollbars */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: #d7d7da transparent;
-}
-*::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-*::-webkit-scrollbar-thumb {
-  background: #d7d7da;
-  border-radius: 999px;
+@layer base {
+  html,
+  body {
+    max-width: 100vw;
+    overflow-x: hidden;
+  }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    font-feature-settings: "kern", "liga", "calt";
+  }
+  /* Keep tap targets comfortable and avoid iOS input zoom. */
+  input,
+  textarea,
+  select,
+  button {
+    font-size: 16px;
+  }
+  ::selection {
+    background: var(--accent-soft);
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-strong) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--line-strong);
+    border-radius: 999px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
 }
 
 @layer components {
   .card {
-    @apply rounded-3xl bg-white shadow-soft;
+    @apply rounded-xl border border-line bg-surface;
+  }
+  .eyebrow {
+    @apply font-mono text-[11px] uppercase tracking-[0.12em] text-ink-3;
   }
   .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-2xl px-4 py-3 font-medium transition active:scale-[0.98] disabled:opacity-50 disabled:active:scale-100;
+    @apply inline-flex select-none items-center justify-center gap-2 whitespace-nowrap rounded-lg px-4 py-2.5 text-sm font-medium transition-[background-color,border-color,color,transform,box-shadow,opacity] duration-200 ease-out active:scale-[0.985] disabled:pointer-events-none disabled:opacity-50;
   }
   .btn-primary {
-    @apply btn bg-brand-500 text-white hover:bg-brand-600 shadow-soft;
+    @apply btn bg-accent text-accent-on shadow-1 hover:bg-accent-hover;
+  }
+  .btn-secondary {
+    @apply btn border border-line-strong bg-surface text-ink hover:bg-surface-2;
   }
   .btn-ghost {
-    @apply btn bg-white text-ink ring-1 ring-black/5 hover:bg-gray-50;
+    @apply btn text-ink-2 hover:bg-surface-2 hover:text-ink;
   }
-  .btn-soft {
-    @apply btn bg-brand-50 text-brand-700 hover:bg-brand-100;
+  .btn-danger {
+    @apply btn text-danger hover:bg-danger-soft;
+  }
+  .btn-icon {
+    @apply inline-flex h-9 w-9 items-center justify-center rounded-lg text-ink-3 transition-[background-color,color] duration-200 ease-out hover:bg-surface-2 hover:text-ink disabled:pointer-events-none disabled:opacity-50;
   }
   .input {
-    @apply w-full rounded-2xl border border-black/10 bg-white px-4 py-3 outline-none transition placeholder:text-ink-mute focus:border-brand-400 focus:ring-4 focus:ring-brand-100;
+    @apply w-full rounded-lg border border-line bg-surface px-3.5 py-2.5 text-[15px] text-ink outline-none transition-[border-color,box-shadow] duration-200 ease-out placeholder:text-ink-4 focus:border-accent focus:shadow-ring;
   }
   .label {
-    @apply mb-1.5 block text-sm font-medium text-ink-soft;
+    @apply mb-1.5 block text-[13px] font-medium text-ink-2;
   }
   .chip {
-    @apply inline-flex items-center gap-1 rounded-full px-3 py-1 text-sm;
+    @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-line bg-surface px-3 py-1.5 text-[13px] text-ink-2 transition-[background-color,border-color,color,transform] duration-200 ease-out hover:border-line-strong hover:bg-surface-2 hover:text-ink active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50;
+  }
+  .badge {
+    @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2 py-0.5 text-[11px] font-medium;
+  }
+  .badge-pending {
+    @apply badge bg-warning-soft text-warning;
+  }
+  .badge-live {
+    @apply badge bg-success-soft text-success;
+  }
+  .badge-student {
+    @apply badge bg-accent-soft text-accent;
+  }
+  .badge-muted {
+    @apply badge bg-surface-2 text-ink-3;
+  }
+  .dot {
+    @apply inline-block h-1.5 w-1.5 shrink-0 rounded-full;
+  }
+  /* Staggered entrance for lists: set --i on each child. */
+  .stagger > * {
+    animation: rise 0.55s var(--ease) both;
+    animation-delay: calc(var(--i, 0) * 45ms);
+  }
+  .skeleton {
+    @apply rounded-lg bg-surface-2;
+    background-image: linear-gradient(90deg, var(--surface-2) 0%, var(--surface-3) 50%, var(--surface-2) 100%);
+    background-size: 200% 100%;
+    animation: shimmer 1.8s linear infinite;
+  }
+  /* Segmented control (language toggle). */
+  .seg {
+    @apply inline-flex overflow-hidden rounded-lg border border-line-strong bg-surface text-[12px] font-medium;
+  }
+  .seg > * {
+    @apply px-3 py-1.5 text-ink-3 transition-[background-color,color] duration-200 ease-out;
+  }
+  .seg > [data-on="true"] {
+    @apply bg-ink text-bg;
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   Visitor page shell — one DOM, two layouts. Phone: a vertical stack with
+   the stage on top and the index scrolling underneath. Desktop (≥1024px):
+   three columns — index · stage · conversation — like a reading room.
+   ───────────────────────────────────────────────────────────────────── */
+.visitor-shell {
+  display: grid;
+  height: 100dvh;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "header"
+    "stage"
+    "caption"
+    "index"
+    "ask";
+}
+.visitor-stage {
+  height: clamp(240px, 38dvh, 480px);
+}
+@media (min-width: 1024px) {
+  .visitor-shell {
+    grid-template-columns: 300px minmax(0, 1fr) 400px;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "header header header"
+      "index stage transcript"
+      "index stage ask";
+    column-gap: 24px;
+    padding: 0 40px 28px;
+  }
+  .visitor-stage {
+    height: auto;
+    min-height: 0;
+  }
+}
+@media (min-width: 1440px) {
+  .visitor-shell {
+    grid-template-columns: 320px minmax(0, 1fr) 440px;
+    column-gap: 32px;
+    padding: 0 56px 32px;
   }
 }

@@ -4,13 +4,29 @@ import { useEffect, useRef, useState } from "react";
 import type { Person, Section } from "@/lib/types";
 import { readJson } from "@/lib/http";
 import { adminApi, type EditorApi, type SavePayload } from "@/lib/editor-api";
+import { pad2 } from "@/lib/format";
 import { LoadingOverlay, Spinner } from "./Loading";
+import type { Draft } from "./DraftPreview";
+import {
+  IconArrowLeft,
+  IconBolt,
+  IconChevronDown,
+  IconClose,
+  IconDown,
+  IconFilm,
+  IconImage,
+  IconPlus,
+  IconSparkle,
+  IconUp,
+  IconUpload,
+  IconWarning,
+} from "./icons";
 
 const LANGUAGES: { value: Person["language"]; label: string }[] = [
-  { value: "auto", label: "跟随提问语言 (Auto)" },
+  { value: "auto", label: "跟随提问语言 · Auto" },
   { value: "en", label: "English" },
   { value: "zh", label: "中文" },
-  { value: "bilingual", label: "中英双语 (Bilingual)" },
+  { value: "bilingual", label: "中英双语 · Bilingual" },
 ];
 
 // Must match the server's magic-byte whitelist (lib/image.ts). Listing the
@@ -40,21 +56,37 @@ async function pollTask(
     const data = await readJson(res);
     if (!res.ok) throw new Error(data.error || "生成失败");
     if (typeof data[doneKey] === "string" && data[doneKey]) return data[doneKey];
-    if (data.status) lastStatus = String(data.status); // still pending
+    if (data.status) lastStatus = String(data.status);
   }
   throw new Error(`生成超时，请重试${lastStatus ? `（最后状态: ${lastStatus}）` : ""}`);
+}
+
+function SectionCard({ n, title, sub, children }: { n: string; title: string; sub?: string; children: React.ReactNode }) {
+  return (
+    <section className="card p-5">
+      <div className="mb-4 flex items-baseline gap-3">
+        <span className="font-mono text-[11px] text-accent">{n}</span>
+        <h3 className="text-[15px] font-semibold text-ink">{title}</h3>
+        {sub && <span className="text-[12px] text-ink-3">{sub}</span>}
+      </div>
+      {children}
+    </section>
+  );
 }
 
 export default function PersonEditor({
   person,
   onSaved,
   onCancel,
+  onDraftChange,
   mode = "admin",
   api = adminApi,
 }: {
   person: Person | null;
   onSaved: (p: Person) => void;
   onCancel: () => void;
+  /** Live draft for a side-by-side preview. */
+  onDraftChange?: (d: Draft) => void;
   /** "student": the self-submission form — no admin-only generation tools. */
   mode?: EditorMode;
   api?: EditorApi;
@@ -78,13 +110,11 @@ export default function PersonEditor({
 
   const [cartoonUrl, setCartoonUrl] = useState<string | undefined>(person?.cartoonUrl);
   const [cartooning, setCartooning] = useState(false);
-
   const [loopVideoUrl, setLoopVideoUrl] = useState<string | undefined>(person?.loopVideoUrl);
   const [loopGenerating, setLoopGenerating] = useState(false);
 
   const [pregenerating, setPregenerating] = useState<Set<string>>(new Set());
   const [bulkPregenerating, setBulkPregenerating] = useState(false);
-  // Sections whose pre-generated answer editor is expanded.
   const [answersOpen, setAnswersOpen] = useState<Set<string>>(new Set());
 
   const [parsing, setParsing] = useState(false);
@@ -95,40 +125,33 @@ export default function PersonEditor({
   const fileRef = useRef<HTMLInputElement>(null);
   const errorRef = useRef<HTMLDivElement>(null);
 
-  // A failure from any button (which may be far down the page) should always
-  // be visible — scroll the top error banner into view when it appears.
   useEffect(() => {
     if (error) errorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [error]);
+
+  useEffect(() => {
+    onDraftChange?.({ name, subtitle, photo: photoPreview, sections });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name, subtitle, photoPreview, sections]);
 
   function fail(e: unknown, fallback: string) {
     setError(e instanceof Error ? e.message : fallback);
   }
 
   function updateSection(id: string, patch: Partial<Section>) {
-    // Editing the title/content invalidates any pre-generated answer (it was
-    // written for the old text) — clear it so the "预生成" state stays honest.
+    // Editing the title/content invalidates any pre-generated answer.
     const invalidatesCache = "title" in patch || "content" in patch;
     setSections((prev) =>
       prev.map((s) =>
-        s.id === id
-          ? { ...s, ...patch, cachedAnswers: invalidatesCache ? undefined : s.cachedAnswers }
-          : s
+        s.id === id ? { ...s, ...patch, cachedAnswers: invalidatesCache ? undefined : s.cachedAnswers } : s
       )
     );
   }
-  // Edit a pre-generated answer directly (does NOT clear the cache like a
-  // title/content edit does). An emptied text is kept as "" so the textarea
-  // doesn't vanish mid-edit — the server drops empty ones, and the chat route
-  // then falls back to live generation for that language.
   function updateCachedAnswer(id: string, key: "en" | "zh" | "bilingual", text: string) {
     setSections((prev) =>
-      prev.map((s) =>
-        s.id === id ? { ...s, cachedAnswers: { ...(s.cachedAnswers || {}), [key]: text } } : s
-      )
+      prev.map((s) => (s.id === id ? { ...s, cachedAnswers: { ...(s.cachedAnswers || {}), [key]: text } } : s))
     );
   }
-
   function toggleAnswersOpen(id: string) {
     setAnswersOpen((prev) => {
       const next = new Set(prev);
@@ -137,7 +160,6 @@ export default function PersonEditor({
       return next;
     });
   }
-
   function removeSection(id: string) {
     setSections((prev) => prev.filter((s) => s.id !== id));
   }
@@ -199,7 +221,6 @@ export default function PersonEditor({
     setError("");
     setCartooning(true);
     try {
-      // Start the (async) render, then poll until the cartoon is ready.
       const startRes = await fetch(`/api/admin/people/${existing.id}/cartoon`, { method: "POST" });
       const startData = await readJson(startRes);
       if (!startRes.ok) throw new Error(startData.error || "卡通发起失败");
@@ -281,15 +302,11 @@ export default function PersonEditor({
     try {
       const payload: SavePayload = { name, subtitle, gender, language, script, sections };
       if (admin) {
-        // Re-assert the already-generated assets on every save (they were
-        // persisted by the generate buttons); see the PUT handler. Omitted
-        // when unknown so a stale editor can never clear a newer asset.
         if (cartoonUrl) payload.cartoonUrl = cartoonUrl;
         if (loopVideoUrl) payload.loopVideoUrl = loopVideoUrl;
       }
       let saved: Person = existing ? await api.update(existing.id, payload) : await api.create(payload);
       if (!existing) setCreated(saved);
-
       if (photoFile) {
         const photoUrl = await api.uploadPhoto(saved.id, photoFile);
         saved = { ...saved, photoUrl };
@@ -303,23 +320,24 @@ export default function PersonEditor({
     }
   }
 
-  const heading = admin
-    ? isEdit
-      ? "编辑同学"
-      : "新增同学"
-    : isEdit
-      ? "修改我的提交 · Edit"
-      : "提交我的讲稿 · Submit";
+  const heading = admin ? (isEdit ? "编辑同学" : "新增同学") : isEdit ? "修改我的提交" : "提交我的讲稿";
+  const headingEn = admin ? (isEdit ? "Edit student" : "New student") : isEdit ? "Edit submission" : "Submit my talk";
   const saveLabel = admin
     ? isEdit
       ? "保存修改"
       : "创建并生成二维码"
     : isEdit
-      ? "重新提交审核 / Resubmit"
-      : "提交审核 / Submit";
+      ? "重新提交审核 · Resubmit"
+      : "提交审核 · Submit";
+
+  const genders: { v: "" | "male" | "female"; t: string }[] = [
+    { v: "", t: "默认 · Default" },
+    { v: "male", t: "男声 · Male" },
+    { v: "female", t: "女声 · Female" },
+  ];
 
   return (
-    <div className="space-y-5 pb-28">
+    <div className="relative space-y-4">
       {(sectioning || saving || parsing || cartooning || loopGenerating || bulkPregenerating) && (
         <LoadingOverlay
           label={
@@ -339,7 +357,7 @@ export default function PersonEditor({
           }
           sub={
             sectioning
-              ? "把讲稿分成几个部分，请稍候 / Splitting your script"
+              ? "把讲稿分成几个部分，请稍候 · Splitting your script"
               : cartooning
                 ? "用照片生成卡通，约 20–40 秒"
                 : loopGenerating
@@ -347,55 +365,46 @@ export default function PersonEditor({
                   : bulkPregenerating
                     ? "让访客选这些部分时能立刻播放，不用等 AI"
                     : saving
-                      ? "上传照片并保存 / Uploading photo"
-                      : "从 PDF / Word 提取文字 / Extracting text"
+                      ? "上传照片并保存 · Uploading photo"
+                      : "从 PDF / Word 提取文字 · Extracting text"
           }
         />
       )}
 
       <div className="flex items-center justify-between">
-        <button onClick={onCancel} className="text-sm text-ink-mute hover:text-ink">
-          ← 返回
+        <button type="button" onClick={onCancel} className="btn-ghost -ml-2 px-2">
+          <IconArrowLeft size={16} /> 返回
         </button>
-        <h2 className="text-base font-semibold">{heading}</h2>
-        <span className="w-10" />
+        <div className="text-right">
+          <h2 className="font-display text-[20px] font-semibold leading-tight tracking-[-0.01em]">{heading}</h2>
+          <p className="eyebrow">{headingEn}</p>
+        </div>
       </div>
 
-      {/* Error banner — always right under the header, so a failure from ANY
-          button (photo/cartoon/loop-video/pregenerate/save) is impossible to
-          miss, no matter where on the page that button is. */}
       {error && (
-        <div
-          ref={errorRef}
-          className="flex items-start gap-2 rounded-2xl bg-red-50 px-4 py-3 text-sm text-red-700 ring-1 ring-red-200"
-        >
-          <span className="mt-0.5 shrink-0">⚠️</span>
+        <div ref={errorRef} className="flex items-start gap-2.5 rounded-lg bg-danger-soft px-4 py-3 text-[13px] text-danger animate-rise">
+          <IconWarning size={16} className="mt-0.5 shrink-0" />
           <p className="min-w-0 flex-1 break-words">{error}</p>
-          <button
-            onClick={() => setError("")}
-            className="shrink-0 text-red-400 hover:text-red-600"
-            aria-label="关闭"
-          >
-            ✕
+          <button type="button" onClick={() => setError("")} className="shrink-0 opacity-70 hover:opacity-100" aria-label="关闭">
+            <IconClose size={16} />
           </button>
         </div>
       )}
 
-      {/* Photo */}
-      <section className="card p-5">
-        <p className="label">大头照 · Photo</p>
+      {/* 01 · Photo (+ admin-only generated assets) */}
+      <SectionCard n="01" title="大头照" sub="Photo">
         <div className="flex items-center gap-4">
-          <div className="h-20 w-20 shrink-0 overflow-hidden rounded-2xl bg-gray-100 ring-1 ring-black/5">
+          <div className="relative h-[88px] w-[88px] shrink-0 overflow-hidden rounded-xl border border-line bg-surface-2">
             {photoPreview ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img src={photoPreview} alt="" className="h-full w-full object-cover" />
             ) : (
-              <div className="grid h-full w-full place-items-center text-2xl text-ink-mute">
-                🙂
+              <div className="grid h-full w-full place-items-center text-ink-4">
+                <IconImage size={22} />
               </div>
             )}
           </div>
-          <div>
+          <div className="min-w-0">
             <input
               ref={fileRef}
               type="file"
@@ -407,137 +416,108 @@ export default function PersonEditor({
                 e.target.value = "";
               }}
             />
-            <button className="btn-soft" onClick={() => fileRef.current?.click()}>
-              {photoPreview ? "更换照片 / Replace" : "上传照片 / Upload"}
+            <button type="button" className="btn-secondary" onClick={() => fileRef.current?.click()}>
+              <IconUpload size={16} /> {photoPreview ? "更换照片" : "上传照片"}
             </button>
-            <p className="mt-1 text-xs text-ink-mute">
-              正脸、清晰、JPG/PNG/WebP、≤8MB · Clear front-facing photo
-            </p>
-            {!admin && isEdit && (
-              <p className="mt-1 text-xs text-ink-mute">
-                更换照片后，老师需要重新生成卡通形象。
-              </p>
-            )}
+            <p className="mt-2 text-[12px] leading-relaxed text-ink-3">正脸、清晰、JPG / PNG / WebP、≤8MB · Clear, front-facing photo</p>
+            {!admin && isEdit && <p className="text-[12px] text-ink-3">更换照片后，老师需要重新生成卡通形象。</p>}
           </div>
         </div>
 
         {admin && (
-          <>
-            {/* Cartoon avatar (A2E) — needs the person saved with a photo first. */}
-            <div className="mt-4 flex items-center gap-4 border-t border-black/5 pt-4">
-              <div className="h-20 w-20 shrink-0 overflow-hidden rounded-2xl bg-gray-100 ring-1 ring-black/5">
+          <div className="mt-5 divide-y divide-line border-t border-line">
+            <div className="flex items-center gap-4 py-4">
+              <div className="h-16 w-16 shrink-0 overflow-hidden rounded-lg border border-line bg-surface-2">
                 {cartoonUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={cartoonUrl} alt="" className="h-full w-full object-cover" />
                 ) : (
-                  <div className="grid h-full w-full place-items-center text-xl text-ink-mute">🎨</div>
+                  <div className="grid h-full w-full place-items-center text-ink-4"><IconSparkle size={18} /></div>
                 )}
               </div>
-              <div>
-                <p className="label">卡通形象 · Cartoon</p>
-                {isEdit ? (
-                  <button className="btn-soft" onClick={generateCartoon} disabled={cartooning}>
-                    {cartooning ? "生成中…" : cartoonUrl ? "重新生成卡通" : "✨ 生成卡通形象"}
-                  </button>
-                ) : (
-                  <p className="text-xs text-ink-mute">先保存这位同学，再回来生成卡通形象。</p>
-                )}
-                <p className="mt-1 text-xs text-ink-mute">
-                  用本人照片生成轻卡通（还认得出是谁），用于访客端显示和数字人说话。
-                </p>
+              <div className="min-w-0 flex-1">
+                <p className="text-[14px] font-medium">卡通形象 · Cartoon</p>
+                <p className="text-[12px] leading-relaxed text-ink-3">用本人照片生成轻卡通（还认得出是谁），用于访客端显示和数字人说话。</p>
               </div>
+              {isEdit ? (
+                <button type="button" className="btn-secondary shrink-0" onClick={generateCartoon} disabled={cartooning}>
+                  {cartoonUrl ? "重新生成" : "生成"}
+                </button>
+              ) : (
+                <span className="shrink-0 text-[12px] text-ink-4">先保存</span>
+              )}
             </div>
-
-            {/* Ambient talking-loop video — generated once; makes answers start
-                near-instantly instead of waiting for a per-answer lip-sync render. */}
-            <div className="mt-4 flex items-center gap-4 border-t border-black/5 pt-4">
-              <div className="h-20 w-20 shrink-0 overflow-hidden rounded-2xl bg-gray-100 ring-1 ring-black/5">
+            <div className="flex items-center gap-4 py-4">
+              <div className="h-16 w-16 shrink-0 overflow-hidden rounded-lg border border-line bg-surface-2">
                 {loopVideoUrl ? (
                   <video src={loopVideoUrl} muted loop autoPlay playsInline className="h-full w-full object-cover" />
                 ) : (
-                  <div className="grid h-full w-full place-items-center text-xl text-ink-mute">🎬</div>
+                  <div className="grid h-full w-full place-items-center text-ink-4"><IconFilm size={18} /></div>
                 )}
               </div>
-              <div>
-                <p className="label">动态视频 · Talking loop（推荐，秒回）</p>
-                {isEdit ? (
-                  <button className="btn-soft" onClick={generateLoopVideo} disabled={loopGenerating}>
-                    {loopGenerating ? "生成中…" : loopVideoUrl ? "重新生成动态视频" : "🎬 生成动态视频"}
-                  </button>
-                ) : (
-                  <p className="text-xs text-ink-mute">先保存这位同学，再回来生成动态视频。</p>
-                )}
-                <p className="mt-1 text-xs text-ink-mute">
-                  生成一段几秒的“说话状态”循环视频（一次性）。访客提问时立刻用语音配这段循环播放，
-                  无需每次等待渲染，口型不做逐字对齐。建议先生成卡通形象再生成此项。
-                </p>
+              <div className="min-w-0 flex-1">
+                <p className="text-[14px] font-medium">动态视频 · Talking loop <span className="badge-muted ml-1">推荐</span></p>
+                <p className="text-[12px] leading-relaxed text-ink-3">几秒的说话状态循环视频，只生成一次；访客提问时语音配它播放，秒回。建议先生成卡通。</p>
               </div>
+              {isEdit ? (
+                <button type="button" className="btn-secondary shrink-0" onClick={generateLoopVideo} disabled={loopGenerating}>
+                  {loopVideoUrl ? "重新生成" : "生成"}
+                </button>
+              ) : (
+                <span className="shrink-0 text-[12px] text-ink-4">先保存</span>
+              )}
             </div>
-          </>
+          </div>
         )}
-      </section>
+      </SectionCard>
 
-      {/* Basics */}
-      <section className="card space-y-4 p-5">
-        <div>
-          <label className="label">姓名 · Name</label>
-          <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：李雷 / Li Lei" maxLength={60} />
-        </div>
-        <div>
-          <label className="label">副标题 · Subtitle（可选 / optional）</label>
-          <input
-            className="input"
-            value={subtitle}
-            onChange={(e) => setSubtitle(e.target.value)}
-            placeholder="例如：TOK Exhibition · Knowledge & Technology"
-            maxLength={140}
-          />
-        </div>
-        <div>
-          <label className="label">声音性别 · Voice（数字人音色）</label>
-          <div className="flex gap-2">
-            {[
-              { v: "", t: "默认 / Default" },
-              { v: "male", t: "男声 / Male" },
-              { v: "female", t: "女声 / Female" },
-            ].map((g) => (
-              <button
-                key={g.v}
-                type="button"
-                onClick={() => setGender(g.v as "" | "male" | "female")}
-                className={`flex-1 rounded-2xl px-3 py-2.5 text-sm font-medium ring-1 transition ${
-                  gender === g.v
-                    ? "bg-brand-500 text-white ring-brand-500"
-                    : "bg-white text-ink-soft ring-black/10 hover:bg-gray-50"
-                }`}
-              >
-                {g.t}
-              </button>
-            ))}
+      {/* 02 · Basics */}
+      <SectionCard n="02" title="基本信息" sub="Basics">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label className="label" htmlFor="pe-name">姓名 · Name</label>
+            <input id="pe-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：李雷 / Li Lei" maxLength={60} />
+          </div>
+          <div>
+            <label className="label" htmlFor="pe-sub">副标题 · Subtitle <span className="text-ink-4">可选</span></label>
+            <input id="pe-sub" className="input" value={subtitle} onChange={(e) => setSubtitle(e.target.value)} placeholder="例如：Why do we seek knowledge?" maxLength={140} />
+          </div>
+          <div>
+            <span className="label">声音 · Voice</span>
+            <div className="grid grid-cols-3 gap-1 rounded-lg border border-line bg-surface-2 p-1">
+              {genders.map((g) => (
+                <button
+                  key={g.v}
+                  type="button"
+                  onClick={() => setGender(g.v)}
+                  className={`rounded-md px-2 py-2 text-[13px] font-medium transition-[background-color,color,box-shadow] duration-200 ease-out ${
+                    gender === g.v ? "bg-surface text-ink shadow-1" : "text-ink-3 hover:text-ink"
+                  }`}
+                >
+                  {g.t}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="label" htmlFor="pe-lang">回答语言 · Answer language</label>
+            <div className="relative">
+              <select id="pe-lang" className="input appearance-none pr-9" value={language} onChange={(e) => setLanguage(e.target.value as Person["language"])}>
+                {LANGUAGES.map((l) => (
+                  <option key={l.value} value={l.value}>{l.label}</option>
+                ))}
+              </select>
+              <IconChevronDown size={16} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-ink-3" />
+            </div>
           </div>
         </div>
-        <div>
-          <label className="label">回答语言 · Answer language</label>
-          <select
-            className="input appearance-none"
-            value={language}
-            onChange={(e) => setLanguage(e.target.value as Person["language"])}
-          >
-            {LANGUAGES.map((l) => (
-              <option key={l.value} value={l.value}>
-                {l.label}
-              </option>
-            ))}
-          </select>
-        </div>
-      </section>
+      </SectionCard>
 
-      {/* Script */}
-      <section className="card space-y-3 p-5">
-        <div className="flex items-center justify-between">
-          <p className="label mb-0">讲稿 · Script</p>
-          <label className="cursor-pointer text-sm text-brand-600 hover:underline">
-            {parsing ? "解析中…" : "上传 pdf / word / txt"}
+      {/* 03 · Script */}
+      <SectionCard n="03" title="讲稿" sub="Script">
+        <div className="mb-2 flex items-center justify-end">
+          <label className="btn-ghost cursor-pointer px-2 py-1 text-[13px]">
+            <IconUpload size={15} /> {parsing ? "解析中…" : "上传 PDF / Word / txt"}
             <input
               type="file"
               accept=".txt,.pdf,.docx,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -551,172 +531,133 @@ export default function PersonEditor({
           </label>
         </div>
         <textarea
-          className="input min-h-[160px] resize-y leading-relaxed"
+          className="input min-h-[180px] resize-y leading-relaxed"
           value={script}
           onChange={(e) => setScript(e.target.value)}
-          placeholder="直接粘贴讲稿文字，或上传 PDF / Word / txt 自动提取… / Paste your talk, or upload a file"
+          placeholder="直接粘贴讲稿文字，或上传文件自动提取… / Paste your talk, or upload a file"
         />
-        <button className="btn-primary w-full" onClick={autoSection} disabled={sectioning}>
-          {sectioning ? (
-            <>
-              <Spinner light /> AI 分段中…
-            </>
-          ) : (
-            "✨ AI 智能分段 · Auto-split"
-          )}
-        </button>
-        <p className="text-xs text-ink-mute">
-          AI 会把讲稿分成几个“部分”，访客可以选择想先听哪一部分。分段后可手动微调。
-          {!admin && " / AI splits your talk into parts visitors can pick; adjust them below."}
-        </p>
-      </section>
+        <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-[12px] leading-relaxed text-ink-3">AI 会把讲稿分成几个“部分”，访客可以选择想先听哪一部分。分段后可手动微调。</p>
+          <button type="button" className="btn-primary shrink-0" onClick={autoSection} disabled={sectioning}>
+            {sectioning ? <Spinner light /> : <IconSparkle size={16} />}
+            AI 智能分段
+          </button>
+        </div>
+      </SectionCard>
 
-      {/* Sections */}
+      {/* 04 · Parts */}
       <section className="space-y-3">
         <div className="flex items-center justify-between px-1">
-          <p className="text-sm font-semibold text-ink-soft">
-            部分 · Sections（{sections.length}）
-          </p>
-          <div className="flex items-center gap-3">
+          <div className="flex items-baseline gap-3">
+            <span className="font-mono text-[11px] text-accent">04</span>
+            <h3 className="text-[15px] font-semibold">部分</h3>
+            <span className="text-[12px] text-ink-3">Parts · {sections.length}</span>
+          </div>
+          <div className="flex items-center gap-1">
             {admin && isEdit && sections.length > 0 && (
-              <button
-                className="text-sm text-brand-600 hover:underline disabled:opacity-50"
-                onClick={() => pregenerate()}
-                disabled={bulkPregenerating}
-              >
-                {bulkPregenerating ? "生成中…" : "⚡ 预生成全部讲解"}
+              <button type="button" className="btn-ghost px-2.5 py-1.5 text-[13px]" onClick={() => pregenerate()} disabled={bulkPregenerating}>
+                <IconBolt size={15} /> 预生成全部
               </button>
             )}
-            <button
-              className="text-sm text-brand-600 hover:underline"
-              onClick={() => setSections((p) => [...p, emptySection()])}
-            >
-              + 添加 / Add
+            <button type="button" className="btn-ghost px-2.5 py-1.5 text-[13px]" onClick={() => setSections((p) => [...p, emptySection()])}>
+              <IconPlus size={15} /> 添加
             </button>
           </div>
         </div>
         {admin && isEdit && sections.length > 0 && (
-          <p className="px-1 text-xs text-ink-mute">
-            ⚡ 预生成：提前让 AI 写好每部分的讲解，访客选中时立刻播放，不用现场等待。追问仍然是现场实时回答。
-          </p>
+          <p className="px-1 text-[12px] leading-relaxed text-ink-3">预生成：提前让 AI 写好每部分的讲解，访客选中时立刻播放。追问仍然是现场实时回答。</p>
         )}
         {sections.length === 0 && (
-          <div className="card p-5 text-center text-sm text-ink-mute">
-            还没有分段。先点上面的「AI 智能分段」，或手动添加。
-            <br />
-            No sections yet — use “Auto-split” above, or add them by hand.
+          <div className="card px-5 py-8 text-center">
+            <p className="text-[14px] text-ink-2">还没有分段</p>
+            <p className="mt-1 text-[12px] text-ink-3">先点「AI 智能分段」，或手动添加。 / Use “AI 智能分段” above, or add parts by hand.</p>
           </div>
         )}
-        {sections.map((s, i) => (
-          <div key={s.id} className="card space-y-2 p-4">
-            <div className="flex items-center gap-2">
-              <span className="grid h-6 w-6 place-items-center rounded-full bg-brand-50 text-xs font-medium text-brand-700">
-                {i + 1}
-              </span>
-              <input
-                className="input flex-1 py-2"
-                value={s.title}
-                onChange={(e) => updateSection(s.id, { title: e.target.value })}
-                placeholder="标题，如：Object 1 · The Passport"
-                maxLength={80}
-              />
-              <button onClick={() => moveSection(s.id, -1)} className="px-1 text-ink-mute hover:text-ink" title="上移">↑</button>
-              <button onClick={() => moveSection(s.id, 1)} className="px-1 text-ink-mute hover:text-ink" title="下移">↓</button>
-              <button onClick={() => removeSection(s.id)} className="px-1 text-red-400 hover:text-red-600" title="删除">✕</button>
-            </div>
-            <input
-              className="input py-2 text-sm"
-              value={s.hint ?? ""}
-              onChange={(e) => updateSection(s.id, { hint: e.target.value })}
-              placeholder="一句话提示（可选）/ one-line teaser (optional)"
-              maxLength={160}
-            />
-            <textarea
-              className="input min-h-[90px] resize-y text-sm leading-relaxed"
-              value={s.content}
-              onChange={(e) => updateSection(s.id, { content: e.target.value })}
-              placeholder="这一部分对应的讲稿内容… / the script for this part"
-            />
-            {admin && isEdit && (
-              <div className="flex items-center gap-2 pt-1">
-                <button
-                  className="chip bg-brand-50 text-xs text-brand-700 hover:bg-brand-100 disabled:opacity-50"
-                  onClick={() => pregenerate(s.id)}
-                  disabled={pregenerating.has(s.id) || bulkPregenerating}
-                >
-                  {pregenerating.has(s.id) ? (
-                    <>
-                      <Spinner /> 生成中…
-                    </>
-                  ) : s.cachedAnswers && Object.keys(s.cachedAnswers).length > 0 ? (
-                    "🔁 重新预生成"
-                  ) : (
-                    "⚡ 预生成讲解"
-                  )}
-                </button>
-                {s.cachedAnswers && Object.keys(s.cachedAnswers).length > 0 && (
-                  <>
-                    <span className="text-xs text-green-600">
-                      ✅ 已生成（{Object.keys(s.cachedAnswers).join(" / ")}）
-                    </span>
-                    <button
-                      className="chip bg-white text-xs text-ink-soft ring-1 ring-black/10 hover:bg-gray-50"
-                      onClick={() => toggleAnswersOpen(s.id)}
-                    >
-                      {answersOpen.has(s.id) ? "收起讲解 ⌃" : "📝 查看/编辑讲解"}
-                    </button>
-                  </>
-                )}
+        <div className="stagger space-y-3">
+          {sections.map((s, i) => (
+            <div key={s.id} className="card space-y-2.5 p-4" style={{ ["--i" as string]: i }}>
+              <div className="flex items-center gap-2">
+                <span className="w-6 shrink-0 font-mono text-[11px] text-ink-4">{pad2(i)}</span>
+                <input
+                  className="input flex-1 py-2"
+                  value={s.title}
+                  onChange={(e) => updateSection(s.id, { title: e.target.value })}
+                  placeholder="标题，如：Object 1 · The Passport"
+                  maxLength={80}
+                />
+                <button type="button" onClick={() => moveSection(s.id, -1)} className="btn-icon" title="上移" aria-label="上移"><IconUp size={16} /></button>
+                <button type="button" onClick={() => moveSection(s.id, 1)} className="btn-icon" title="下移" aria-label="下移"><IconDown size={16} /></button>
+                <button type="button" onClick={() => removeSection(s.id)} className="btn-icon hover:!bg-danger-soft hover:!text-danger" title="删除" aria-label="删除"><IconClose size={16} /></button>
               </div>
-            )}
-            {/* Editable pre-generated answers, one per language variant. */}
-            {admin && isEdit && answersOpen.has(s.id) && s.cachedAnswers && (
-              <div className="space-y-2 rounded-2xl bg-brand-50/60 p-3">
-                {(Object.entries(s.cachedAnswers) as ["en" | "zh" | "bilingual", string][]).map(
-                  ([key, text]) => (
+              <input
+                className="input py-2 text-[13px]"
+                value={s.hint ?? ""}
+                onChange={(e) => updateSection(s.id, { hint: e.target.value })}
+                placeholder="一句话提示（可选）· one-line teaser"
+                maxLength={160}
+              />
+              <textarea
+                className="input min-h-[96px] resize-y text-[13px] leading-relaxed"
+                value={s.content}
+                onChange={(e) => updateSection(s.id, { content: e.target.value })}
+                placeholder="这一部分对应的讲稿内容… / the script for this part"
+              />
+              {admin && isEdit && (
+                <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                  <button
+                    type="button"
+                    className="chip"
+                    onClick={() => pregenerate(s.id)}
+                    disabled={pregenerating.has(s.id) || bulkPregenerating}
+                  >
+                    {pregenerating.has(s.id) ? <Spinner /> : <IconBolt size={14} />}
+                    {s.cachedAnswers && Object.keys(s.cachedAnswers).length > 0 ? "重新预生成" : "预生成讲解"}
+                  </button>
+                  {s.cachedAnswers && Object.keys(s.cachedAnswers).length > 0 && (
+                    <>
+                      <span className="badge-live">已生成 · {Object.keys(s.cachedAnswers).join(" / ")}</span>
+                      <button type="button" className="chip" onClick={() => toggleAnswersOpen(s.id)}>
+                        {answersOpen.has(s.id) ? "收起讲解" : "查看 / 编辑讲解"}
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+              {admin && isEdit && answersOpen.has(s.id) && s.cachedAnswers && (
+                <div className="space-y-3 rounded-lg bg-surface-2 p-3 animate-fade">
+                  {(Object.entries(s.cachedAnswers) as ["en" | "zh" | "bilingual", string][]).map(([key, text]) => (
                     <div key={key}>
-                      <p className="mb-1 text-xs font-medium text-ink-soft">
-                        {key === "zh" ? "中文讲解" : key === "en" ? "英文讲解 · English" : "双语讲解 · Bilingual"}
-                      </p>
+                      <p className="eyebrow mb-1.5">{key === "zh" ? "中文讲解" : key === "en" ? "English" : "双语 · Bilingual"}</p>
                       <textarea
-                        className="input min-h-[110px] resize-y bg-white text-sm leading-relaxed"
+                        className="input min-h-[110px] resize-y text-[13px] leading-relaxed"
                         value={text}
                         onChange={(e) => updateCachedAnswer(s.id, key, e.target.value)}
                       />
                     </div>
-                  )
-                )}
-                <p className="text-xs text-ink-mute">
-                  改完后点底部「保存修改」生效；清空某段文字 = 该语言恢复为现场实时生成。
-                </p>
-              </div>
-            )}
-          </div>
-        ))}
+                  ))}
+                  <p className="text-[12px] text-ink-3">改完后点底部「保存修改」生效；清空某段文字 = 该语言恢复为现场实时生成。</p>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
       </section>
 
       {!admin && (
-        <p className="px-1 text-xs text-ink-mute">
+        <p className="px-1 text-[12px] leading-relaxed text-ink-3">
           提交后老师会审核；通过后你的二维码页面才会对访客开放。提交成功后会得到一个专属修改链接，请务必保存。
           <br />
           Your talk goes live after a teacher approves it. You’ll get a private link to edit it later — keep it safe.
         </p>
       )}
 
-      {/* Sticky save bar */}
-      <div className="fixed inset-x-0 bottom-0 z-10 border-t border-black/5 bg-white/90 px-5 py-3 backdrop-blur">
-        <div className="mx-auto flex max-w-md gap-3">
-          <button className="btn-ghost flex-1" onClick={onCancel}>
-            取消
-          </button>
-          <button className="btn-primary flex-[2]" onClick={save} disabled={saving}>
-            {saving ? (
-              <>
-                <Spinner light /> {admin ? "保存中…" : "提交中…"}
-              </>
-            ) : (
-              saveLabel
-            )}
+      {/* Sticky action bar */}
+      <div className="sticky bottom-0 z-10 -mx-1 mt-2 border-t border-line bg-bg/85 px-1 py-3 backdrop-blur">
+        <div className="flex gap-2">
+          <button type="button" className="btn-secondary flex-1" onClick={onCancel}>取消</button>
+          <button type="button" className="btn-primary flex-[2]" onClick={save} disabled={saving}>
+            {saving ? <Spinner light /> : null}
+            {saving ? (admin ? "保存中…" : "提交中…") : saveLabel}
           </button>
         </div>
       </div>

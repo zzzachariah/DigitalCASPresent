@@ -1,20 +1,53 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { Person } from "@/lib/types";
 import { readJson } from "@/lib/http";
+import { pad2, timeAgo } from "@/lib/format";
+import { useMediaQuery } from "@/lib/use-media-query";
 import PersonEditor from "./PersonEditor";
+import DraftPreview, { type Draft } from "./DraftPreview";
 import QrModal from "./QrModal";
+import {
+  IconCheck,
+  IconClose,
+  IconCopy,
+  IconEdit,
+  IconExternal,
+  IconFilm,
+  IconImage,
+  IconInbox,
+  IconLink,
+  IconLogout,
+  IconPlus,
+  IconQr,
+  IconRefresh,
+  IconSearch,
+  IconTrash,
+  IconUsers,
+  IconWarning,
+} from "./icons";
 
 type View = { kind: "list" } | { kind: "new" } | { kind: "edit"; person: Person };
 type Qr = { title: string; subtitle?: string; link: string; downloadName: string } | null;
+type Filter = "all" | "pending" | "published";
 
 function baseUrl(): string {
   return (
     process.env.NEXT_PUBLIC_BASE_URL?.replace(/\/$/, "") ||
     (typeof window !== "undefined" ? window.location.origin : "")
   );
+}
+
+function assetSummary(p: Person): string[] {
+  const out: string[] = [];
+  out.push(p.photoUrl ? "照片" : "无照片");
+  if (p.cartoonUrl) out.push("卡通");
+  if (p.loopVideoUrl) out.push("视频");
+  const pre = p.sections.filter((s) => s.cachedAnswers && Object.keys(s.cachedAnswers).length > 0).length;
+  if (pre > 0) out.push(`预生成 ${pre}/${p.sections.length}`);
+  return out;
 }
 
 export default function AdminApp() {
@@ -26,6 +59,12 @@ export default function AdminApp() {
   const [qr, setQr] = useState<Qr>(null);
   const [copied, setCopied] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [filter, setFilter] = useState<Filter>("all");
+  const [query, setQuery] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<Draft>({ name: "", subtitle: "", sections: [] });
+  // Detail renders once: as a static column on wide screens, else as a sheet.
+  const wide = useMediaQuery("(min-width: 1280px)");
 
   async function load() {
     setLoading(true);
@@ -51,6 +90,14 @@ export default function AdminApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Escape closes the detail sheet.
+  useEffect(() => {
+    if (!selectedId) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setSelectedId(null);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedId]);
+
   async function logout() {
     await fetch("/api/admin/logout", { method: "POST" });
     router.push("/admin/login");
@@ -66,6 +113,7 @@ export default function AdminApp() {
       const data = await readJson(res);
       if (!res.ok || !data.ok) throw new Error(data.error || "删除失败");
       setPeople((list) => list.filter((x) => x.id !== p.id));
+      if (selectedId === p.id) setSelectedId(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "删除失败");
     } finally {
@@ -103,239 +151,340 @@ export default function AdminApp() {
   }
 
   // Merge a just-saved person into the list instead of re-fetching: the Blob
-  // listing can lag a few seconds behind a write, which would make the new
-  // person "disappear" right after creating them.
+  // listing can lag a few seconds behind a write.
   function onSaved(saved: Person) {
     setPeople((list) =>
       list.some((x) => x.id === saved.id)
         ? list.map((x) => (x.id === saved.id ? { ...x, ...saved } : x))
         : [...list, saved]
     );
+    setSelectedId(saved.id);
     setView({ kind: "list" });
-  }
-
-  if (view.kind !== "list") {
-    return (
-      <main className="mx-auto max-w-md px-5 py-6">
-        <PersonEditor
-          person={view.kind === "edit" ? view.person : null}
-          onSaved={onSaved}
-          onCancel={() => setView({ kind: "list" })}
-        />
-      </main>
-    );
   }
 
   const base = baseUrl();
   const submitLink = `${base}/submit`;
-  const pending = people.filter((p) => p.status === "pending");
-  const approved = people.filter((p) => p.status !== "pending");
+  const pendingCount = people.filter((p) => p.status === "pending").length;
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return people
+      .filter((p) => (filter === "pending" ? p.status === "pending" : filter === "published" ? p.status !== "pending" : true))
+      .filter((p) => !q || p.name.toLowerCase().includes(q) || p.slug.includes(q) || (p.subtitle || "").toLowerCase().includes(q))
+      .sort((a, b) => Number(b.status === "pending") - Number(a.status === "pending") || a.createdAt - b.createdAt);
+  }, [people, filter, query]);
+
+  const selected = people.find((p) => p.id === selectedId) || null;
 
   function editLink(p: Person): string | null {
     return p.editToken ? `${base}/submit/${p.id}?token=${encodeURIComponent(p.editToken)}` : null;
   }
+  function openQrFor(p: Person) {
+    setQr({ title: p.name, subtitle: "专属二维码 · Scan to meet", link: `${base}/p/${p.slug}`, downloadName: `qr-${p.slug}` });
+  }
+  function openSubmitQr() {
+    setQr({ title: "学生提交入口", subtitle: "扫码提交讲稿 · Scan to submit", link: submitLink, downloadName: "qr-submit" });
+  }
 
-  function row(p: Person) {
-    const isPending = p.status === "pending";
-    const busy = busyId === p.id;
-    const student = p.source === "student";
-    const link = editLink(p);
+  // ── Editor view ──
+  if (view.kind !== "list") {
     return (
-      <li key={p.id} className="card p-3">
-        <div className="flex items-center gap-3">
-          <div className="h-14 w-14 shrink-0 overflow-hidden rounded-2xl bg-gray-100 ring-1 ring-black/5">
-            {p.photoUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={p.cartoonUrl || p.photoUrl} alt="" className="h-full w-full object-cover" />
-            ) : (
-              <div className="grid h-full w-full place-items-center text-xl text-ink-mute">🙂</div>
-            )}
+      <main className="mx-auto max-w-6xl px-5 py-6 lg:px-10 lg:py-8">
+        <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_320px] lg:gap-10">
+          <div className="min-w-0">
+            <PersonEditor
+              person={view.kind === "edit" ? view.person : null}
+              onSaved={onSaved}
+              onCancel={() => setView({ kind: "list" })}
+              onDraftChange={setDraft}
+            />
           </div>
-          <div className="min-w-0 flex-1">
-            <p className="flex items-center gap-1.5 truncate font-medium">
-              <span className="truncate">{p.name}</span>
-              {isPending && (
-                <span className="chip shrink-0 bg-amber-100 px-2 py-0 text-[11px] text-amber-800">待审核</span>
-              )}
-              {student && !isPending && (
-                <span className="chip shrink-0 bg-brand-50 px-2 py-0 text-[11px] text-brand-700">学生提交</span>
-              )}
-            </p>
-            <p className="truncate text-xs text-ink-mute">
-              {p.sections.length} 部分 · /p/{p.slug}
-              {!p.photoUrl && " · 无照片"}
-            </p>
-          </div>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() =>
-                setQr({
-                  title: p.name,
-                  subtitle: "专属二维码 · Scan to meet",
-                  link: `${base}/p/${p.slug}`,
-                  downloadName: `qr-${p.slug}`,
-                })
-              }
-              className="rounded-xl px-2.5 py-2 text-sm hover:bg-gray-50"
-              title="二维码"
-            >
-              📱
-            </button>
-            <button
-              onClick={() => setView({ kind: "edit", person: p })}
-              className="rounded-xl px-2.5 py-2 text-sm hover:bg-gray-50"
-              title="编辑"
-            >
-              ✏️
-            </button>
-            <button
-              onClick={() => remove(p)}
-              disabled={busy}
-              className="rounded-xl px-2.5 py-2 text-sm hover:bg-red-50 disabled:opacity-50"
-              title="删除"
-            >
-              🗑️
-            </button>
-          </div>
+          <aside className="hidden lg:block">
+            <div className="sticky top-8">
+              <DraftPreview draft={draft} />
+            </div>
+          </aside>
         </div>
-        {(isPending || student) && (
-          <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-black/5 pt-2">
-            {isPending ? (
-              <button
-                onClick={() => setStatus(p, "approved")}
-                disabled={busy}
-                className="btn-primary px-3 py-1.5 text-sm"
-              >
-                {busy ? "处理中…" : "✅ 通过并发布"}
-              </button>
-            ) : (
-              <button
-                onClick={() => setStatus(p, "pending")}
-                disabled={busy}
-                className="btn-ghost px-3 py-1.5 text-sm"
-              >
-                {busy ? "处理中…" : "下线（改回待审核）"}
-              </button>
-            )}
-            {isPending && (
-              <a
-                href={`${base}/p/${p.slug}`}
-                target="_blank"
-                rel="noreferrer"
-                className="btn-ghost px-3 py-1.5 text-sm"
-              >
-                预览
-              </a>
-            )}
-            {link && (
-              <button onClick={() => copy(link, p.id)} className="text-xs text-brand-600 hover:underline">
-                {copied === p.id ? "已复制 ✓" : "复制学生修改链接"}
-              </button>
-            )}
-            {p.submittedAt && (
-              <span className="text-xs text-ink-mute">
-                提交于 {new Date(p.submittedAt).toLocaleString("zh-CN", { hour12: false })}
-              </span>
-            )}
-          </div>
-        )}
-      </li>
+      </main>
     );
   }
 
-  return (
-    <main className="mx-auto max-w-md px-5 py-6">
-      <header className="mb-6 flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold tracking-tight">数字人后台</h1>
-          <p className="text-sm text-ink-mute">
-            TOK Exhibition · {people.length} 位同学
-            {pending.length > 0 && ` · ${pending.length} 待审核`}
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <button onClick={load} className="text-sm text-ink-mute hover:text-ink" title="刷新">
-            刷新
-          </button>
-          <button onClick={logout} className="text-sm text-ink-mute hover:text-ink">
-            退出
-          </button>
-        </div>
-      </header>
+  const statusBadge = (p: Person) =>
+    p.status === "pending" ? (
+      <span className="badge-pending"><span className="dot bg-warning" />待审核</span>
+    ) : (
+      <span className="badge-live"><span className="dot bg-success" />已发布</span>
+    );
 
-      {error && (
-        <div className="mb-4 flex items-start gap-2 rounded-2xl bg-red-50 px-4 py-3 text-sm text-red-700 ring-1 ring-red-200">
-          <span className="mt-0.5 shrink-0">⚠️</span>
-          <p className="min-w-0 flex-1 break-words">{error}</p>
-          <button onClick={() => setError("")} className="shrink-0 text-red-400 hover:text-red-600" aria-label="关闭">
-            ✕
-          </button>
-        </div>
-      )}
-
-      {/* Student self-submission entry point */}
-      <section className="card mb-5 p-4">
-        <p className="text-sm font-semibold">学生提交入口 · Student submission</p>
-        <p className="mt-0.5 text-xs text-ink-mute">
-          把这个链接发给同学，他们自己上传照片和讲稿；提交后在下方审核通过即上线。
-        </p>
-        <p className="mt-2 break-all rounded-xl bg-gray-50 px-3 py-2 text-xs text-ink-soft">{submitLink}</p>
-        <div className="mt-2 flex gap-2">
-          <button className="btn-ghost flex-1 py-2 text-sm" onClick={() => copy(submitLink, "submit")}>
-            {copied === "submit" ? "已复制 ✓" : "复制链接"}
-          </button>
-          <button
-            className="btn-soft flex-1 py-2 text-sm"
-            onClick={() =>
-              setQr({
-                title: "学生提交入口",
-                subtitle: "扫码提交讲稿 · Scan to submit",
-                link: submitLink,
-                downloadName: "qr-submit",
-              })
-            }
-          >
-            二维码
-          </button>
-        </div>
-      </section>
-
-      <button className="btn-primary mb-5 w-full" onClick={() => setView({ kind: "new" })}>
-        ＋ 新增同学（照片 + 讲稿）
-      </button>
-
-      {loading ? (
-        <div className="space-y-3">
-          {[0, 1, 2].map((i) => (
-            <div key={i} className="card h-20 animate-pulse" />
-          ))}
-        </div>
-      ) : people.length === 0 ? (
-        <div className="card p-8 text-center">
-          <div className="mb-2 text-3xl">📇</div>
-          <p className="font-medium">还没有同学</p>
-          <p className="mt-1 text-sm text-ink-mute">
-            点击上方按钮，上传第一位同学的照片和讲稿；或把提交链接发给同学。
-          </p>
-        </div>
+  const avatar = (p: Person, size = "h-10 w-10") => (
+    <div className={`${size} shrink-0 overflow-hidden rounded-full border border-line bg-surface-2`}>
+      {p.cartoonUrl || p.photoUrl ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={p.cartoonUrl || p.photoUrl} alt="" className="h-full w-full object-cover" />
       ) : (
-        <div className="space-y-5">
-          {pending.length > 0 && (
-            <section>
-              <p className="mb-2 px-1 text-sm font-semibold text-amber-800">待审核（{pending.length}）</p>
-              <ul className="space-y-3">{pending.map(row)}</ul>
-            </section>
-          )}
-          <section>
-            {pending.length > 0 && (
-              <p className="mb-2 px-1 text-sm font-semibold text-ink-soft">已发布（{approved.length}）</p>
+        <div className="grid h-full w-full place-items-center font-display text-sm font-semibold text-ink-4">{p.name.slice(0, 1)}</div>
+      )}
+    </div>
+  );
+
+  const detail = selected && (
+    <div className="flex h-full flex-col gap-5">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="eyebrow">已选中 · Selected</p>
+          <h2 className="mt-1 truncate font-display text-[22px] font-semibold leading-tight tracking-[-0.01em]">{selected.name}</h2>
+          <p className="mt-1 flex flex-wrap items-center gap-2 text-[12px] text-ink-3">
+            {statusBadge(selected)}
+            {selected.source === "student" && <span className="badge-student">学生提交</span>}
+            <span>{selected.submittedAt ? `提交于 ${timeAgo(selected.submittedAt)}` : `更新于 ${timeAgo(selected.updatedAt)}`}</span>
+          </p>
+        </div>
+        <button type="button" className="btn-icon xl:hidden" onClick={() => setSelectedId(null)} aria-label="关闭"><IconClose size={18} /></button>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2">
+        {[
+          { label: "照片", url: selected.photoUrl, icon: <IconImage size={18} /> },
+          { label: "卡通", url: selected.cartoonUrl, icon: <IconImage size={18} /> },
+          { label: "动态视频", url: selected.loopVideoUrl, icon: <IconFilm size={18} />, video: true },
+        ].map((tile) => (
+          <div key={tile.label} className="relative aspect-[3/4] overflow-hidden rounded-lg border border-line bg-surface-2">
+            {tile.url ? (
+              tile.video ? (
+                <video src={tile.url} muted loop autoPlay playsInline className="h-full w-full object-cover" />
+              ) : (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={tile.url} alt="" className="h-full w-full object-cover" />
+              )
+            ) : (
+              <div className="grid h-full w-full place-items-center border border-dashed border-line-strong text-ink-4">{tile.icon}</div>
             )}
-            <ul className="space-y-3">{approved.map(row)}</ul>
-          </section>
+            <span className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/55 to-transparent px-2 pb-1.5 pt-4 text-[10px] font-medium text-white">
+              {tile.label}{tile.url ? "" : " · 无"}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      <div className="space-y-2">
+        {selected.status === "pending" ? (
+          <button type="button" className="btn-primary w-full" onClick={() => setStatus(selected, "approved")} disabled={busyId === selected.id}>
+            <IconCheck size={16} /> 通过并发布
+          </button>
+        ) : selected.source === "student" ? (
+          <button type="button" className="btn-secondary w-full" onClick={() => setStatus(selected, "pending")} disabled={busyId === selected.id}>
+            下线（改回待审核）
+          </button>
+        ) : null}
+        <div className="grid grid-cols-2 gap-2">
+          <a href={`${base}/p/${selected.slug}`} target="_blank" rel="noreferrer" className="btn-secondary"><IconExternal size={15} /> 预览页面</a>
+          <button type="button" className="btn-secondary" onClick={() => openQrFor(selected)}><IconQr size={15} /> 二维码</button>
+          <button type="button" className="btn-secondary" onClick={() => setView({ kind: "edit", person: selected })}><IconEdit size={15} /> 编辑</button>
+          {editLink(selected) ? (
+            <button type="button" className="btn-secondary" onClick={() => copy(editLink(selected)!, selected.id)}>
+              {copied === selected.id ? <IconCheck size={15} /> : <IconLink size={15} />} {copied === selected.id ? "已复制" : "学生链接"}
+            </button>
+          ) : (
+            <button type="button" className="btn-secondary" onClick={() => copy(`${base}/p/${selected.slug}`, selected.id)}>
+              {copied === selected.id ? <IconCheck size={15} /> : <IconCopy size={15} />} {copied === selected.id ? "已复制" : "复制链接"}
+            </button>
+          )}
+        </div>
+        <button type="button" className="btn-danger w-full" onClick={() => remove(selected)} disabled={busyId === selected.id}>
+          <IconTrash size={15} /> 删除
+        </button>
+      </div>
+
+      <div className="border-t border-line pt-4">
+        <div className="flex items-center justify-between">
+          <span className="eyebrow">讲稿 · {selected.sections.length} 个部分</span>
+          <span className="eyebrow">/p/{selected.slug}</span>
+        </div>
+        <ol className="mt-2 space-y-1.5">
+          {selected.sections.map((s, i) => (
+            <li key={s.id} className="flex items-center gap-2.5 text-[13px]">
+              <span className="w-5 font-mono text-[11px] text-ink-4">{pad2(i)}</span>
+              <span className="truncate text-ink-2">{s.title}</span>
+              {s.cachedAnswers && Object.keys(s.cachedAnswers).length > 0 && <span className="dot bg-success" title="已预生成" />}
+            </li>
+          ))}
+        </ol>
+        {selected.subtitle && <p className="mt-3 text-[12px] text-ink-3">“{selected.subtitle}”</p>}
+      </div>
+    </div>
+  );
+
+  const sidebarNav = (
+    <>
+      <button type="button" onClick={() => setFilter("all")} className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] transition-colors ${filter === "all" ? "bg-surface font-medium text-ink shadow-1" : "text-ink-2 hover:bg-surface"}`}>
+        <IconUsers size={16} /> 全部同学 <span className="ml-auto font-mono text-[11px] text-ink-3">{people.length}</span>
+      </button>
+      <button type="button" onClick={() => setFilter("pending")} className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] transition-colors ${filter === "pending" ? "bg-surface font-medium text-ink shadow-1" : "text-ink-2 hover:bg-surface"}`}>
+        <IconInbox size={16} /> 待审核
+        {pendingCount > 0 && <span className="ml-auto rounded-full bg-warning px-1.5 font-mono text-[10px] font-medium text-white">{pendingCount}</span>}
+      </button>
+      <button type="button" onClick={openSubmitQr} className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] text-ink-2 transition-colors hover:bg-surface">
+        <IconQr size={16} /> 学生提交入口
+      </button>
+    </>
+  );
+
+  return (
+    <div className="min-h-dvh lg:grid lg:grid-cols-[228px_minmax(0,1fr)] xl:grid-cols-[236px_minmax(0,1fr)_360px]">
+      {/* ── Sidebar (desktop) ── */}
+      <aside className="hidden lg:flex lg:min-h-dvh lg:flex-col lg:gap-6 lg:border-r lg:border-line lg:bg-surface-2/60 lg:px-4 lg:py-6">
+        <div className="px-3">
+          <p className="font-display text-[17px] font-semibold tracking-[-0.01em]">数字人后台</p>
+          <p className="eyebrow mt-0.5">TOK Exhibition</p>
+        </div>
+        <nav className="space-y-1">{sidebarNav}</nav>
+        <div className="mt-auto space-y-1 border-t border-line pt-4">
+          <button type="button" onClick={load} className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] text-ink-2 hover:bg-surface"><IconRefresh size={16} /> 刷新</button>
+          <button type="button" onClick={logout} className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] text-ink-2 hover:bg-surface"><IconLogout size={16} /> 退出</button>
+        </div>
+      </aside>
+
+      {/* ── Main ── */}
+      <main className="min-w-0 px-5 py-5 lg:px-8 lg:py-6">
+        {/* phone header */}
+        <header className="mb-4 flex items-center justify-between lg:hidden">
+          <div>
+            <p className="font-display text-[22px] font-semibold tracking-[-0.01em]">数字人后台</p>
+            <p className="eyebrow">{people.length} 位同学{pendingCount > 0 && ` · ${pendingCount} 待审核`}</p>
+          </div>
+          <div className="flex items-center gap-1">
+            <button type="button" onClick={openSubmitQr} className="btn-icon" title="学生提交入口" aria-label="学生提交入口"><IconQr size={18} /></button>
+            <button type="button" onClick={load} className="btn-icon" title="刷新" aria-label="刷新"><IconRefresh size={18} /></button>
+            <button type="button" onClick={logout} className="btn-icon" title="退出" aria-label="退出"><IconLogout size={18} /></button>
+          </div>
+        </header>
+
+        {error && (
+          <div className="mb-4 flex items-start gap-2.5 rounded-lg bg-danger-soft px-4 py-3 text-[13px] text-danger animate-rise">
+            <IconWarning size={16} className="mt-0.5 shrink-0" />
+            <p className="min-w-0 flex-1 break-words">{error}</p>
+            <button type="button" onClick={() => setError("")} className="shrink-0 opacity-70 hover:opacity-100" aria-label="关闭"><IconClose size={16} /></button>
+          </div>
+        )}
+
+        {/* toolbar */}
+        <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center">
+          <label className="relative flex-1 lg:max-w-xs">
+            <IconSearch size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-4" />
+            <input className="input py-2 pl-9 text-[14px]" placeholder="搜索姓名或链接…" value={query} onChange={(e) => setQuery(e.target.value)} />
+          </label>
+          <div className="flex items-center gap-2 overflow-x-auto [scrollbar-width:none]">
+            {(
+              [
+                ["all", `全部 ${people.length}`],
+                ["pending", `待审核 ${pendingCount}`],
+                ["published", `已发布 ${people.length - pendingCount}`],
+              ] as [Filter, string][]
+            ).map(([k, label]) => (
+              <button
+                key={k}
+                type="button"
+                onClick={() => setFilter(k)}
+                className={`chip ${filter === k ? "!border-ink !bg-ink !text-bg" : ""}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <button type="button" className="btn-primary lg:ml-auto" onClick={() => setView({ kind: "new" })}>
+            <IconPlus size={16} /> 新增同学
+          </button>
+        </div>
+
+        {/* list / table */}
+        {loading ? (
+          <div className="space-y-2">{[0, 1, 2, 3].map((i) => <div key={i} className="skeleton h-16" />)}</div>
+        ) : filtered.length === 0 ? (
+          <div className="card px-6 py-14 text-center">
+            <p className="text-[15px] font-medium">{people.length === 0 ? "还没有同学" : "没有匹配的同学"}</p>
+            <p className="mt-1 text-[13px] text-ink-3">
+              {people.length === 0 ? "点「新增同学」录入，或把提交入口发给同学让他们自己上传。" : "换个筛选条件或关键词试试。"}
+            </p>
+            {people.length === 0 && (
+              <button type="button" className="btn-secondary mt-5" onClick={openSubmitQr}><IconQr size={15} /> 学生提交入口</button>
+            )}
+          </div>
+        ) : (
+          <div className="card overflow-hidden">
+            <div className="hidden grid-cols-[44px_minmax(0,1fr)_56px_96px_minmax(0,170px)_104px] items-center gap-3 border-b border-line px-4 py-2.5 lg:grid">
+              <span />
+              <span className="eyebrow">姓名</span>
+              <span className="eyebrow">部分</span>
+              <span className="eyebrow">状态</span>
+              <span className="eyebrow">素材</span>
+              <span />
+            </div>
+            <ul className="stagger divide-y divide-line">
+              {filtered.map((p, i) => {
+                const isSel = p.id === selectedId;
+                return (
+                  <li
+                    key={p.id}
+                    style={{ ["--i" as string]: Math.min(i, 12) }}
+                    onClick={() => setSelectedId(p.id)}
+                    className={`grid cursor-pointer grid-cols-[40px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 transition-colors duration-200 ease-out lg:grid-cols-[44px_minmax(0,1fr)_56px_96px_minmax(0,170px)_104px] ${
+                      isSel ? "bg-accent-soft/60" : "hover:bg-surface-2"
+                    }`}
+                  >
+                    {avatar(p)}
+                    <div className="min-w-0">
+                      <p className="flex min-w-0 items-center gap-2 text-[14px] font-medium">
+                        <span className="min-w-0 truncate">{p.name}</span>
+                        {p.source === "student" && <span className="badge-student hidden shrink-0 lg:inline-flex">学生提交</span>}
+                      </p>
+                      <p className="truncate font-mono text-[11px] text-ink-3">
+                        /p/{p.slug}
+                        <span className="lg:hidden"> · {p.sections.length} 部分</span>
+                        <span> · {timeAgo(p.updatedAt)}</span>
+                      </p>
+                      <div className="mt-1 flex items-center gap-2 lg:hidden">{statusBadge(p)}{p.source === "student" && <span className="badge-student">学生提交</span>}</div>
+                    </div>
+                    <span className="hidden text-[13px] text-ink-2 lg:block">{p.sections.length}</span>
+                    <span className="hidden lg:block">{statusBadge(p)}</span>
+                    <span className="hidden truncate text-[12px] text-ink-3 lg:block">{assetSummary(p).join(" · ")}</span>
+                    <div className="flex items-center justify-end gap-0.5" onClick={(e) => e.stopPropagation()}>
+                      {p.status === "pending" && (
+                        <button type="button" onClick={() => setStatus(p, "approved")} disabled={busyId === p.id} className="btn-primary mr-1 px-2.5 py-1.5 text-[12px] lg:hidden">通过</button>
+                      )}
+                      <button type="button" onClick={() => openQrFor(p)} className="btn-icon hidden lg:inline-flex" title="二维码" aria-label="二维码"><IconQr size={16} /></button>
+                      <button type="button" onClick={() => setView({ kind: "edit", person: p })} className="btn-icon" title="编辑" aria-label="编辑"><IconEdit size={16} /></button>
+                      <button type="button" onClick={() => remove(p)} disabled={busyId === p.id} className="btn-icon hidden hover:!bg-danger-soft hover:!text-danger lg:inline-flex" title="删除" aria-label="删除"><IconTrash size={16} /></button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+      </main>
+
+      {/* ── Detail: static column on xl, sheet below ── */}
+      <aside className="hidden xl:block xl:min-h-dvh xl:border-l xl:border-line xl:bg-surface xl:px-6 xl:py-6">
+        {selected && wide ? detail : (
+          <div className="flex h-full flex-col items-center justify-center text-center">
+            <IconUsers size={22} className="text-ink-4" />
+            <p className="mt-3 text-[13px] text-ink-3">点一位同学查看详情与操作</p>
+          </div>
+        )}
+      </aside>
+      {selected && !wide && (
+        <div className="fixed inset-0 z-40 xl:hidden" onClick={() => setSelectedId(null)}>
+          <div className="absolute inset-0 bg-[var(--overlay)] backdrop-blur-sm animate-fade" />
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="absolute inset-x-0 bottom-0 max-h-[88dvh] overflow-y-auto rounded-t-2xl border-t border-line bg-surface p-5 shadow-2 animate-rise lg:inset-y-0 lg:left-auto lg:right-0 lg:max-h-none lg:w-[380px] lg:rounded-none lg:border-l lg:border-t-0 lg:p-6"
+          >
+            {detail}
+          </div>
         </div>
       )}
 
       {qr && <QrModal {...qr} onClose={() => setQr(null)} />}
-    </main>
+    </div>
   );
 }

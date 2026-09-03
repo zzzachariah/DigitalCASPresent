@@ -1,78 +1,98 @@
 import type { Config } from "tailwindcss";
 
+// System CJK stack — deliberately no web font for Chinese: the visitor pages
+// load on exhibition Wi-Fi, and a CJK web font is several hundred KB.
+const CJK = [
+  "PingFang SC",
+  "HarmonyOS Sans SC",
+  "MiSans",
+  "Hiragino Sans GB",
+  "Microsoft YaHei",
+  "Noto Sans CJK SC",
+  "Noto Sans SC",
+];
+
 const config: Config = {
-  content: [
-    "./src/pages/**/*.{js,ts,jsx,tsx,mdx}",
-    "./src/components/**/*.{js,ts,jsx,tsx,mdx}",
-    "./src/app/**/*.{js,ts,jsx,tsx,mdx}",
-  ],
+  content: ["./src/**/*.{js,ts,jsx,tsx,mdx}"],
   theme: {
     extend: {
+      // Every color is a CSS variable (see globals.css) so light/dark swap
+      // without a class toggle — the page follows the system setting.
       colors: {
-        // Single brand accent for the "clean / modern" (Apple/Notion) direction.
-        brand: {
-          50: "#eef4ff",
-          100: "#dbe6ff",
-          200: "#bcd0ff",
-          300: "#90b4ff",
-          400: "#5d8bff",
-          500: "#3366ff",
-          600: "#2451e6",
-          700: "#1c3fb4",
-          800: "#1a378f",
-          900: "#1b3372",
+        bg: "var(--bg)",
+        surface: { DEFAULT: "var(--surface)", 2: "var(--surface-2)", 3: "var(--surface-3)" },
+        line: { DEFAULT: "var(--line)", strong: "var(--line-strong)" },
+        ink: { DEFAULT: "var(--ink)", 2: "var(--ink-2)", 3: "var(--ink-3)", 4: "var(--ink-4)" },
+        accent: {
+          DEFAULT: "var(--accent)",
+          hover: "var(--accent-hover)",
+          soft: "var(--accent-soft)",
+          on: "var(--on-accent)",
         },
-        ink: {
-          DEFAULT: "#1c1c1e",
-          soft: "#3a3a3c",
-          mute: "#8e8e93",
-        },
+        success: { DEFAULT: "var(--success)", soft: "var(--success-soft)" },
+        warning: { DEFAULT: "var(--warning)", soft: "var(--warning-soft)" },
+        danger: { DEFAULT: "var(--danger)", soft: "var(--danger-soft)" },
       },
       fontFamily: {
-        sans: [
-          "var(--font-sans)",
-          "-apple-system",
-          "BlinkMacSystemFont",
-          "Segoe UI",
-          "PingFang SC",
-          "Hiragino Sans GB",
-          "Microsoft YaHei",
-          "sans-serif",
-        ],
+        display: ["var(--font-display)", ...CJK, "sans-serif"],
+        sans: ["var(--font-sans)", ...CJK, "sans-serif"],
+        mono: ["var(--font-mono)", "ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
       },
       borderRadius: {
-        "2xl": "1.125rem",
-        "3xl": "1.5rem",
+        DEFAULT: "8px",
+        lg: "10px",
+        xl: "12px",
+        "2xl": "16px",
+        "3xl": "20px",
       },
       boxShadow: {
-        soft: "0 1px 2px rgba(0,0,0,0.04), 0 8px 30px rgba(0,0,0,0.06)",
-        lift: "0 2px 6px rgba(0,0,0,0.05), 0 18px 50px rgba(0,0,0,0.10)",
+        1: "var(--shadow-1)",
+        2: "var(--shadow-2)",
+        ring: "0 0 0 4px var(--accent-ring)",
+      },
+      transitionTimingFunction: {
+        // Overrides Tailwind's `ease-out` so every transition shares one curve.
+        out: "var(--ease)",
       },
       keyframes: {
-        "fade-up": {
-          "0%": { opacity: "0", transform: "translateY(8px)" },
+        rise: {
+          "0%": { opacity: "0", transform: "translateY(10px)" },
           "100%": { opacity: "1", transform: "translateY(0)" },
         },
-        breathe: {
-          "0%, 100%": { transform: "scale(1)" },
-          "50%": { transform: "scale(1.015)" },
+        fade: {
+          "0%": { opacity: "0" },
+          "100%": { opacity: "1" },
         },
-        "pulse-ring": {
-          "0%": { transform: "scale(0.95)", opacity: "0.7" },
-          "70%": { transform: "scale(1.25)", opacity: "0" },
-          "100%": { opacity: "0" },
+        "pulse-dot": {
+          "0%, 100%": { opacity: "1", transform: "scale(1)" },
+          "50%": { opacity: "0.45", transform: "scale(0.8)" },
+        },
+        "speaking-ring": {
+          "0%, 100%": { boxShadow: "0 0 0 1px var(--accent-ring-strong), 0 0 0 6px var(--accent-ring)" },
+          "50%": { boxShadow: "0 0 0 1px var(--accent-ring-strong), 0 0 0 12px transparent" },
+        },
+        shimmer: {
+          "0%": { backgroundPosition: "200% 0" },
+          "100%": { backgroundPosition: "-200% 0" },
         },
         indeterminate: {
           "0%": { left: "-45%", width: "45%" },
           "55%": { left: "60%", width: "55%" },
           "100%": { left: "100%", width: "45%" },
         },
+        "dot-wave": {
+          "0%, 60%, 100%": { transform: "translateY(0)", opacity: "0.35" },
+          "30%": { transform: "translateY(-3px)", opacity: "1" },
+        },
       },
       animation: {
-        "fade-up": "fade-up 0.4s ease-out both",
-        breathe: "breathe 4s ease-in-out infinite",
-        "pulse-ring": "pulse-ring 1.6s ease-out infinite",
+        rise: "rise 0.55s var(--ease) both",
+        fade: "fade 0.35s var(--ease) both",
+        "pulse-dot": "pulse-dot 1.6s ease-in-out infinite",
+        "speaking-ring": "speaking-ring 2.4s ease-in-out infinite",
+        shimmer: "shimmer 1.8s linear infinite",
         indeterminate: "indeterminate 1.15s ease-in-out infinite",
+        "dot-wave": "dot-wave 1.2s ease-in-out infinite",
       },
     },
   },
