@@ -4,8 +4,10 @@
 // and the "answer + suggested questions" trailer protocol.
 // ─────────────────────────────────────────────────────────────────────
 
-/** The model ends its answer with this line, then up to three questions. */
-export const SUGGESTION_MARKER = "\n---";
+/** The model ends its answer with a line of three hyphens, then up to three
+ *  questions. Matched without requiring a preceding newline — a stray "---"
+ *  never belongs in spoken text anyway. */
+export const SUGGESTION_MARKER = "---";
 
 /** Split a completed model response into the spoken answer and the
  *  suggested follow-up questions (if the model included them). */
@@ -20,7 +22,7 @@ export function splitAnswer(raw: string): { answer: string; suggestions: string[
 export function parseSuggestions(tail: string): string[] {
   return tail
     .split(/\r?\n/)
-    .map((l) => l.replace(/^[\s\-–•*?？]+/, "").replace(/^\d+[.)、]\s*/, "").trim())
+    .map((l) => l.replace(/^[\s\-–•*?？]+/, "").replace(/^(?:q\d*|\d+)\s*[.)、:：]\s*/i, "").trim())
     .filter((l) => l.length > 1 && l.length <= 120)
     .slice(0, 3);
 }

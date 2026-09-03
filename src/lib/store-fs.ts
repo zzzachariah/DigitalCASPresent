@@ -217,6 +217,9 @@ export async function saveAudio(id: string, key: string, buffer: Buffer, ext: st
   return `/api/photo/${id}.audio.${safeKey}?v=${Date.now()}`;
 }
 
+/** Filesystem media is overwritten in place by save*(); nothing to delete. */
+export async function deleteMediaUrl(_url: string): Promise<void> {}
+
 export async function readPhoto(
   id: string
 ): Promise<{ buffer: Buffer; contentType: string } | null> {

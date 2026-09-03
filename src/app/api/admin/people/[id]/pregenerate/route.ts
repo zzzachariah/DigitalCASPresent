@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAdmin } from "@/lib/auth";
-import { getPerson, saveAudio, updatePerson, storageWritable } from "@/lib/store";
+import { deleteMediaUrl, getPerson, saveAudio, updatePerson, storageWritable } from "@/lib/store";
 import { chat } from "@/lib/ai";
 import { explainSectionPrompt, systemPrompt } from "@/lib/prompts";
 import { a2eConfigured, a2eTts } from "@/lib/a2e";
@@ -49,7 +49,9 @@ async function generateForSection(person: Person, section: Section, index: numbe
       const { answer, suggestions } = splitAnswer(raw);
       cachedAnswers[key] = answer;
       cachedSuggestions[key] = suggestions;
+      const previousAudio = cachedAudio[key];
       delete cachedAudio[key];
+      if (previousAudio) await deleteMediaUrl(previousAudio).catch(() => {});
       if (a2eConfigured()) {
         try {
           const url = await a2eTts(answer, person.gender);

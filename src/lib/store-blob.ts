@@ -231,6 +231,11 @@ export async function saveCartoon(id: string, buffer: Buffer, ext: string): Prom
   return url;
 }
 
+/** Remove a media blob we no longer reference (e.g. regenerated audio). */
+export async function deleteMediaUrl(url: string): Promise<void> {
+  if (url.startsWith("http")) await delQuiet(url);
+}
+
 export async function saveAudio(id: string, key: string, buffer: Buffer, ext: string): Promise<string> {
   const safeKey = key.replace(/[^A-Za-z0-9_-]/g, "");
   return putMedia(`audio/${id}-${safeKey}.${cleanExt(ext, "mp3")}`, buffer);

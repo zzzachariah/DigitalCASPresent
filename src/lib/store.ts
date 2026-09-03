@@ -53,6 +53,10 @@ export function saveLoopVideo(id: string, buffer: Buffer, ext: string): Promise<
 export function saveAudio(id: string, key: string, buffer: Buffer, ext: string): Promise<string> {
   return driver().saveAudio(id, key, buffer, ext);
 }
+/** Delete a stored media file by its URL (no-op for local files). */
+export function deleteMediaUrl(url: string): Promise<void> {
+  return driver().deleteMediaUrl(url);
+}
 export function readPhoto(
   id: string
 ): Promise<{ buffer: Buffer; contentType: string } | null> {

@@ -14,7 +14,15 @@ interface Msg {
   id: string;
   role: "user" | "assistant";
   text: string;
+  /** For user turns: a menu pick vs a typed question. */
+  kind?: "section" | "question";
 }
+
+/** 8 samples of silence. Played inside the tap that starts an answer so iOS
+ *  Safari treats the <audio> element as user-activated before the first real
+ *  narration clip arrives a few seconds later. */
+const SILENT_WAV =
+  "data:audio/wav;base64,UklGRjQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YRAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 const T = {
   zh: {
@@ -111,6 +119,14 @@ export default function VisitorExperience({
     busy: false,
   });
   const ttsCountRef = useRef(0);
+  // One live answer at a time: a newer run aborts the previous stream, and
+  // late events from an old run are ignored. "Stop" silences the current run
+  // (text keeps arriving, nothing more is voiced).
+  const runIdRef = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
+  const silencedRunRef = useRef(-1);
+  const unlockedRef = useRef(false);
+  const captionRef = useRef<HTMLDivElement>(null);
 
   const transcriptRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -167,8 +183,10 @@ export default function VisitorExperience({
   }, []);
 
   useEffect(() => {
-    transcriptRef.current?.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, stage]);
+    transcriptRef.current?.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: streaming ? "auto" : "smooth" });
+    // Phone caption: keep the newest words in view while the answer streams.
+    if (streaming) captionRef.current?.scrollTo({ top: captionRef.current.scrollHeight });
+  }, [messages, stage, streaming]);
 
   function historyTurns(): ChatTurn[] {
     return messages.map((m) => ({ role: m.role, content: m.text }));
@@ -293,13 +311,17 @@ export default function VisitorExperience({
     if (!urls.length) speakAll(text, lang);
   }
 
+  /** Silence everything (voice, narration queue, rendered video). The text of
+   *  an answer still streaming keeps arriving; it just won't be voiced. */
   function stopSpeaking() {
+    silencedRunRef.current = runIdRef.current;
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     ttsCountRef.current = 0;
     queueReset();
     audioRef.current?.pause();
     setAudioPlaying(false);
     setNarrating(false);
+    setVideoUrl(null);
     setStage("ready");
   }
 
@@ -322,29 +344,41 @@ export default function VisitorExperience({
       | { mode: "section"; sectionId: string; label: string }
       | { mode: "followup"; question: string }
   ) {
-    setError("");
-    setSuggestions([]);
-    if (payload.mode === "section") setCurrentSectionId(payload.sectionId);
+    // Supersede whatever is in flight: abort its stream, silence its voice.
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+    const myRun = ++runIdRef.current;
+    const alive = () => runIdRef.current === myRun;
+    const silenced = () => silencedRunRef.current === myRun;
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     ttsCountRef.current = 0;
     queueReset();
-    // Unlock audio autoplay on strict mobile browsers by calling play()
-    // synchronously within this user-gesture-triggered call.
-    try {
-      const el = audioRef.current;
-      if (el) {
-        const p = el.play();
-        el.pause();
-        el.currentTime = 0;
-        p?.catch(() => {});
-      }
-    } catch {
-      /* ignore */
-    }
+    audioRef.current?.pause();
     setAudioPlaying(false);
     setNarrating(false);
     setVideoUrl(null);
+    setVideoLoading(false);
     setLastAudio([]);
+    setError("");
+    setSuggestions([]);
+    if (payload.mode === "section") setCurrentSectionId(payload.sectionId);
+
+    // First tap: unlock media playback on strict mobile browsers by playing
+    // silence (and an empty utterance) synchronously inside the gesture.
+    if (!unlockedRef.current) {
+      unlockedRef.current = true;
+      try {
+        const el = audioRef.current;
+        if (el) {
+          el.src = SILENT_WAV;
+          el.play().then(() => el.pause()).catch(() => {});
+        }
+        if ("speechSynthesis" in window) window.speechSynthesis.speak(new SpeechSynthesisUtterance(""));
+      } catch {
+        /* ignore */
+      }
+    }
 
     const userBubble =
       payload.mode === "section"
@@ -352,7 +386,7 @@ export default function VisitorExperience({
           ? `想听：${payload.label}`
           : `Tell me about: ${payload.label}`
         : payload.question;
-    setMessages((m) => [...m, { id: rid(), role: "user", text: userBubble }]);
+    setMessages((m) => [...m, { id: rid(), role: "user", text: userBubble, kind: payload.mode === "section" ? "section" : "question" }]);
     setStage("thinking");
 
     const assistantId = rid();
@@ -373,7 +407,7 @@ export default function VisitorExperience({
         setMessages((m) => m.map((x) => (x.id === assistantId ? { ...x, text: x.text + piece } : x)));
       }
       text += piece;
-      if (st.avatar === "tts" && !avatarStream) {
+      if (st.avatar === "tts" && !avatarStream && !silenced()) {
         pendingTts += piece;
         const { chunks, rest } = takeSentences(pendingTts);
         pendingTts = rest;
@@ -385,6 +419,7 @@ export default function VisitorExperience({
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: ac.signal,
         body: JSON.stringify({
           personId: person.id,
           mode: payload.mode,
@@ -406,6 +441,7 @@ export default function VisitorExperience({
       let buf = "";
       let finished = false;
       const handle = (ev: any) => {
+        if (!alive()) return;
         switch (ev.type) {
           case "meta":
             st.lang = ev.lang === "zh" ? "zh" : "en";
@@ -416,7 +452,7 @@ export default function VisitorExperience({
             break;
           case "audio":
             if (typeof ev.url === "string") audioUrls.push(ev.url);
-            queueAdd(Number(ev.seq), typeof ev.url === "string" ? ev.url : null, String(ev.text || ""));
+            if (!silenced()) queueAdd(Number(ev.seq), typeof ev.url === "string" ? ev.url : null, String(ev.text || ""));
             break;
           case "suggestions":
             if (Array.isArray(ev.items)) setSuggestions(ev.items.filter((x: unknown) => typeof x === "string"));
@@ -436,6 +472,7 @@ export default function VisitorExperience({
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
+        if (!alive()) return;
         buf += decoder.decode(value, { stream: true });
         let nl: number;
         while ((nl = buf.indexOf("\n")) !== -1) {
@@ -445,17 +482,22 @@ export default function VisitorExperience({
         }
       }
       if (buf.trim()) handle(JSON.parse(buf.trim()));
+      if (!alive()) return;
       if (!finished && !text.trim()) throw new Error("AI error");
       setStreaming(false);
       setLastText(text);
       setLastLang(st.lang);
       setLastAudio(audioUrls);
+      if (silenced()) {
+        setStage("ready");
+        return;
+      }
 
       // ── Voice the answer ──
       if (streamUsable) {
         setStage("ready");
         const ok = await sayStream(text, st.lang);
-        if (!ok) speakAll(text, st.lang);
+        if (!ok && alive() && !silenced()) speakAll(text, st.lang);
       } else if (avatarStream) {
         speakAll(text, st.lang);
       } else if (st.avatar === "audio") {
@@ -470,28 +512,32 @@ export default function VisitorExperience({
           const avRes = await fetch("/api/avatar", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
+            signal: ac.signal,
             body: JSON.stringify({ personId: person.id, text, lang: st.lang, previewToken }),
           });
           const av = await readJson(avRes);
+          if (!alive()) return;
           if (avRes.ok && av.avatar?.kind === "video-pending") {
             const url = await pollForVideo(av.avatar.id);
+            if (!alive()) return;
             setVideoLoading(false);
-            if (url) {
+            if (url && !silenced()) {
               setVideoUrl(url);
               setStage("speaking");
-            } else {
+            } else if (!silenced()) {
               speakAll(text, st.lang);
             }
           } else if (avRes.ok && av.avatar?.kind === "audio") {
             setVideoLoading(false);
-            playNarration([av.avatar.audioUrl], text, st.lang);
+            if (!silenced()) playNarration([av.avatar.audioUrl], text, st.lang);
           } else {
             setVideoLoading(false);
-            speakAll(text, st.lang);
+            if (!silenced()) speakAll(text, st.lang);
           }
         } catch {
+          if (!alive()) return;
           setVideoLoading(false);
-          speakAll(text, st.lang);
+          if (!silenced()) speakAll(text, st.lang);
         }
       } else {
         // Browser voice: whatever sentence is still unfinished.
@@ -500,6 +546,7 @@ export default function VisitorExperience({
         if (ttsCountRef.current === 0) setStage("ready");
       }
     } catch (e) {
+      if (!alive() || (e instanceof DOMException && e.name === "AbortError")) return;
       setStreaming(false);
       setError(e instanceof Error ? e.message : "出错了，请重试");
       setVideoLoading(false);
@@ -522,7 +569,7 @@ export default function VisitorExperience({
     return null;
   }
 
-  const busy = stage === "thinking" || streaming || talking || videoLoading;
+  const busy = stage === "thinking" || streaming || videoLoading;
 
   function submitFollowUp(q: string) {
     const question = q.trim();
@@ -612,7 +659,7 @@ export default function VisitorExperience({
         {/* phone: identity block */}
         <div className="min-w-0 lg:hidden">
           <h1 className="truncate font-display text-[22px] font-semibold leading-tight tracking-[-0.01em]">{person.name}</h1>
-          {person.subtitle && <p className="truncate text-[13px] leading-snug text-ink-2">{person.subtitle}</p>}
+          {person.subtitle && <p className="truncate text-[13px] leading-snug text-ink-2">“{person.subtitle}”</p>}
           <p className="eyebrow mt-1">
             {t.exhibition} · {t.parts(person.sections.length)}
           </p>
@@ -741,8 +788,8 @@ export default function VisitorExperience({
 
       {/* ── Caption (phone only) ── */}
       <div className="[grid-area:caption] px-5 pt-3 lg:hidden">
-        <div key={lastAssistant?.id ?? "greeting"} className="max-h-[19dvh] overflow-y-auto animate-rise">
-          {lastUser && messages.length > 0 && (
+        <div key={lastAssistant?.id ?? "greeting"} ref={captionRef} className="max-h-[19dvh] overflow-y-auto animate-rise">
+          {lastUser?.kind === "question" && (
             <p className="mb-1 truncate text-[12px] text-ink-3">
               {uiLang === "zh" ? "你问" : "You asked"}：{lastUser.text}
             </p>

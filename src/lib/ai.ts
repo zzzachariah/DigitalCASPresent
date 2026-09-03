@@ -83,6 +83,14 @@ export async function* chatStream(opts: ChatOptions): AsyncGenerator<string> {
     const body = await res.text().catch(() => "");
     throw new Error(`AI request failed (${res.status}): ${body.slice(0, 400)}`);
   }
+  // Some relays ignore `stream: true` and reply with a normal JSON completion.
+  if ((res.headers.get("content-type") || "").includes("application/json")) {
+    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    const text = data.choices?.[0]?.message?.content?.trim();
+    if (!text) throw new Error("AI returned an empty response.");
+    yield text;
+    return;
+  }
 
   // OpenAI-style SSE: lines of `data: {json}` ending with `data: [DONE]`.
   const reader = res.body.getReader();

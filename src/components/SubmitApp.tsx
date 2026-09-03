@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Person } from "@/lib/types";
 import { readJson } from "@/lib/http";
 import { studentApi, type StudentTokens } from "@/lib/editor-api";
-import SubmitWizard from "./SubmitWizard";
+import SubmitWizard, { readStoredDraft } from "./SubmitWizard";
 import DraftPreview, { type Draft } from "./DraftPreview";
 import { IconArrowRight, IconCheck, IconCopy, IconEdit, IconExternal } from "./icons";
 
@@ -68,12 +68,15 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
 
   const [stage, setStage] = useState<Stage>(id ? { kind: "loading" } : { kind: "intro" });
   const [mine, setMine] = useState<Remembered[]>([]);
+  const [draftName, setDraftName] = useState<string | null>(null);
   const [copied, setCopied] = useState("");
   const [draft, setDraft] = useState<Draft>({ name: "", subtitle: "", sections: [] });
 
   useEffect(() => {
     if (!id) {
       setMine(remembered());
+      const dr = readStoredDraft();
+      setDraftName(dr ? dr.name.trim() || "未命名" : null);
       return;
     }
     if (!token) {
@@ -254,9 +257,11 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3" style={{ ["--i" as string]: 4 }}>
             <button type="button" className="btn-primary px-5 py-3" onClick={() => setStage({ kind: "edit", person: null })}>
-              开始填写 · Start <IconArrowRight size={16} />
+              {draftName ? "继续上次的草稿 · Continue" : "开始填写 · Start"} <IconArrowRight size={16} />
             </button>
-            <span className="text-[12px] text-ink-4">大约 5 分钟 · about 5 minutes</span>
+            <span className="text-[12px] text-ink-4">
+              {draftName ? `这台设备上有未提交的草稿：${draftName}` : "大约 5 分钟 · about 5 minutes"}
+            </span>
           </div>
           {mine.length > 0 && (
             <div className="mt-8 rounded-lg border border-line bg-surface-2/60 p-4" style={{ ["--i" as string]: 5 }}>

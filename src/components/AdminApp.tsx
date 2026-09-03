@@ -9,7 +9,9 @@ import { useMediaQuery } from "@/lib/use-media-query";
 import PersonEditor from "./PersonEditor";
 import DraftPreview, { type Draft } from "./DraftPreview";
 import QrModal from "./QrModal";
+import { Spinner } from "./Loading";
 import {
+  IconBolt,
   IconCheck,
   IconClose,
   IconCopy,
@@ -46,7 +48,8 @@ function assetSummary(p: Person): string[] {
   if (p.cartoonUrl) out.push("卡通");
   if (p.loopVideoUrl) out.push("视频");
   const pre = p.sections.filter((s) => s.cachedAnswers && Object.keys(s.cachedAnswers).length > 0).length;
-  if (pre > 0) out.push(`预生成 ${pre}/${p.sections.length}`);
+  const audio = p.sections.filter((s) => s.cachedAudio && Object.keys(s.cachedAudio).length > 0).length;
+  if (pre > 0) out.push(`预生成 ${pre}/${p.sections.length}${audio > 0 ? ` · 语音 ${audio}` : ""}`);
   return out;
 }
 
@@ -59,6 +62,7 @@ export default function AdminApp() {
   const [qr, setQr] = useState<Qr>(null);
   const [copied, setCopied] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [pregenId, setPregenId] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -137,6 +141,27 @@ export default function AdminApp() {
       setError(e instanceof Error ? e.message : "操作失败");
     } finally {
       setBusyId(null);
+    }
+  }
+
+  /** Pre-generate every part's explanation (+ audio when A2E is configured)
+   *  without opening the editor. */
+  async function pregenerateAll(p: Person) {
+    setPregenId(p.id);
+    setError("");
+    try {
+      const res = await fetch(`/api/admin/people/${p.id}/pregenerate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await readJson(res);
+      if (!res.ok) throw new Error(data.error || "预生成失败");
+      setPeople((list) => list.map((x) => (x.id === p.id ? { ...x, sections: data.sections } : x)));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "预生成失败");
+    } finally {
+      setPregenId(null);
     }
   }
 
@@ -290,6 +315,16 @@ export default function AdminApp() {
             </button>
           )}
         </div>
+        <button
+          type="button"
+          className="btn-secondary w-full"
+          onClick={() => pregenerateAll(selected)}
+          disabled={pregenId === selected.id || selected.sections.length === 0}
+          title="提前生成每个部分的讲解文字和语音，访客选中时零等待"
+        >
+          {pregenId === selected.id ? <Spinner /> : <IconBolt size={15} />}
+          {pregenId === selected.id ? "预生成中，约 1 分钟…" : "预生成讲解与语音"}
+        </button>
         <button type="button" className="btn-danger w-full" onClick={() => remove(selected)} disabled={busyId === selected.id}>
           <IconTrash size={15} /> 删除
         </button>
@@ -305,7 +340,9 @@ export default function AdminApp() {
             <li key={s.id} className="flex items-center gap-2.5 text-[13px]">
               <span className="w-5 font-mono text-[11px] text-ink-4">{pad2(i)}</span>
               <span className="truncate text-ink-2">{s.title}</span>
-              {s.cachedAnswers && Object.keys(s.cachedAnswers).length > 0 && <span className="dot bg-success" title="已预生成" />}
+              {s.cachedAnswers && Object.keys(s.cachedAnswers).length > 0 && (
+                <span className="dot bg-success" title={s.cachedAudio && Object.keys(s.cachedAudio).length ? "已预生成 · 含语音" : "已预生成（无语音）"} />
+              )}
             </li>
           ))}
         </ol>

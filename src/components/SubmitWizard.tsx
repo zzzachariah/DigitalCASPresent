@@ -36,6 +36,40 @@ const STEPS = [
 ] as const;
 const LAST = STEPS.length - 1;
 
+/** Unsubmitted drafts survive a reload or the phone backgrounding the tab.
+ *  (The photo itself can't be persisted — only its fields and text.) */
+export const DRAFT_KEY = "dcp_submit_draft";
+interface StoredDraft {
+  name: string;
+  subtitle: string;
+  gender: "" | "male" | "female";
+  language: Person["language"];
+  script: string;
+  sections: Person["sections"];
+  step: number;
+  reached: number;
+  at: number;
+}
+export function readStoredDraft(): StoredDraft | null {
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY);
+    if (!raw) return null;
+    const d = JSON.parse(raw) as StoredDraft;
+    if (!d || typeof d !== "object") return null;
+    if (!(d.name || d.script || (Array.isArray(d.sections) && d.sections.length))) return null;
+    return d;
+  } catch {
+    return null;
+  }
+}
+export function clearStoredDraft() {
+  try {
+    localStorage.removeItem(DRAFT_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
 const LANGUAGES: { value: Person["language"]; label: string }[] = [
   { value: "auto", label: "跟随提问语言 · Auto" },
   { value: "en", label: "English" },
@@ -63,12 +97,82 @@ export default function SubmitWizard({
   const [dir, setDir] = useState<1 | -1>(1);
   const [reached, setReached] = useState(person ? LAST : 0);
   const [dragging, setDragging] = useState(false);
+  const [restored, setRestored] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const topRef = useRef<HTMLDivElement>(null);
+  const hydratedRef = useRef(false);
 
   useEffect(() => {
     onDraftChange?.(d.draft);
   }, [d.draft, onDraftChange]);
+
+  // Restore an unsubmitted draft (new submissions only).
+  useEffect(() => {
+    if (person) {
+      hydratedRef.current = true;
+      return;
+    }
+    const dr = readStoredDraft();
+    if (dr) {
+      d.setName(dr.name || "");
+      d.setSubtitle(dr.subtitle || "");
+      d.setGender(dr.gender || "");
+      d.setLanguage(dr.language || "auto");
+      d.setScript(dr.script || "");
+      d.setSections(Array.isArray(dr.sections) ? dr.sections : []);
+      const st = Math.min(Math.max(0, dr.step || 0), LAST);
+      setStep(st);
+      setReached(Math.min(Math.max(st, dr.reached || 0), LAST));
+      setRestored(true);
+    }
+    hydratedRef.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Autosave (debounced) while a new submission is being written.
+  useEffect(() => {
+    if (person || !hydratedRef.current) return;
+    const t = setTimeout(() => {
+      try {
+        const hasContent = d.name.trim() || d.script.trim() || d.sections.length > 0;
+        if (!hasContent) return;
+        const stored: StoredDraft = {
+          name: d.name,
+          subtitle: d.subtitle,
+          gender: d.gender,
+          language: d.language,
+          script: d.script,
+          sections: d.sections,
+          step,
+          reached,
+          at: Date.now(),
+        };
+        localStorage.setItem(DRAFT_KEY, JSON.stringify(stored));
+      } catch {
+        /* storage full / private mode */
+      }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [person, d.name, d.subtitle, d.gender, d.language, d.script, d.sections, step, reached]);
+
+  const hasContent = !!(d.name.trim() || d.script.trim() || d.sections.length || d.photoPreview);
+  function cancel() {
+    if (!person && hasContent && !confirm("放弃已填写的内容？（草稿仍会保留在这台设备上）\nDiscard what you've entered?")) return;
+    onCancel();
+  }
+  function startOver() {
+    if (!confirm("清空草稿，从头开始？ / Clear the draft and start over?")) return;
+    clearStoredDraft();
+    d.setName("");
+    d.setSubtitle("");
+    d.setGender("");
+    d.setLanguage("auto");
+    d.setScript("");
+    d.setSections([]);
+    setRestored(false);
+    setReached(0);
+    show(0, -1);
+  }
 
   /** Why page `i` can't be left yet, or null. */
   function blocker(i: number): string | null {
@@ -110,7 +214,10 @@ export default function SubmitWizard({
 
   async function submit() {
     const saved = await d.save();
-    if (saved) onSaved(saved);
+    if (saved) {
+      if (!person) clearStoredDraft();
+      onSaved(saved);
+    }
   }
 
   const genders: { v: "" | "male" | "female"; t: string }[] = [
@@ -125,7 +232,7 @@ export default function SubmitWizard({
     <div ref={topRef} className="scroll-mt-6">
       {/* ── Header + step bar ── */}
       <div className="mb-5 flex items-center justify-between">
-        <button type="button" onClick={onCancel} className="btn-ghost -ml-2 px-2">
+        <button type="button" onClick={cancel} className="btn-ghost -ml-2 px-2">
           <IconArrowLeft size={16} /> 返回
         </button>
         <div className="text-right">
@@ -172,6 +279,19 @@ export default function SubmitWizard({
           />
         </div>
       </nav>
+
+      {restored && (
+        <div className="mb-4 flex items-center gap-3 rounded-lg bg-accent-soft px-4 py-2.5 text-[13px] text-accent animate-rise">
+          <span className="dot bg-accent" />
+          <p className="min-w-0 flex-1">已恢复上次未提交的草稿（照片需要重新选择）。</p>
+          <button type="button" onClick={startOver} className="shrink-0 text-[12px] underline-offset-2 hover:underline">
+            清空重来
+          </button>
+          <button type="button" onClick={() => setRestored(false)} className="shrink-0 opacity-70 hover:opacity-100" aria-label="关闭">
+            <IconClose size={15} />
+          </button>
+        </div>
+      )}
 
       {d.error && (
         <div className="mb-4 flex items-start gap-2.5 rounded-lg bg-danger-soft px-4 py-3 text-[13px] text-danger animate-rise">
@@ -425,7 +545,7 @@ export default function SubmitWizard({
       <div className="sticky bottom-0 z-10 -mx-1 mt-5 border-t border-line bg-bg/85 px-1 py-3 backdrop-blur">
         <div className="flex gap-2">
           {step === 0 ? (
-            <button type="button" className="btn-secondary" onClick={onCancel}>取消</button>
+            <button type="button" className="btn-secondary" onClick={cancel}>取消</button>
           ) : (
             <button type="button" className="btn-secondary" onClick={() => go(step - 1)} disabled={d.sectioning || d.saving}>
               <IconArrowLeft size={15} /> 上一步
