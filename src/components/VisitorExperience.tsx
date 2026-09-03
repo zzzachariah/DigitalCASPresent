@@ -265,7 +265,9 @@ export default function VisitorExperience({
 
     const userBubble =
       payload.mode === "section"
-        ? `${uiLang === "zh" ? "想听" : "Tell me about"}：${payload.label}`
+        ? uiLang === "zh"
+          ? `想听：${payload.label}`
+          : `Tell me about: ${payload.label}`
         : payload.question;
     setMessages((m) => [...m, { id: rid(), role: "user", text: userBubble }]);
     setStage("thinking");
