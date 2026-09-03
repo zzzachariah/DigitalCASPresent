@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Person } from "@/lib/types";
 import { readJson } from "@/lib/http";
 import { studentApi, type StudentTokens } from "@/lib/editor-api";
-import PersonEditor from "./PersonEditor";
+import SubmitWizard from "./SubmitWizard";
 import DraftPreview, { type Draft } from "./DraftPreview";
 import { IconArrowRight, IconCheck, IconCopy, IconEdit, IconExternal } from "./icons";
 
@@ -163,9 +163,8 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
         )}
         <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_320px] lg:gap-10">
           <div className="min-w-0">
-            <PersonEditor
+            <SubmitWizard
               person={p}
-              mode="student"
               api={api}
               onSaved={onSaved}
               onDraftChange={setDraft}
@@ -192,6 +191,12 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
         {topbar}
         <div className="stagger mt-10 space-y-4">
           <div style={{ ["--i" as string]: 0 }}>
+            <div className="mb-5 h-16 w-16 animate-pop">
+              <svg viewBox="0 0 64 64" className="h-16 w-16" aria-hidden>
+                <circle cx="32" cy="32" r="30" className="fill-success-soft" />
+                <path d="M20 33l8 8 16-17" fill="none" stroke="var(--success)" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" className="check-draw" />
+              </svg>
+            </div>
             <p className="eyebrow">Submitted</p>
             <h1 className="mt-2 font-display text-[30px] font-semibold leading-tight tracking-[-0.015em]">已提交，等待老师审核</h1>
             <p className="mt-2 text-[15px] text-ink-2">
