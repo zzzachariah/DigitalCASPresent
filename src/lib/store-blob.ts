@@ -191,7 +191,9 @@ export async function deletePerson(id: string): Promise<boolean> {
   if (!target) return false;
   await del(personPath(id), blobAuth());
   await delQuiet(slugPath(target.slug));
-  for (const u of [target.photoUrl, target.cartoonUrl, target.loopVideoUrl]) {
+  const media = [target.photoUrl, target.cartoonUrl, target.loopVideoUrl];
+  for (const s of target.sections) for (const u of Object.values(s.cachedAudio || {})) media.push(u);
+  for (const u of media) {
     if (u?.startsWith("http")) await delQuiet(u);
   }
   return true;
@@ -227,6 +229,11 @@ export async function saveCartoon(id: string, buffer: Buffer, ext: string): Prom
   await updatePerson(id, { cartoonUrl: url });
   if (person.cartoonUrl?.startsWith("http")) await delQuiet(person.cartoonUrl);
   return url;
+}
+
+export async function saveAudio(id: string, key: string, buffer: Buffer, ext: string): Promise<string> {
+  const safeKey = key.replace(/[^A-Za-z0-9_-]/g, "");
+  return putMedia(`audio/${id}-${safeKey}.${cleanExt(ext, "mp3")}`, buffer);
 }
 
 export async function saveLoopVideo(id: string, buffer: Buffer, ext: string): Promise<string> {

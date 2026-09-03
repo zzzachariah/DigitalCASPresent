@@ -38,13 +38,35 @@ function sectionFrom(raw: unknown, allowCachedAnswers: boolean): Section | null 
   };
   const hint = (str(s.hint) || "").trim().slice(0, LIMITS.sectionHint);
   if (hint) section.hint = hint;
-  if (allowCachedAnswers && s.cachedAnswers && typeof s.cachedAnswers === "object") {
-    const cached: Partial<Record<AnswerLang, string>> = {};
-    for (const key of ANSWER_LANGS) {
-      const text = str((s.cachedAnswers as Record<string, unknown>)[key])?.trim();
-      if (text) cached[key] = text.slice(0, LIMITS.cachedAnswer);
+  if (allowCachedAnswers) {
+    if (s.cachedAnswers && typeof s.cachedAnswers === "object") {
+      const cached: Partial<Record<AnswerLang, string>> = {};
+      for (const key of ANSWER_LANGS) {
+        const text = str((s.cachedAnswers as Record<string, unknown>)[key])?.trim();
+        if (text) cached[key] = text.slice(0, LIMITS.cachedAnswer);
+      }
+      if (Object.keys(cached).length) section.cachedAnswers = cached;
     }
-    if (Object.keys(cached).length) section.cachedAnswers = cached;
+    if (s.cachedAudio && typeof s.cachedAudio === "object") {
+      const audio: Partial<Record<AnswerLang, string>> = {};
+      for (const key of ANSWER_LANGS) {
+        const url = str((s.cachedAudio as Record<string, unknown>)[key])?.trim();
+        // Only keep audio for answers that still exist (edited text → stale audio dropped).
+        if (url && section.cachedAnswers?.[key]) audio[key] = url.slice(0, 500);
+      }
+      if (Object.keys(audio).length) section.cachedAudio = audio;
+    }
+    if (s.cachedSuggestions && typeof s.cachedSuggestions === "object") {
+      const sug: Partial<Record<AnswerLang, string[]>> = {};
+      for (const key of ANSWER_LANGS) {
+        const raw = (s.cachedSuggestions as Record<string, unknown>)[key];
+        if (Array.isArray(raw)) {
+          const items = raw.filter((x): x is string => typeof x === "string").map((x) => x.trim().slice(0, 120)).filter(Boolean).slice(0, 3);
+          if (items.length && section.cachedAnswers?.[key]) sug[key] = items;
+        }
+      }
+      if (Object.keys(sug).length) section.cachedSuggestions = sug;
+    }
   }
   return section;
 }

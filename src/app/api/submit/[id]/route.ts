@@ -34,7 +34,7 @@ function carryCachedAnswers(next: Section[], prev: Section[]): Section[] {
   return next.map((s) => {
     const old = prev.find((p) => p.id === s.id);
     return old && old.title === s.title && old.content === s.content && old.cachedAnswers
-      ? { ...s, cachedAnswers: old.cachedAnswers }
+      ? { ...s, cachedAnswers: old.cachedAnswers, cachedAudio: old.cachedAudio, cachedSuggestions: old.cachedSuggestions }
       : s;
   });
 }

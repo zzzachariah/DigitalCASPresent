@@ -75,7 +75,10 @@ export default function SectionList({
               </button>
               {s.cachedAnswers && Object.keys(s.cachedAnswers).length > 0 && (
                 <>
-                  <span className="badge-live">已生成 · {Object.keys(s.cachedAnswers).join(" / ")}</span>
+                  <span className="badge-live">
+                    已生成 · {Object.keys(s.cachedAnswers).join(" / ")}
+                    {s.cachedAudio && Object.keys(s.cachedAudio).length > 0 && " · 含语音"}
+                  </span>
                   <button type="button" className="chip" onClick={() => admin.toggleAnswersOpen(s.id)}>
                     {admin.answersOpen.has(s.id) ? "收起讲解" : "查看 / 编辑讲解"}
                   </button>

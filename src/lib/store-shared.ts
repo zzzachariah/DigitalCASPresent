@@ -102,6 +102,14 @@ export function contentTypeForExt(ext: string): string {
       return "video/webm";
     case "mov":
       return "video/quicktime";
+    case "mp3":
+      return "audio/mpeg";
+    case "wav":
+      return "audio/wav";
+    case "m4a":
+      return "audio/mp4";
+    case "ogg":
+      return "audio/ogg";
     default:
       return "image/jpeg";
   }
@@ -160,6 +168,6 @@ export function toOwner(p: Person): Person {
   return {
     ...rest,
     status: p.status ?? "approved",
-    sections: p.sections.map(({ cachedAnswers: _a, ...s }) => s),
+    sections: p.sections.map(({ cachedAnswers: _a, cachedAudio: _b, cachedSuggestions: _c, ...s }) => s),
   };
 }

@@ -72,6 +72,7 @@ npm run dev                     # http://localhost:3000
 | `NEXT_PUBLIC_BASE_URL` | 二维码 / 学生链接用的公开网址（本地 `http://localhost:3000`，线上填 Vercel 域名）。 |
 | `AI_API_KEY` | packyapi 的 API key。**留空 = 演示模式**。 |
 | `AI_BASE_URL` / `AI_MODEL` | 默认 `https://www.packyapi.com/v1` 与 `claude-opus-4-8`。 |
+| `AI_MODEL_LIVE` | 可选。现场实时回答（追问、未预生成的部分）用的更快模型；分段和预生成仍用 `AI_MODEL`。 |
 | `AVATAR_PROVIDER` | `mock`（默认）/ `a2e` / `did`。 |
 | `A2E_API_KEY` | 选 `a2e` 时填。 |
 | `A2E_MODE` | `fast`（默认，秒回）或 `precise`（逐句口型渲染，慢）。 |
@@ -94,8 +95,8 @@ packyapi（PackyCode）是国内可直连的 OpenAI/Anthropic 兼容中转，支
 
 - 后台「生成卡通形象」：用本人照片生成轻卡通（还认得出是谁），用于访客端显示与说话。
 - 后台「生成动态视频」：从卡通（或照片）生成一段几秒的说话状态循环视频，只做一次。
-- 访客提问时：`/api/chat` 生成文字 → `/api/avatar` 做 TTS → 前端播放语音并循环视频，通常几秒内开口。
-  A2E 不可用时自动降级为浏览器语音朗读，流程不会卡住。
+- 访客提问时：`/api/chat` **流式**返回文字，服务器每凑齐一句就调一次 A2E 合成语音并推给前端，第一句合成好就开始播，后面的句子排队接上；文字比语音先上屏。A2E 不可用时自动降级为浏览器语音朗读，流程不会卡住。
+- 后台「预生成讲解」会把每个部分的讲解文字、追问建议**和语音**一起提前生成并永久保存，访客选这个部分时零等待。
 - `A2E_MODE=precise`：每个回答单独做口型渲染（几十秒），需要 Vercel Pro 的函数时长。
 
 ---

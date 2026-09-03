@@ -9,7 +9,11 @@ import type { ChatTurn } from "./types";
 
 const API_KEY = process.env.AI_API_KEY?.trim() || "";
 const BASE_URL = (process.env.AI_BASE_URL || "https://www.packyapi.com/v1").replace(/\/$/, "");
+/** Model for offline work (auto-sectioning, pre-generation): quality first. */
 const MODEL = process.env.AI_MODEL || "claude-opus-4-8";
+/** Model for live answers while a visitor waits: set AI_MODEL_LIVE to a
+ *  faster model to cut first-token latency; defaults to AI_MODEL. */
+const MODEL_LIVE = process.env.AI_MODEL_LIVE?.trim() || MODEL;
 
 export function aiIsMock(): boolean {
   return !API_KEY;
@@ -20,39 +24,95 @@ export interface ChatOptions {
   messages: ChatTurn[];
   temperature?: number;
   maxTokens?: number;
+  /** Use the faster live model (default: the quality model). */
+  live?: boolean;
 }
+
+function requestBody(opts: ChatOptions, stream: boolean) {
+  return JSON.stringify({
+    model: opts.live ? MODEL_LIVE : MODEL,
+    temperature: opts.temperature ?? 0.6,
+    max_tokens: opts.maxTokens ?? 600,
+    stream,
+    messages: [
+      { role: "system", content: opts.system },
+      ...opts.messages.map((m) => ({ role: m.role, content: m.content })),
+    ],
+  });
+}
+
+const HEADERS = () => ({ "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` });
 
 export async function chat(opts: ChatOptions): Promise<string> {
   if (aiIsMock()) return mockChat(opts);
 
   const res = await fetch(`${BASE_URL}/chat/completions`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      temperature: opts.temperature ?? 0.6,
-      max_tokens: opts.maxTokens ?? 600,
-      messages: [
-        { role: "system", content: opts.system },
-        ...opts.messages.map((m) => ({ role: m.role, content: m.content })),
-      ],
-    }),
+    headers: HEADERS(),
+    body: requestBody(opts, false),
   });
-
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`AI request failed (${res.status}): ${body.slice(0, 400)}`);
   }
-
-  const data = (await res.json()) as {
-    choices?: { message?: { content?: string } }[];
-  };
+  const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
   const text = data.choices?.[0]?.message?.content?.trim();
   if (!text) throw new Error("AI returned an empty response.");
   return text;
+}
+
+/** Streaming variant: yields text deltas as the model produces them. */
+export async function* chatStream(opts: ChatOptions): AsyncGenerator<string> {
+  if (aiIsMock()) {
+    // Simulate token streaming so the UI path is exercised without a key.
+    const text = mockChat(opts);
+    const words = text.match(/\S+\s*|\s+/g) || [text];
+    for (const w of words) {
+      await new Promise((r) => setTimeout(r, 24));
+      yield w;
+    }
+    return;
+  }
+
+  const res = await fetch(`${BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: HEADERS(),
+    body: requestBody(opts, true),
+  });
+  if (!res.ok || !res.body) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`AI request failed (${res.status}): ${body.slice(0, 400)}`);
+  }
+
+  // OpenAI-style SSE: lines of `data: {json}` ending with `data: [DONE]`.
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let yielded = false;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) !== -1) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (payload === "[DONE]") return;
+      try {
+        const json = JSON.parse(payload) as { choices?: { delta?: { content?: string } }[] };
+        const delta = json.choices?.[0]?.delta?.content;
+        if (delta) {
+          yielded = true;
+          yield delta;
+        }
+      } catch {
+        /* ignore keep-alives / partial lines */
+      }
+    }
+  }
+  if (!yielded) throw new Error("AI returned an empty response.");
 }
 
 /** Parse a JSON object out of a model response that may be wrapped in prose/fences. */
@@ -92,9 +152,9 @@ function mockChat(opts: ChatOptions): string {
   }
 
   if (zh) {
-    return "（演示模式）这是一段示例讲解：我的展品围绕一个核心知识问题展开，它让我重新思考“我们如何获得知识”。接好真实的 packyapi key 后，这里会换成 AI 依据讲稿生成的真实回答。你想继续追问，还是听其他部分？";
+    return "（演示模式）这是一段示例讲解。我的展品围绕一个核心知识问题展开，它让我重新思考我们如何获得知识。接好真实的 packyapi key 后，这里会换成 AI 依据讲稿生成的真实回答。\n---\n能举个例子吗？\n这个物品为什么打动你？\n它和知识问题有什么关系？";
   }
-  return "(Demo mode) Here's a sample explanation: my exhibit explores one core knowledge question about how we come to trust what we know. Once a real packyapi key is connected, this will be replaced by a genuine answer grounded in the script. Would you like to ask a follow-up, or hear another part?";
+  return "(Demo mode) Here's a sample explanation. My exhibit explores one core knowledge question about how we come to trust what we know. Once a real packyapi key is connected, this will be replaced by a genuine answer grounded in the script.\n---\nCan you give an example?\nWhy did you choose this object?\nHow does it connect to the knowledge question?";
 }
 
-export { MODEL as AI_MODEL_NAME, BASE_URL as AI_BASE_URL_RESOLVED };
+export { MODEL as AI_MODEL_NAME, MODEL_LIVE as AI_MODEL_LIVE_NAME, BASE_URL as AI_BASE_URL_RESOLVED };

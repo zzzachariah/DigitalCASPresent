@@ -79,13 +79,23 @@ export function usePersonDraft({ person, api, admin }: { person: Person | null; 
     const invalidatesCache = "title" in patch || "content" in patch;
     setSections((prev) =>
       prev.map((s) =>
-        s.id === id ? { ...s, ...patch, cachedAnswers: invalidatesCache ? undefined : s.cachedAnswers } : s
+        s.id === id
+          ? invalidatesCache
+            ? { ...s, ...patch, cachedAnswers: undefined, cachedAudio: undefined, cachedSuggestions: undefined }
+            : { ...s, ...patch }
+          : s
       )
     );
   }, []);
   const updateCachedAnswer = useCallback((id: string, key: "en" | "zh" | "bilingual", text: string) => {
+    // Edited text → the pre-generated audio for that language is stale.
     setSections((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, cachedAnswers: { ...(s.cachedAnswers || {}), [key]: text } } : s))
+      prev.map((s) => {
+        if (s.id !== id) return s;
+        const cachedAudio = { ...(s.cachedAudio || {}) };
+        delete cachedAudio[key];
+        return { ...s, cachedAnswers: { ...(s.cachedAnswers || {}), [key]: text }, cachedAudio };
+      })
     );
   }, []);
   const toggleAnswersOpen = useCallback((id: string) => {
@@ -215,7 +225,7 @@ export function usePersonDraft({ person, api, admin }: { person: Person | null; 
         setSections((prev) =>
           prev.map((s) => {
             const u = updated.find((x) => x.id === s.id);
-            return u ? { ...s, cachedAnswers: u.cachedAnswers } : s;
+            return u ? { ...s, cachedAnswers: u.cachedAnswers, cachedAudio: u.cachedAudio, cachedSuggestions: u.cachedSuggestions } : s;
           })
         );
       } catch (e) {

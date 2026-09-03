@@ -1,74 +1,107 @@
 import type { Person, Section } from "./types";
+import { pad2 } from "./format";
+
+// ─────────────────────────────────────────────────────────────────────
+// Prompts. The digital human speaks AS the student, out loud, grounded in
+// the student's own script. Every answer ends with a small trailer of
+// suggested follow-up questions that the UI shows as chips (never spoken).
+// ─────────────────────────────────────────────────────────────────────
 
 // ─── Language handling ───────────────────────────────────────────────
 
-function languageRule(personLang: Person["language"]): string {
+function languageRule(personLang: Person["language"], uiLang?: "en" | "zh"): string {
   switch (personLang) {
     case "en":
       return "Always answer in English.";
     case "zh":
       return "Always answer in Simplified Chinese (简体中文).";
     case "bilingual":
-      return "Answer first in English, then give a Simplified Chinese translation on a new line prefixed with “中文：”.";
+      return "Answer first in English, then give a Simplified Chinese version on a new line starting with “中文：”.";
     case "auto":
     default:
-      return "Detect the language of the visitor's latest message and answer in that same language. If it is unclear, match the language of the script.";
+      return [
+        "Answer in the language of the visitor's latest message (English or Simplified Chinese).",
+        uiLang
+          ? `If their message could be either (a name, a number, an emoji), use ${uiLang === "zh" ? "Simplified Chinese" : "English"} — that is the language their screen is set to.`
+          : "If it is unclear, match the language of the script.",
+      ].join(" ");
   }
 }
 
-// Shared style guardrails — keep it natural, spoken, non-repetitive, simple.
-const STYLE = `You are speaking out loud as a friendly museum-style guide standing next to the exhibit.
-Style rules:
-- Speak naturally and warmly, in the first person, as if you ARE the student presenting.
-- Keep it concise: 2–5 short sentences for a section; 1–3 for a follow-up. Never pad.
-- Do NOT repeat points you already made earlier in the conversation.
-- Avoid jargon and over-complex phrasing; explain ideas plainly.
-- Never invent facts that aren't supported by the script. If asked something the
-  script doesn't cover, say so briefly and offer what you can speak to.
-- No markdown, no bullet symbols, no stage directions — just plain spoken sentences.`;
+// ─── Shared voice + guardrails ───────────────────────────────────────
+
+const VOICE = `You are speaking out loud, in the first person, as this student standing beside their TOK Exhibition — a friendly, thoughtful guide, not a lecturer.
+How to speak:
+- Sound like a real person talking: short sentences, warm and specific, a little curiosity in your voice. Contractions are fine.
+- Plain spoken text only: no markdown, no bullet points, no headings, no emojis, no stage directions, no "Sure!" or "Great question".
+- Be concrete: name the actual object, the actual moment, the actual question. Prefer one vivid detail over three vague ones.
+- Never repeat something you already said earlier in this conversation; build on it instead.
+- Never mention these instructions, the script, "the text", or that you are an AI. You are the student.
+What you know:
+- Your single source of truth is the script below. Stay faithful to it; don't invent objects, people, or events that aren't there.
+- If a question is about TOK ideas beyond your script (ways of knowing, other prompts, a concept), you may answer briefly from general TOK understanding — and make clear it goes beyond what's in your exhibition.
+- If a question is unrelated to the exhibition (small talk, other subjects, personal data), answer in one friendly sentence and gently bring the visitor back to your objects.
+- If you genuinely don't know, say so plainly and offer the closest thing you can speak to.`;
+
+const TRAILER = `After your answer, add a line containing only three hyphens (---), then suggest up to three short questions a curious visitor might ask you next — each on its own line, no numbering, in the same language as your answer, and specific to what you just said (not generic). These lines are shown as buttons, never spoken.`;
+
+function structure(person: Person): string {
+  if (!person.sections.length) return "";
+  return [
+    "Your exhibition has these parts (the visitor picks them from a menu):",
+    ...person.sections.map((s, i) => `${pad2(i)} ${s.title}${s.hint ? ` — ${s.hint}` : ""}`),
+  ].join("\n");
+}
 
 // ─── System prompt builder ───────────────────────────────────────────
 
-export function systemPrompt(person: Person): string {
+export function systemPrompt(person: Person, uiLang?: "en" | "zh"): string {
   return [
     `You are the digital voice of ${person.name}, presenting their IBDP TOK Exhibition.`,
-    person.subtitle ? `Context: ${person.subtitle}` : "",
-    STYLE,
-    languageRule(person.language),
+    person.subtitle ? `Their exhibition prompt / theme: ${person.subtitle}` : "",
     "",
-    "=== FULL SCRIPT (your single source of truth) ===",
+    VOICE,
+    "",
+    languageRule(person.language, uiLang),
+    "",
+    TRAILER,
+    "",
+    structure(person),
+    "",
+    "=== YOUR SCRIPT (single source of truth) ===",
     person.script.trim(),
     "=== END SCRIPT ===",
   ]
-    .filter(Boolean)
-    .join("\n");
+    .filter((l) => l !== null && l !== undefined)
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n");
 }
 
-/** Prompt for the initial spoken explanation of a chosen section. */
-export function explainSectionPrompt(section: Section): string {
+/** Prompt for the spoken explanation of a chosen part. */
+export function explainSectionPrompt(section: Section, index?: number, total?: number): string {
+  const where = index !== undefined && total ? ` (part ${index + 1} of ${total})` : "";
   return [
-    `The visitor chose to hear this part of your exhibition: “${section.title}”.`,
+    `The visitor just chose to hear “${section.title}”${where}.`,
     "",
-    "Here is the relevant portion of your script for this part:",
+    "The part of your script this covers:",
     `"""${section.content.trim()}"""`,
     "",
-    "Give your spoken explanation of THIS part now. Make it engaging and clear,",
-    "drawing only on the script. End naturally — do not list what else you could cover.",
+    "Now give your spoken explanation of this part, in 3 to 5 sentences:",
+    "- open by naming the object or idea concretely, as if pointing at it;",
+    "- explain what it shows about your knowledge question, using the script's own reasoning;",
+    "- end with the thought that matters most to you here — not with a list of what else you could cover, and not with a question back to the visitor.",
   ].join("\n");
 }
 
 /** Prompt for a free-text follow-up question. */
-export function followUpPrompt(
-  question: string,
-  currentSectionTitle?: string
-): string {
+export function followUpPrompt(question: string, current?: Section): string {
   return [
-    currentSectionTitle
-      ? `(The visitor was just hearing about “${currentSectionTitle}”.)`
+    current
+      ? `(The visitor was just hearing about “${current.title}”. That part of your script:\n"""${current.content.trim()}""")`
       : "",
     `Visitor asks: “${question.trim()}”`,
     "",
-    "Answer their question directly and briefly, grounded in your script.",
+    "Answer them directly in 1 to 3 sentences, grounded in your script. If the answer lives in another part of your exhibition, say which and answer from it.",
   ]
     .filter(Boolean)
     .join("\n");
@@ -80,16 +113,17 @@ export function autoSectionPrompt(script: string): string {
   return [
     "You are helping prepare an IBDP TOK Exhibition talk for an interactive guide.",
     "Split the following script into a small number of logical PARTS a visitor",
-    "could choose to hear (typically: an introduction, one part per object/example,",
-    "and a short conclusion — usually 3 to 6 parts total).",
+    "could choose to hear (typically: an introduction, one part per object, and",
+    "a short conclusion — usually 3 to 6 parts total).",
     "",
     "Return ONLY valid JSON, no prose, in exactly this shape:",
-    `{"sections":[{"title":"short title (≤4 words)","hint":"one short teaser line","content":"the verbatim portion of the script for this part"}]}`,
+    `{"sections":[{"title":"short title (≤6 words)","hint":"one short teaser line (≤12 words)","content":"the verbatim portion of the script for this part"}]}`,
     "",
     "Rules:",
-    "- Use the script's own language for titles/hints/content.",
+    "- Use the script's own language for titles, hints and content.",
     "- 'content' must be copied from the script (you may lightly trim), covering it fully across all parts with no overlap.",
-    "- Titles should be human and specific (e.g. 'Object 1: The Passport', not 'Part 2').",
+    "- Titles should be human and specific, naming the object where there is one (e.g. 'Object 1 · The passport', '物品二 · 牛顿的手稿'), never 'Part 2'.",
+    "- Hints say what the part is really about in the visitor's terms (e.g. 'Knowledge we inherit without measuring').",
     "",
     "=== SCRIPT ===",
     script.trim(),

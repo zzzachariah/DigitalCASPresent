@@ -49,6 +49,10 @@ export function saveCartoon(id: string, buffer: Buffer, ext: string): Promise<st
 export function saveLoopVideo(id: string, buffer: Buffer, ext: string): Promise<string> {
   return driver().saveLoopVideo(id, buffer, ext);
 }
+/** Store pre-generated narration audio; returns a permanent URL. */
+export function saveAudio(id: string, key: string, buffer: Buffer, ext: string): Promise<string> {
+  return driver().saveAudio(id, key, buffer, ext);
+}
 export function readPhoto(
   id: string
 ): Promise<{ buffer: Buffer; contentType: string } | null> {

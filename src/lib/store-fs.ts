@@ -206,20 +206,33 @@ export async function saveLoopVideo(id: string, buffer: Buffer, ext: string): Pr
   return loopVideoUrl;
 }
 
+/** Pre-generated narration for one section + language. `key` is
+ *  "<sectionId>-<lang>"; served from /api/photo/<id>.audio.<key>. */
+export async function saveAudio(id: string, key: string, buffer: Buffer, ext: string): Promise<string> {
+  await ensureDirs();
+  const safeKey = key.replace(/[^A-Za-z0-9_-]/g, "");
+  const safeExt = cleanExt(ext, "mp3");
+  await unlinkMatching(`${id}.audio.${safeKey}.`);
+  await fs.writeFile(path.join(UPLOAD_DIR, `${id}.audio.${safeKey}.${safeExt}`), buffer);
+  return `/api/photo/${id}.audio.${safeKey}?v=${Date.now()}`;
+}
+
 export async function readPhoto(
   id: string
 ): Promise<{ buffer: Buffer; contentType: string } | null> {
-  if (!/^[A-Za-z0-9_-]{1,40}(\.(cartoon|loop))?$/.test(id)) return null;
+  if (!/^[A-Za-z0-9_-]{1,40}(\.(cartoon|loop|audio\.[A-Za-z0-9_-]{1,80}))?$/.test(id)) return null;
   try {
     const files = await fs.readdir(UPLOAD_DIR);
+    const base = id.split(".")[0];
     const wantCartoon = id.endsWith(".cartoon");
     const wantLoop = id.endsWith(".loop");
-    const marker = wantCartoon ? ".cartoon." : wantLoop ? ".loop." : null;
+    const audioKey = id.includes(".audio.") ? id.slice(id.indexOf(".audio.") + 7) : null;
+    const marker = wantCartoon ? ".cartoon." : wantLoop ? ".loop." : audioKey ? `.audio.${audioKey}.` : null;
     const file = files.find(
       (f) =>
-        f.startsWith(id + ".") &&
+        f.startsWith(base + ".") &&
         !f.endsWith(".tmp") &&
-        (marker ? f.includes(marker) : !f.includes(".cartoon.") && !f.includes(".loop."))
+        (marker ? f.includes(marker) : !f.includes(".cartoon.") && !f.includes(".loop.") && !f.includes(".audio."))
     );
     if (!file) return null;
     const buffer = await fs.readFile(path.join(UPLOAD_DIR, file));

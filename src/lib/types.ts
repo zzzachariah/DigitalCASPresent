@@ -20,6 +20,11 @@ export interface Section {
    *  opening this section can skip the AI call entirely (instant). Follow-up
    *  questions are always generated live — never cached. */
   cachedAnswers?: Partial<Record<AnswerLang, string>>;
+  /** Pre-generated narration audio (stored URL) for each cached answer, so
+   *  opening the section plays instantly with no TTS round-trip. */
+  cachedAudio?: Partial<Record<AnswerLang, string>>;
+  /** Pre-generated follow-up question suggestions for each cached answer. */
+  cachedSuggestions?: Partial<Record<AnswerLang, string[]>>;
 }
 
 /** A person = one digital human = one QR code. */
