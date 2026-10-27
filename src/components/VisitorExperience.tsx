@@ -7,6 +7,8 @@ import { useDidStream } from "./useDidStream";
 import { useVisitorViewport } from "./useVisitorViewport";
 import { readJson } from "@/lib/http";
 import { takeSentences } from "@/lib/sentences";
+import { createNarrationPlayer, rememberNarration } from "@/lib/narration-player";
+import type { AudioRecovery, NarrationClip } from "@/lib/narration-player";
 import { IconArrowRight, IconChevronDown, IconReplay, IconStop } from "./icons";
 
 type Stage = "intro" | "thinking" | "speaking" | "ready";
@@ -39,6 +41,12 @@ const T = {
     rendering: "数字人生成中",
     replay: "重播",
     stop: "停止",
+    playSound: "点击播放声音",
+    retrySound: "重试声音",
+    resumeSound: "继续播放声音",
+    soundBlocked: "声音尚未播放，点击后从当前句继续。",
+    soundPaused: "声音已暂停，点击后继续听。",
+    soundFailed: "这句声音暂时未能播放，文字仍可阅读。",
     suggestions: ["能举个例子吗？", "可以说得更具体一点吗？", "这和现实生活有什么联系？"],
     index: "目录",
     conversation: "对话",
@@ -66,6 +74,12 @@ const T = {
     rendering: "Generating avatar",
     replay: "Replay",
     stop: "Stop",
+    playSound: "Tap to play sound",
+    retrySound: "Retry sound",
+    resumeSound: "Continue listening",
+    soundBlocked: "Sound has not started. Tap to continue from this sentence.",
+    soundPaused: "Sound is paused. Tap to continue listening.",
+    soundFailed: "This audio clip could not play. You can still read the answer.",
     suggestions: ["Can you give an example?", "Could you be more specific?", "How does this connect to real life?"],
     index: "Index",
     conversation: "Conversation",
@@ -126,21 +140,18 @@ export default function VisitorExperience({
   const [narrating, setNarrating] = useState(false);
   // Follow-up suggestions from the model for the latest answer.
   const [suggestions, setSuggestions] = useState<string[]>([]);
-  const [lastAudio, setLastAudio] = useState<string[]>([]);
-  const queueRef = useRef<{ items: Map<number, { url: string | null; text: string }>; next: number; total: number | null; busy: boolean }>({
-    items: new Map(),
-    next: 0,
-    total: null,
-    busy: false,
-  });
+  const [lastAudio, setLastAudio] = useState<NarrationClip[]>([]);
+  const [audioRecovery, setAudioRecovery] = useState<AudioRecovery>(null);
+  const narrationRef = useRef<ReturnType<typeof createNarrationPlayer> | null>(null);
+  const lastAudioTotalRef = useRef<number | null>(null);
   const ttsCountRef = useRef(0);
+  const voiceEpochRef = useRef(0);
   // One live answer at a time: a newer run aborts the previous stream, and
   // late events from an old run are ignored. "Stop" silences the current run
   // (text keeps arriving, nothing more is voiced).
   const runIdRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const silencedRunRef = useRef(-1);
-  const unlockedRef = useRef(false);
   const phoneContentRef = useRef<HTMLDivElement>(null);
   const questionRef = useRef<HTMLInputElement>(null);
   const timersRef = useRef<Set<number>>(new Set());
@@ -199,9 +210,18 @@ export default function VisitorExperience({
       setLastLang("zh");
     }
     const timers = timersRef.current; // stable Set instance
+    const runs = runIdRef; // invalidate the latest generation, not a captured id
+    const onVisibility = () => {
+      if (document.hidden) narrationRef.current?.suspend();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
+      runs.current++;
       abortRef.current?.abort();
+      narrationRef.current?.reset(false);
+      if ("speechSynthesis" in window) window.speechSynthesis.cancel();
       timers.forEach((t) => window.clearTimeout(t));
+      document.removeEventListener("visibilitychange", onVisibility);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -249,6 +269,9 @@ export default function VisitorExperience({
       return;
     }
     const synth = window.speechSynthesis;
+    const forRun = runIdRef.current;
+    const forVoice = voiceEpochRef.current;
+    const current = () => runIdRef.current === forRun && voiceEpochRef.current === forVoice;
     const u = new SpeechSynthesisUtterance(text);
     u.lang = lang === "zh" ? "zh-CN" : "en-US";
     const v = pickVoice(lang);
@@ -256,20 +279,20 @@ export default function VisitorExperience({
     u.rate = 1;
     ttsCountRef.current++;
     const finish = () => {
+      if (!current()) return;
       ttsCountRef.current = Math.max(0, ttsCountRef.current - 1);
       if (ttsCountRef.current === 0) setStage("ready");
     };
-    u.onstart = () => setStage("speaking");
+    u.onstart = () => { if (current()) setStage("speaking"); };
     u.onend = finish;
     u.onerror = finish;
     setStage("speaking");
     synth.speak(u);
     // Safety net: if the engine never starts (no matching voice), don't get
     // stuck — but only for the run that queued this utterance.
-    const forRun = runIdRef.current;
     const timer = window.setTimeout(() => {
       timersRef.current.delete(timer);
-      if (runIdRef.current !== forRun) return;
+      if (!current()) return;
       if (!synth.speaking && !synth.pending) {
         ttsCountRef.current = 0;
         setStage("ready");
@@ -279,83 +302,69 @@ export default function VisitorExperience({
   }
 
   function speakAll(text: string, lang: "en" | "zh") {
+    voiceEpochRef.current++;
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     ttsCountRef.current = 0;
     takeSentences(text, true).chunks.forEach((c) => speak(c, /[一-鿿]/.test(c) ? "zh" : lang));
   }
 
   // ── Narration queue (server-synthesized audio, one item per sentence) ──
-  function queueReset() {
-    queueRef.current = { items: new Map(), next: 0, total: null, busy: false };
+  function narration() {
+    if (!narrationRef.current) {
+      narrationRef.current = createNarrationPlayer({
+        audio: () => audioRef.current,
+        state: ({ playing, narrating, recovery }) => {
+          setAudioPlaying(playing);
+          setNarrating(narrating);
+          setAudioRecovery(recovery);
+        },
+        speak: (text, handlers) => {
+          if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") return;
+          const utterance = new SpeechSynthesisUtterance(text);
+          utterance.lang = /[一-鿿]/.test(text) ? "zh-CN" : "en-US";
+          utterance.onend = handlers.ended;
+          utterance.onerror = (event) => handlers.failed(event.error);
+          window.speechSynthesis.speak(utterance);
+          return () => {
+            utterance.onend = null;
+            utterance.onerror = null;
+            window.speechSynthesis.cancel();
+          };
+        },
+      });
+    }
+    return narrationRef.current;
   }
-  function queuePlayNext() {
-    const q = queueRef.current;
-    const el = audioRef.current;
-    if (!el || q.busy) return;
-    if (q.total !== null && q.next >= q.total) {
-      setNarrating(false);
-      return;
-    }
-    const item = q.items.get(q.next);
-    if (!item) return; // still being synthesized — wait
-    q.next++;
-    if (!item.url) {
-      // TTS failed for this sentence: let the browser voice it, then continue.
-      if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
-        queuePlayNext();
-        return;
-      }
-      q.busy = true;
-      setNarrating(true);
-      const u = new SpeechSynthesisUtterance(item.text);
-      u.lang = /[一-鿿]/.test(item.text) ? "zh-CN" : "en-US";
-      u.onend = u.onerror = () => {
-        q.busy = false;
-        queuePlayNext();
-      };
-      window.speechSynthesis.speak(u);
-      return;
-    }
-    q.busy = true;
-    setNarrating(true);
-    el.src = item.url;
-    el.currentTime = 0;
-    el.play().catch(() => {
-      q.busy = false;
-      queuePlayNext();
-    });
+  function queueReset() {
+    narration().reset();
   }
   function queueAdd(seq: number, url: string | null, text: string) {
-    queueRef.current.items.set(seq, { url, text });
-    queuePlayNext();
+    narration().add({ seq, url, text });
   }
   function queueFinish(total: number) {
-    queueRef.current.total = total;
-    queuePlayNext();
-  }
-  function onAudioEnded() {
-    queueRef.current.busy = false;
-    setAudioPlaying(false);
-    queuePlayNext();
+    narration().finish(total);
   }
 
   // Play a whole narration (replay of a stored answer) over the loop video.
-  function playNarration(urls: string[], text: string, lang: "en" | "zh") {
+  function playNarration(clips: NarrationClip[], text: string, lang: "en" | "zh", total?: number | null) {
     queueReset();
-    urls.forEach((u, i) => queueRef.current.items.set(i, { url: u, text }));
-    queueFinish(urls.length);
-    if (!urls.length) speakAll(text, lang);
+    voiceEpochRef.current++;
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    clips.forEach((clip) => narration().add(clip));
+    queueFinish(total ?? (clips.length ? Math.max(...clips.map((clip) => clip.seq)) + 1 : 0));
+    if (!clips.length && !total) speakAll(text, lang);
   }
 
   /** Silence everything (voice, narration queue, rendered video). The text of
    *  an answer still streaming keeps arriving; it just won't be voiced. */
   function stopSpeaking() {
     silencedRunRef.current = runIdRef.current;
+    voiceEpochRef.current++;
     timersRef.current.forEach((t) => window.clearTimeout(t));
     timersRef.current.clear();
+    queueReset();
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     ttsCountRef.current = 0;
-    queueReset();
     audioRef.current?.pause();
     setAudioPlaying(false);
     setNarrating(false);
@@ -369,8 +378,11 @@ export default function VisitorExperience({
       sayStream(lastText, lastLang).then((ok) => {
         if (!ok) speakAll(lastText, lastLang);
       });
-    } else if (lastAudio.length) {
-      playNarration(lastAudio, lastText, lastLang);
+    } else if (lastAudio.length || (lastAudioTotalRef.current ?? 0) > 0) {
+      // Stop may have silenced this answer while its clips were still arriving.
+      // Replay reopens that same ordered queue; it never starts another request.
+      silencedRunRef.current = -1;
+      playNarration(lastAudio, lastText, lastLang, lastAudioTotalRef.current);
     } else {
       speakAll(lastText, lastLang);
     }
@@ -396,34 +408,24 @@ export default function VisitorExperience({
     timersRef.current.forEach((t) => window.clearTimeout(t));
     timersRef.current.clear();
     setWarmMedia(true);
+    queueReset();
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     ttsCountRef.current = 0;
-    queueReset();
     audioRef.current?.pause();
     setAudioPlaying(false);
     setNarrating(false);
     setVideoUrl(null);
     setVideoLoading(false);
     setLastAudio([]);
+    setLastText("");
+    lastAudioTotalRef.current = null;
     setError("");
     setSuggestions([]);
     if (payload.mode === "section") setCurrentSectionId(payload.sectionId);
 
-    // First tap: unlock media playback on strict mobile browsers by playing
-    // silence (and an empty utterance) synchronously inside the gesture.
-    if (!unlockedRef.current) {
-      unlockedRef.current = true;
-      try {
-        const el = audioRef.current;
-        if (el) {
-          el.src = SILENT_WAV;
-          el.play().then(() => el.pause()).catch(() => {});
-        }
-        if ("speechSynthesis" in window) window.speechSynthesis.speak(new SpeechSynthesisUtterance(""));
-      } catch {
-        /* ignore */
-      }
-    }
+    // Prime the shared media element inside this gesture. Success is checked
+    // before marking it unlocked; late priming cannot pause a real clip.
+    narration().prime(SILENT_WAV);
 
     const userBubble =
       payload.mode === "section"
@@ -440,7 +442,7 @@ export default function VisitorExperience({
     // plain `let` would be narrowed by TypeScript to its initial value.
     const st = { lang: uiLang as "en" | "zh", avatar: "tts" as "audio" | "video" | "tts" };
     let pendingTts = "";
-    const audioUrls: string[] = [];
+    const audioClips = new Map<number, NarrationClip>();
     let gotAny = false;
 
     // Deltas arrive many times a second; paint them once per frame.
@@ -484,6 +486,7 @@ export default function VisitorExperience({
       setStreaming(false);
       setLastText(text);
       setLastLang(st.lang);
+      lastAudioTotalRef.current = chunks;
       if (silenced()) {
         setStage("ready");
         return;
@@ -544,11 +547,9 @@ export default function VisitorExperience({
             appendText(String(ev.text || ""));
             break;
           case "audio":
-            if (typeof ev.url === "string") {
-              audioUrls.push(ev.url);
-              setLastAudio([...audioUrls]);
-            }
-            if (!silenced()) queueAdd(Number(ev.seq), typeof ev.url === "string" ? ev.url : null, String(ev.text || ""));
+            const clip = { seq: Number(ev.seq), url: typeof ev.url === "string" ? ev.url : null, text: String(ev.text || "") };
+            setLastAudio(rememberNarration(audioClips, clip));
+            if (!silenced()) queueAdd(clip.seq, clip.url, clip.text);
             break;
           case "suggestions":
             if (Array.isArray(ev.items)) setSuggestions(ev.items.filter((x: unknown) => typeof x === "string"));
@@ -577,7 +578,7 @@ export default function VisitorExperience({
       if (!alive()) return;
       if (!finished) {
         if (!text.trim()) throw new Error(t.error);
-        await finalize(text, st.lang, queueRef.current.items.size);
+        await finalize(text, st.lang, narration().size);
       }
     } catch (e) {
       if (!alive() || (e instanceof DOMException && e.name === "AbortError")) return;
@@ -625,7 +626,10 @@ export default function VisitorExperience({
         }
       } else if (avRes.ok && av.avatar?.kind === "audio") {
         setVideoLoading(false);
-        if (!silenced()) playNarration([av.avatar.audioUrl], text, lang);
+        const clips = [{ seq: 0, url: av.avatar.audioUrl as string, text }];
+        setLastAudio(clips);
+        lastAudioTotalRef.current = 1;
+        if (!silenced()) playNarration(clips, text, lang);
       } else {
         setVideoLoading(false);
         if (!silenced()) speakAll(text, lang);
@@ -672,7 +676,7 @@ export default function VisitorExperience({
   const caption = messages.length === 0 ? `${t.greeting(person.name)} ${t.pick}` : lastAssistant?.text || "";
   const currentSection = person.sections.find((s) => s.id === currentSectionId);
   const currentIndex = person.sections.findIndex((s) => s.id === currentSectionId);
-  const canReplay = !streaming && stage !== "thinking" && !talking && !videoLoading && !!lastText;
+  const canReplay = !audioRecovery && !streaming && stage !== "thinking" && !talking && !videoLoading && !!lastText;
   const showSuggestions = !streaming && stage !== "thinking" && !talking && !videoLoading && messages.length > 0;
 
   const statusLabel = videoLoading
@@ -727,6 +731,17 @@ export default function VisitorExperience({
     </div>
   );
 
+  const audioNotice = audioRecovery ? (
+    <div className="flex flex-wrap items-center gap-3 rounded-lg border border-line bg-surface px-3 py-2" role="status">
+      <p className="min-w-0 flex-1 text-[14px] text-ink-2">
+        {audioRecovery === "blocked" ? t.soundBlocked : audioRecovery === "paused" ? t.soundPaused : t.soundFailed}
+      </p>
+      <button type="button" className="btn-primary min-h-[44px] shrink-0" onClick={() => narration().retry()}>
+        {audioRecovery === "blocked" ? t.playSound : audioRecovery === "paused" ? t.resumeSound : t.retrySound}
+      </button>
+    </div>
+  ) : null;
+
   return (
     <div
       className="visitor-shell text-ink"
@@ -735,19 +750,9 @@ export default function VisitorExperience({
       data-editing={isKeyboardOpen ? "true" : undefined}
       data-short-keyboard={isKeyboardOpen && Number.parseFloat(viewportStyle?.["--visitor-height"] ?? "0") < 240 ? "true" : undefined}
     >
-      {/* Narration audio (A2E TTS fast path) — hidden, played over the loop
-          video. No onPlay handler: audioPlaying is set explicitly in
-          playNarration(), so the silent autoplay-unlock play() in run() can
-          never flip the talking state while thinking. */}
-      <audio
-        ref={audioRef}
-        playsInline
-        hidden
-        onPlaying={() => setAudioPlaying(true)}
-        onEnded={onAudioEnded}
-        onError={onAudioEnded}
-        onPause={() => setAudioPlaying(false)}
-      />
+      {/* Attempt-scoped listeners belong to narration-player, including errors
+          and pause recovery. Silent priming never changes the talking state. */}
+      <audio ref={audioRef} playsInline hidden />
 
       {/* ── Header ── */}
       <header className="visitor-header [grid-area:header] flex items-start justify-between gap-4 px-4 pb-3 pt-3 lg:h-16 lg:items-center lg:border-b lg:border-line lg:px-0 lg:py-0">
@@ -888,6 +893,7 @@ export default function VisitorExperience({
       </section>
 
       <div className="visitor-content" ref={phoneContentRef}>
+      {audioNotice && <div className="mx-4 mt-3 lg:hidden">{audioNotice}</div>}
       {/* ── Caption (phone only) ── */}
       <div className="visitor-caption px-4 pt-3 lg:hidden">
         {person.status === "pending" && (
@@ -995,6 +1001,7 @@ export default function VisitorExperience({
           <span className="eyebrow">{t.conversation}</span>
           <span className="eyebrow">{t.turns(messages.length)}</span>
         </div>
+        {audioNotice && <div className="shrink-0 px-3 pt-3">{audioNotice}</div>}
         <div ref={transcriptRef} className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-4">
           {messages.length === 0 && (
             <p className="text-[15px] leading-[1.6] text-ink-2 animate-rise">
