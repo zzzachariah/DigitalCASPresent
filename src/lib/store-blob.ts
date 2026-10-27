@@ -1,371 +1,376 @@
 import { put, get, list, del, head, BlobNotFoundError } from "@vercel/blob";
 import type { Person } from "./types";
-import { blobAuth, buildPerson, safeId, uniqueSlug, type CreatePersonInput } from "./store-shared";
+import {
+  buildPerson, safeId, uniqueSlug, mediaBlobAuth, mediaBlobConfigured,
+  recordsBlobAuth, recordsBlobConfigured, type CreatePersonInput,
+} from "./store-shared";
 
-// Vercel Blob driver — used in production (Vercel's filesystem is read-only).
-//
-// Layout
-//   people/<id>/<version>.json   PRIVATE. One immutable blob per saved
-//                                version; the newest wins. Never overwritten,
-//                                so no CDN/edge cache can serve a stale copy,
-//                                and no public URL exists for a record (it
-//                                holds the student's edit token).
-//   slugs/<slug>                 PRIVATE, write-once: the id behind /p/<slug>.
-//   photos/…, cartoons/…, loops/…, audio/…  PUBLIC media with random suffixes
-//                                (served straight to browsers and to A2E).
-//
-// Older layouts are migrated on first access: the single public
-// data/people.json, and the public fixed-path people/<id>.json + slugs/<slug>.txt.
-//
-// The token is resolved at call time (by value, so a non-standard env var name
-// still works) and passed explicitly to every Blob call.
-
+// Two stores, explicitly routed: private records and public media. Legacy
+// public records are READ ONLY. Ordinary reads never migrate, write or delete.
+// Explicit migration copies records and verifies them, retaining every source.
 const PERSON_PREFIX = "people/";
 const SLUG_PREFIX = "slugs/";
+const DELETED_PREFIX = "deleted/";
 const LEGACY_SINGLE = "data/people.json";
-
 const personDir = (id: string) => `${PERSON_PREFIX}${id}/`;
 const slugPath = (slug: string) => `${SLUG_PREFIX}${slug}`;
+const tombstonePath = (id: string) => `${DELETED_PREFIX}${id}.json`;
+type Store = "records" | "media";
+type BlobEntry = { pathname: string; url: string };
+const auth = (store: Store) => store === "records" ? recordsBlobAuth() : mediaBlobAuth();
 
-/** Version names sort lexically by time. `after` is the version being
- *  replaced: the new name is always strictly greater than it, so two writes
- *  in the same millisecond (or from instances with skewed clocks) can never
- *  make an older record look newest. */
-function versionName(after?: string): string {
-  const prev = after ? Number(after.slice(0, 14)) : 0;
-  const t = Math.max(Date.now(), Number.isFinite(prev) ? prev + 1 : 0).toString().padStart(14, "0");
-  const r = Math.random().toString(36).slice(2, 8);
-  return `${t}-${r}.json`;
-}
-function versionOf(pathname: string): string {
-  return pathname.slice(pathname.lastIndexOf("/") + 1);
-}
-
-// ── Low-level helpers ──
-
-async function readPrivateText(pathname: string): Promise<string | null> {
-  const res = await get(pathname, { access: "private", ...blobAuth() });
-  if (!res || res.statusCode !== 200 || !res.stream) return null;
-  return new Response(res.stream).text();
-}
-
-async function exists(pathname: string): Promise<boolean> {
-  try {
-    await head(pathname, blobAuth());
-    return true;
-  } catch (e) {
-    if (e instanceof BlobNotFoundError) return false;
-    throw e;
-  }
-}
-
-async function listAll(prefix: string): Promise<{ pathname: string; url: string; uploadedAt: Date }[]> {
-  const out: { pathname: string; url: string; uploadedAt: Date }[] = [];
+async function listAll(prefix: string, store: Store): Promise<BlobEntry[]> {
+  const out: BlobEntry[] = [];
   let cursor: string | undefined;
   do {
-    const page = await list({ prefix, cursor, limit: 1000, ...blobAuth() });
-    out.push(...page.blobs.map((b) => ({ pathname: b.pathname, url: b.url, uploadedAt: b.uploadedAt })));
+    const page = await list({ prefix, cursor, limit: 1000, ...auth(store) });
+    out.push(...page.blobs.map(({ pathname, url }) => ({ pathname, url })));
     cursor = page.hasMore ? page.cursor : undefined;
   } while (cursor);
   return out;
 }
 
-async function delQuiet(urlOrPath: string | undefined) {
-  if (!urlOrPath) return;
-  try {
-    await del(urlOrPath, blobAuth());
-  } catch {
-    /* ignore */
-  }
-}
-
-// ── Records ──
-
-/** Newest version blob of a person (by name, which embeds the write time). */
-function newest<T extends { pathname: string }>(versions: T[]): T | null {
-  if (!versions.length) return null;
-  return [...versions].sort((a, b) => (a.pathname < b.pathname ? 1 : -1))[0];
-}
-
-async function writePerson(p: Person, after?: string): Promise<void> {
-  const version = versionName(after ?? cache.get(p.id)?.version);
-  const pathname = personDir(p.id) + version;
-  await put(pathname, JSON.stringify(p), {
-    access: "private",
-    addRandomSuffix: false,
-    contentType: "application/json",
-    ...blobAuth(),
-  });
-  cache.set(p.id, { p, at: Date.now(), version });
-  // Keep the two newest versions (a concurrent reader may still be on the
-  // previous one); drop the rest.
-  const versions = await listAll(personDir(p.id));
-  const keep = new Set([...versions].sort((a, b) => (a.pathname < b.pathname ? 1 : -1)).slice(0, 2).map((v) => v.pathname));
-  await Promise.all(versions.filter((v) => !keep.has(v.pathname)).map((v) => delQuiet(v.pathname)));
-}
-
-// Small per-instance read cache: the visitor page and every chat call read
-// the same record; writes on this instance update it immediately.
-const CACHE_MS = 5000;
-const cache = new Map<string, { p: Person; at: number; version: string }>();
-
-async function readById(id: string, fresh = false): Promise<Person | null> {
-  const hit = cache.get(id);
-  if (!fresh && hit && Date.now() - hit.at < CACHE_MS) return hit.p;
-  const v = newest(await listAll(personDir(id)));
-  if (!v) {
-    cache.delete(id);
-    return null;
-  }
-  const text = await readPrivateText(v.pathname);
-  if (!text) return null;
-  try {
-    const p = JSON.parse(text) as Person;
-    cache.set(id, { p, at: Date.now(), version: versionOf(v.pathname) });
-    return p;
-  } catch {
-    return null;
-  }
-}
-
-async function writeSlug(slug: string, id: string): Promise<void> {
-  await put(slugPath(slug), id, {
-    access: "private",
-    addRandomSuffix: false,
-    allowOverwrite: true,
-    contentType: "text/plain",
-    ...blobAuth(),
-  });
-}
-
-async function idForSlug(slug: string): Promise<string | null> {
-  if (!(await exists(slugPath(slug)))) return null;
-  const id = (await readPrivateText(slugPath(slug)))?.trim();
-  return safeId(id) ? id : null;
-}
-
-// ── Migrations (run once per instance, never overwrite newer data) ──
-
-let migration: Promise<void> | null = null;
-function migrate(): Promise<void> {
-  if (!migration) {
-    migration = (async () => {
-      await migrateSingleFile();
-      await migratePublicRecords();
-    })().catch((err) => {
-      migration = null; // let the next request retry
-      throw err;
-    });
-  }
-  return migration;
-}
-
-/** v1: one public data/people.json holding everyone. */
-async function migrateSingleFile() {
-  if (!(await exists(LEGACY_SINGLE))) return;
-  const { url } = await head(LEGACY_SINGLE, blobAuth());
-  const res = await fetch(`${url}?t=${Date.now()}`, { cache: "no-store" });
-  if (!res.ok) return;
-  let people: Person[] = [];
-  try {
-    people = (await res.json()) as Person[];
-  } catch {
-    console.error("[store-blob] legacy data/people.json is not valid JSON; leaving it alone");
-    return;
-  }
-  for (const p of people) {
-    if (!safeId(p?.id) || !safeId(p?.slug)) continue;
-    if (!(await readById(p.id, true))) await writePerson(p);
-    if (!(await exists(slugPath(p.slug)))) await writeSlug(p.slug, p.id);
-  }
-  await del(LEGACY_SINGLE, blobAuth());
-  console.log(`[store-blob] migrated ${people.length} people from data/people.json`);
-}
-
-/** v2: public fixed-path people/<id>.json and slugs/<slug>.txt. */
-async function migratePublicRecords() {
-  const records = (await listAll(PERSON_PREFIX)).filter((b) => /^people\/[A-Za-z0-9_-]+\.json$/.test(b.pathname));
-  for (const b of records) {
-    const id = b.pathname.slice(PERSON_PREFIX.length, -".json".length);
-    try {
-      const res = await fetch(`${b.url}?t=${Date.now()}`, { cache: "no-store" });
-      if (res.ok) {
-        const p = (await res.json()) as Person;
-        if (safeId(p?.id) && !(await readById(p.id, true))) await writePerson(p);
-      }
-    } catch (err) {
-      console.error(`[store-blob] could not migrate ${b.pathname}:`, err);
-      continue;
-    }
-    await delQuiet(b.pathname);
-    void id;
-  }
-  const markers = (await listAll(SLUG_PREFIX)).filter((b) => b.pathname.endsWith(".txt"));
-  for (const b of markers) {
-    const slug = b.pathname.slice(SLUG_PREFIX.length, -".txt".length);
-    try {
-      const res = await fetch(`${b.url}?t=${Date.now()}`, { cache: "no-store" });
-      const id = (await res.text()).trim();
-      if (res.ok && safeId(slug) && safeId(id) && !(await exists(slugPath(slug)))) await writeSlug(slug, id);
-    } catch (err) {
-      console.error(`[store-blob] could not migrate ${b.pathname}:`, err);
-      continue;
-    }
-    await delQuiet(b.pathname);
-  }
-  if (records.length || markers.length) {
-    console.log(`[store-blob] moved ${records.length} records and ${markers.length} slug markers to private storage`);
-  }
-}
-
-async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length);
+async function mapLimit<T, R>(items: T[], fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
   let next = 0;
-  await Promise.all(
-    Array.from({ length: Math.min(limit, items.length) }, async () => {
-      while (next < items.length) {
-        const i = next++;
-        results[i] = await fn(items[i]);
-      }
-    })
-  );
+  await Promise.all(Array.from({ length: Math.min(8, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index]);
+    }
+  }));
   return results;
 }
 
-// ── Public API (mirrors store-fs.ts) ──
+async function findBlob(pathname: string, store: Store): Promise<BlobEntry | null> {
+  try {
+    return await head(pathname, auth(store));
+  } catch (err) {
+    if (err instanceof BlobNotFoundError) return null;
+    throw err;
+  }
+}
+
+async function readPrivateText(pathname: string): Promise<string | null> {
+  const res = await get(pathname, { access: "private", useCache: false, ...recordsBlobAuth() });
+  if (!res) return null;
+  if (res.statusCode !== 200 || !res.stream) throw new Error("Private record could not be read");
+  return new Response(res.stream).text();
+}
+
+async function readPublicText(blob: BlobEntry): Promise<string> {
+  const separator = blob.url.includes("?") ? "&" : "?";
+  const res = await fetch(`${blob.url}${separator}v=${Date.now()}`, {
+    cache: "no-store", signal: AbortSignal.timeout(15_000),
+  });
+  // A network error is not an empty database. In particular, never delete a
+  // source because its CDN temporarily returned 403/404/503.
+  if (!res.ok) throw new Error(`Legacy record could not be read (HTTP ${res.status})`);
+  return res.text();
+}
+
+function parsePerson(raw: string): Person {
+  const p = JSON.parse(raw) as Person;
+  if (!safeId(p?.id) || !safeId(p?.slug) || typeof p.name !== "string" ||
+      typeof p.script !== "string" || !Array.isArray(p.sections)) {
+    throw new Error("Invalid stored person record");
+  }
+  return p;
+}
+
+function newest(versions: BlobEntry[]): BlobEntry | null {
+  return [...versions].sort((a, b) => b.pathname.localeCompare(a.pathname))[0] ?? null;
+}
+
+async function isDeleted(id: string): Promise<boolean> {
+  return recordsBlobConfigured() && (await readPrivateText(tombstonePath(id))) !== null;
+}
+
+async function readPrivatePerson(id: string): Promise<Person | null> {
+  if (!recordsBlobConfigured()) return null;
+  const version = newest(await listAll(personDir(id), "records"));
+  if (!version) return null;
+  const raw = await readPrivateText(version.pathname);
+  if (raw === null) throw new Error("Stored record version is missing");
+  const p = parsePerson(raw);
+  if (p.id !== id) throw new Error("Stored person id does not match its path");
+  return p;
+}
+
+async function readLegacySingle(): Promise<Person[]> {
+  if (!mediaBlobConfigured()) return [];
+  const blob = await findBlob(LEGACY_SINGLE, "media");
+  if (!blob) return [];
+  const rows: unknown = JSON.parse(await readPublicText(blob));
+  if (!Array.isArray(rows)) throw new Error("Invalid legacy people list");
+  return rows.map((p) => parsePerson(JSON.stringify(p)));
+}
+
+async function readLegacyPerson(id: string): Promise<Person | null> {
+  if (!mediaBlobConfigured()) return null;
+  const blob = await findBlob(`${PERSON_PREFIX}${id}.json`, "media");
+  if (blob) {
+    const p = parsePerson(await readPublicText(blob));
+    if (p.id !== id) throw new Error("Legacy person id does not match its path");
+    return p;
+  }
+  return (await readLegacySingle()).find((p) => p.id === id) ?? null;
+}
+
+async function readById(id: string): Promise<Person | null> {
+  if (await isDeleted(id)) return null;
+  // Private is authoritative. An unreadable private version must fail rather
+  // than quietly showing an older public copy.
+  return await readPrivatePerson(id) ?? await readLegacyPerson(id);
+}
+
+async function privateSlugId(slug: string): Promise<string | null> {
+  if (!recordsBlobConfigured()) return null;
+  const raw = await readPrivateText(slugPath(slug));
+  if (raw === null) return null;
+  const id = raw.trim();
+  if (!safeId(id)) throw new Error("Invalid private slug marker");
+  return id;
+}
+
+async function legacySlugId(slug: string): Promise<string | null> {
+  if (!mediaBlobConfigured()) return null;
+  const marker = await findBlob(`${SLUG_PREFIX}${slug}.txt`, "media");
+  if (marker) {
+    const id = (await readPublicText(marker)).trim();
+    if (!safeId(id)) throw new Error("Invalid legacy slug marker");
+    return id;
+  }
+  return (await readLegacySingle()).find((p) => p.slug === slug)?.id ?? null;
+}
+
+/** Reserve a slug without overwriting another student's mapping. */
+async function writeSlug(slug: string, id: string): Promise<void> {
+  const existing = await privateSlugId(slug);
+  if (existing !== null) {
+    if (existing !== id) throw new Error("This public link is already assigned");
+    return;
+  }
+  try {
+    await put(slugPath(slug), id, {
+      access: "private", addRandomSuffix: false, allowOverwrite: false,
+      contentType: "text/plain", ...recordsBlobAuth(),
+    });
+  } catch (err) {
+    // Another identical migration may have reserved the same mapping.
+    if (await privateSlugId(slug) !== id) throw err;
+  }
+  if (await privateSlugId(slug) !== id) throw new Error("Slug verification failed");
+}
+
+/** Append an immutable private version and verify the exact saved bytes.
+ *  Retain all previous versions; cleanup is an explicit separate operation. */
+async function writePerson(p: Person): Promise<void> {
+  const previous = newest(await listAll(personDir(p.id), "records"));
+  const prevTime = previous ? Number(previous.pathname.split("/").at(-1)?.slice(0, 14)) : 0;
+  const time = Math.max(Date.now(), Number.isFinite(prevTime) ? prevTime + 1 : 0);
+  const version = `${String(time).padStart(14, "0")}-${Math.random().toString(36).slice(2, 10)}.json`;
+  const pathname = personDir(p.id) + version;
+  const raw = JSON.stringify(p);
+  await put(pathname, raw, {
+    access: "private", addRandomSuffix: false, allowOverwrite: false,
+    contentType: "application/json", ...recordsBlobAuth(),
+  });
+  if (await readPrivateText(pathname) !== raw) throw new Error("Saved record verification failed");
+}
+
+/** A fixed lowest-priority import version cannot outrank a concurrently saved
+ *  private edit. It is write-once and still verified before reporting success. */
+async function copyLegacyPerson(p: Person): Promise<void> {
+  const pathname = personDir(p.id) + "00000000000000-legacy.json";
+  const raw = JSON.stringify(p);
+  try {
+    await put(pathname, raw, {
+      access: "private", addRandomSuffix: false, allowOverwrite: false,
+      contentType: "application/json", ...recordsBlobAuth(),
+    });
+  } catch (err) {
+    if (await readPrivateText(pathname) !== raw) throw err;
+  }
+  if (await readPrivateText(pathname) !== raw) throw new Error("Copied record verification failed");
+}
 
 export async function listPeople(): Promise<Person[]> {
-  await migrate();
-  const all = await listAll(PERSON_PREFIX);
-  // Group versions by id and read the newest of each.
-  const byId = new Map<string, { pathname: string }[]>();
-  for (const b of all) {
-    const m = b.pathname.match(/^people\/([A-Za-z0-9_-]+)\/[^/]+\.json$/);
-    if (!m) continue;
-    const arr = byId.get(m[1]) || [];
-    arr.push(b);
-    byId.set(m[1], arr);
-  }
-  const people = await mapLimit(Array.from(byId.values()), 8, async (versions) => {
-    const v = newest(versions);
-    if (!v) return null;
-    const text = await readPrivateText(v.pathname);
-    if (!text) return null;
-    try {
-      const p = JSON.parse(text) as Person;
-      cache.set(p.id, { p, at: Date.now(), version: versionOf(v.pathname) });
-      return p;
-    } catch {
-      return null;
+  if (process.env.VERCEL && !recordsBlobConfigured()) recordsBlobAuth();
+  const byId = new Map<string, Person>();
+  const deleted = new Set<string>();
+  if (recordsBlobConfigured()) {
+    for (const b of await listAll(DELETED_PREFIX, "records")) {
+      const match = b.pathname.match(/^deleted\/([A-Za-z0-9_-]+)\.json$/);
+      if (match) deleted.add(match[1]);
     }
-  });
-  return people.filter((p): p is Person => !!p).sort((a, b) => a.createdAt - b.createdAt);
+    const latest = new Map<string, BlobEntry>();
+    for (const b of await listAll(PERSON_PREFIX, "records")) {
+      const match = b.pathname.match(/^people\/([A-Za-z0-9_-]+)\/[^/]+\.json$/);
+      if (!match || deleted.has(match[1])) continue;
+      const prev = latest.get(match[1]);
+      if (!prev || b.pathname > prev.pathname) latest.set(match[1], b);
+    }
+    const people = await mapLimit(Array.from(latest), async ([id, b]) => {
+      const raw = await readPrivateText(b.pathname);
+      if (raw === null) throw new Error("Stored record version is missing");
+      const p = parsePerson(raw);
+      if (p.id !== id) throw new Error("Stored person id does not match its path");
+      return p;
+    });
+    for (const p of people) byId.set(p.id, p);
+  }
+  if (mediaBlobConfigured()) {
+    for (const b of await listAll(PERSON_PREFIX, "media")) {
+      const match = b.pathname.match(/^people\/([A-Za-z0-9_-]+)\.json$/);
+      if (!match || byId.has(match[1]) || deleted.has(match[1])) continue;
+      const p = parsePerson(await readPublicText(b));
+      if (p.id !== match[1]) throw new Error("Legacy person id does not match its path");
+      byId.set(p.id, p);
+    }
+    for (const p of await readLegacySingle()) {
+      if (!byId.has(p.id) && !deleted.has(p.id)) byId.set(p.id, p);
+    }
+  }
+  return Array.from(byId.values()).sort((a, b) => a.createdAt - b.createdAt);
 }
 
 export async function getPerson(idOrSlug: string): Promise<Person | null> {
+  if (process.env.VERCEL && !recordsBlobConfigured()) recordsBlobAuth();
   if (!safeId(idOrSlug)) return null;
-  await migrate();
-  const byId = await readById(idOrSlug);
-  if (byId) return byId;
-  const id = await idForSlug(idOrSlug);
+  if (await isDeleted(idOrSlug)) return null;
+  const direct = await readById(idOrSlug);
+  if (direct) return direct;
+  const id = await privateSlugId(idOrSlug) ?? await legacySlugId(idOrSlug);
   return id ? readById(id) : null;
 }
 
 export async function createPerson(input: CreatePersonInput): Promise<Person> {
-  await migrate();
-  const slug = await uniqueSlug(input.name, (s) => exists(slugPath(s)));
+  recordsBlobAuth(); // fail closed before reserving anything if unconfigured
+  const slug = await uniqueSlug(input.name, async (s) =>
+    (await privateSlugId(s)) !== null || (await legacySlugId(s)) !== null);
   const person = buildPerson(input, slug);
-  // Slug marker first: a dangling marker is harmless, an unreachable person is not.
   await writeSlug(slug, person.id);
   await writePerson(person);
   return person;
 }
 
 export async function updatePerson(
-  id: string,
-  patch: Partial<Omit<Person, "id" | "createdAt">>
+  id: string, patch: Partial<Omit<Person, "id" | "createdAt">>
 ): Promise<Person | null> {
+  recordsBlobAuth();
   if (!safeId(id)) return null;
-  await migrate();
-  const current = await readById(id, true);
+  const current = await readById(id);
   if (!current) return null;
-  const next: Person = { ...current, ...patch, id: current.id, createdAt: current.createdAt, updatedAt: Date.now() };
-  await writePerson(next, cache.get(id)?.version);
+  // Public links are stable, including when a student's name is changed.
+  const next = { ...current, ...patch, id: current.id, slug: current.slug, createdAt: current.createdAt, updatedAt: Date.now() };
+  await writeSlug(next.slug, id);
+  await writePerson(next);
   return next;
 }
 
+/** A durable private tombstone hides all versions and legacy fallback copies.
+ *  Keep source files and media for recovery; never resurrect a deleted person
+ *  merely because their old public record still exists. */
 export async function deletePerson(id: string): Promise<boolean> {
+  recordsBlobAuth();
   if (!safeId(id)) return false;
-  await migrate();
-  const target = await readById(id, true);
+  const target = await readById(id);
   if (!target) return false;
-  const versions = await listAll(personDir(id));
-  await Promise.all(versions.map((v) => delQuiet(v.pathname)));
-  cache.delete(id);
-  await delQuiet(slugPath(target.slug));
-  const media = [target.photoUrl, target.cartoonUrl, target.loopVideoUrl];
-  for (const s of target.sections) for (const u of Object.values(s.cachedAudio || {})) media.push(u);
-  for (const u of media) {
-    if (u?.startsWith("http")) await delQuiet(u);
-  }
+  const raw = JSON.stringify({ id, slug: target.slug, deletedAt: Date.now() });
+  await put(tombstonePath(id), raw, {
+    access: "private", addRandomSuffix: false, allowOverwrite: true,
+    contentType: "application/json", ...recordsBlobAuth(),
+  });
+  if (await readPrivateText(tombstonePath(id)) !== raw) throw new Error("Deletion verification failed");
   return true;
 }
 
-function cleanExt(ext: string, fallback: string): string {
-  return ext.replace(/[^a-z0-9]/gi, "").toLowerCase() || fallback;
+export interface MigrationResult {
+  dryRun: boolean;
+  copied: number;
+  skipped: number;
+  failed: number;
+  results: { id: string; slug?: string; status: "would-copy" | "copied" | "private-exists" | "deleted" | "not-found" | "failed" }[];
 }
 
+/** Admin-only caller must explicitly opt into a write. Never remove a source,
+ *  replace a newer private record, or regenerate ids/slugs during migration. */
+export async function migrateLegacyRecords(options: { dryRun: boolean; ids?: string[] }): Promise<MigrationResult> {
+  recordsBlobAuth();
+  const ids = options.ids ?? (await listPeople()).map((p) => p.id);
+  const report: MigrationResult = { dryRun: options.dryRun, copied: 0, skipped: 0, failed: 0, results: [] };
+  for (const id of Array.from(new Set(ids))) {
+    try {
+      if (!safeId(id)) throw new Error("Invalid person id");
+      if (await isDeleted(id)) {
+        report.skipped++; report.results.push({ id, status: "deleted" }); continue;
+      }
+      const current = await readPrivatePerson(id);
+      if (current) {
+        if (!options.dryRun) await writeSlug(current.slug, id);
+        report.skipped++; report.results.push({ id, slug: current.slug, status: "private-exists" }); continue;
+      }
+      const person = await readLegacyPerson(id);
+      if (!person) {
+        report.failed++; report.results.push({ id, status: "not-found" }); continue;
+      }
+      if (options.dryRun) {
+        report.results.push({ id, slug: person.slug, status: "would-copy" }); continue;
+      }
+      await writeSlug(person.slug, id);
+      // Recheck immediately before copying; do not overwrite a newer private version.
+      if (await readPrivatePerson(id)) {
+        report.skipped++; report.results.push({ id, slug: person.slug, status: "private-exists" }); continue;
+      }
+      await copyLegacyPerson(person);
+      report.copied++; report.results.push({ id, slug: person.slug, status: "copied" });
+    } catch (err) {
+      console.error("[storage-migrate] record failed:", id, err);
+      report.failed++; report.results.push({ id, status: "failed" });
+    }
+  }
+  return report;
+}
+
+const cleanExt = (ext: string, fallback: string) => ext.replace(/[^a-z0-9]/gi, "").toLowerCase() || fallback;
 async function putMedia(pathname: string, buffer: Buffer): Promise<string> {
   const { url } = await put(pathname, buffer, {
-    access: "public",
-    addRandomSuffix: true,
-    cacheControlMaxAge: 31536000,
-    ...blobAuth(),
+    access: "public", addRandomSuffix: true, cacheControlMaxAge: 31536000, ...mediaBlobAuth(),
   });
   return url;
 }
 
-/** Remove a media blob we no longer reference (e.g. regenerated audio). */
+/** Only explicit cleanup calls remove media. Replacing a portrait must not
+ *  destroy the original files retained for recovery. */
 export async function deleteMediaUrl(url: string): Promise<void> {
-  if (url.startsWith("http")) await delQuiet(url);
+  if (url.startsWith("http")) await del(url, mediaBlobAuth());
 }
 
 export async function savePhoto(id: string, buffer: Buffer, ext: string): Promise<string> {
-  const person = await getPerson(id);
-  if (!person) throw new Error("person not found");
+  recordsBlobAuth();
+  if (!(await getPerson(id))) throw new Error("person not found");
   const url = await putMedia(`photos/${id}.${cleanExt(ext, "jpg")}`, buffer);
-  await updatePerson(id, { photoUrl: url });
-  if (person.photoUrl?.startsWith("http")) await delQuiet(person.photoUrl);
+  if (!(await updatePerson(id, { photoUrl: url }))) throw new Error("person not found");
   return url;
 }
-
 export async function saveCartoon(id: string, buffer: Buffer, ext: string): Promise<string> {
-  const person = await getPerson(id);
-  if (!person) throw new Error("person not found");
+  recordsBlobAuth();
+  if (!(await getPerson(id))) throw new Error("person not found");
   const url = await putMedia(`cartoons/${id}.${cleanExt(ext, "png")}`, buffer);
-  await updatePerson(id, { cartoonUrl: url });
-  if (person.cartoonUrl?.startsWith("http")) await delQuiet(person.cartoonUrl);
+  if (!(await updatePerson(id, { cartoonUrl: url }))) throw new Error("person not found");
   return url;
 }
-
-export async function saveAudio(id: string, key: string, buffer: Buffer, ext: string): Promise<string> {
-  const safeKey = key.replace(/[^A-Za-z0-9_-]/g, "");
-  return putMedia(`audio/${id}-${safeKey}.${cleanExt(ext, "mp3")}`, buffer);
-}
-
 export async function saveLoopVideo(id: string, buffer: Buffer, ext: string): Promise<string> {
-  const person = await getPerson(id);
-  if (!person) throw new Error("person not found");
+  recordsBlobAuth();
+  if (!(await getPerson(id))) throw new Error("person not found");
   const url = await putMedia(`loops/${id}.${cleanExt(ext, "mp4")}`, buffer);
-  await updatePerson(id, { loopVideoUrl: url });
-  if (person.loopVideoUrl?.startsWith("http")) await delQuiet(person.loopVideoUrl);
+  if (!(await updatePerson(id, { loopVideoUrl: url }))) throw new Error("person not found");
   return url;
 }
-
-// Media is served directly from the Blob CDN (absolute URLs), so the
-// /api/photo route is never hit in Blob mode. Signature mirrors the fs driver.
-export async function readPhoto(
-  _id: string
-): Promise<{ buffer: Buffer; contentType: string } | null> {
+export async function saveAudio(id: string, key: string, buffer: Buffer, ext: string): Promise<string> {
+  return putMedia(`audio/${id}-${key.replace(/[^A-Za-z0-9_-]/g, "")}.${cleanExt(ext, "mp3")}`, buffer);
+}
+export async function readPhoto(_id: string): Promise<{ buffer: Buffer; contentType: string } | null> {
   return null;
 }

@@ -259,6 +259,7 @@ export default function AdminApp() {
   // Merge a just-saved person into the list instead of re-fetching: the Blob
   // listing can lag a few seconds behind a write.
   function onSaved(saved: Person) {
+    const isNew = view.kind === "new";
     setPeople((list) =>
       list.some((x) => x.id === saved.id)
         ? list.map((x) => (x.id === saved.id ? { ...x, ...saved } : x))
@@ -266,6 +267,7 @@ export default function AdminApp() {
     );
     setSelectedId(saved.id);
     setView({ kind: "list" });
+    if (isNew) openQrFor(saved);
   }
 
   const base = baseUrl();

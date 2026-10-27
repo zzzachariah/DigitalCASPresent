@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { adminConfigured, isAdmin } from "@/lib/auth";
-import { storageDriverName } from "@/lib/store";
-import { resolveBlobToken } from "@/lib/store-shared";
+import { storageDriverName, storageWritable } from "@/lib/store";
+import { resolveBlobToken, mediaBlobConfigured, recordsBlobConfigured, hasBlobOidcToken } from "@/lib/store-shared";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,8 +25,12 @@ export async function GET() {
     adminPasswordSet: adminConfigured(),
     hasBlobTokenStandard: !!process.env.BLOB_READ_WRITE_TOKEN,
     tokenResolved: !!resolveBlobToken(),
+    mediaStorageConfigured: mediaBlobConfigured(),
+    privateRecordsConfigured: recordsBlobConfigured(),
+    storageWritesReady: storageWritable().ok,
+    legacyRecordsReadOnly: true,
     // OIDC path: works without a manually-copied token if both are present.
-    hasOidcToken: !!process.env.VERCEL_OIDC_TOKEN,
+    hasOidcToken: hasBlobOidcToken(),
     hasBlobStoreId: !!process.env.BLOB_STORE_ID,
     blobEnvKeys, // e.g. ["BLOB_READ_WRITE_TOKEN"] or a prefixed name
     aiKeySet: !!process.env.AI_API_KEY,

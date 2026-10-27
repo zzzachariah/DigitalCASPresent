@@ -32,12 +32,13 @@ export type RateScope = keyof typeof RATE;
 
 const hits = new Map<string, number[]>();
 let lastSweep = 0;
+const MAX_WINDOW_MS = Math.max(...Object.values(RATE).map((scope) => scope.windowMs));
 
 function sweep(now: number) {
   if (now - lastSweep < 60_000) return;
   lastSweep = now;
   hits.forEach((arr, k) => {
-    const keep = arr.filter((t) => now - t < 15 * 60_000);
+    const keep = arr.filter((t) => now - t < MAX_WINDOW_MS);
     if (keep.length) hits.set(k, keep);
     else hits.delete(k);
   });
@@ -97,4 +98,5 @@ export function limitRequest(req: NextRequest, scope: RateScope): NextResponse |
 /** Test hook. */
 export function _resetRateLimits() {
   hits.clear();
+  lastSweep = 0;
 }
