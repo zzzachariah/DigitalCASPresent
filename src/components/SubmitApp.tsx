@@ -6,6 +6,7 @@ import { readJson } from "@/lib/http";
 import { studentApi, type StudentTokens } from "@/lib/editor-api";
 import SubmitWizard, { readStoredDraft } from "./SubmitWizard";
 import DraftPreview, { type Draft } from "./DraftPreview";
+import QrCodePanel from "./QrCodePanel";
 import { IconArrowRight, IconCheck, IconCopy, IconEdit, IconExternal, IconLink } from "./icons";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -217,6 +218,7 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
     const p = stage.person;
     const t = tokenBox.current || "";
     const editLink = `${base}/submit/${p.id}?token=${encodeURIComponent(t)}`;
+    const visitorLink = `${base}/p/${p.slug}`;
     const previewLink = tokenBox.preview ? `${base}/p/${p.slug}?preview=${encodeURIComponent(tokenBox.preview)}` : null;
     const approved = p.status === "approved";
     return (
@@ -243,6 +245,20 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
           </div>
 
           <div className="card p-5" style={{ ["--i" as string]: 1 }}>
+            <p className="text-[15px] font-semibold">你的展览二维码 · Visitor QR code</p>
+            <p className="mt-1 text-[13px] leading-relaxed text-ink-3">
+              {approved
+                ? "这是给访客扫描的二维码，可以下载、打印或分享。"
+                : "这里会自动生成你的二维码，可下载保存。审核通过前，访客扫码只会看到待审核提示；老师发布后，同一个二维码即可使用。"}
+              <br />
+              {approved
+                ? "Download, print or share this code with visitors."
+                : "Save this code now. Visitors can open your guide only after teacher approval; the QR code stays the same."}
+            </p>
+            <div className="mt-4"><QrCodePanel link={visitorLink} downloadName={`qr-${p.slug}`} /></div>
+          </div>
+
+          <div className="card p-5" style={{ ["--i" as string]: 2 }}>
             <p className="text-[15px] font-semibold">你的专属修改链接 · Private edit link</p>
             <p className="mt-1 text-[13px] leading-relaxed text-ink-3">
               这是以后修改内容的唯一入口，请截图或收藏保存，不要发给别人。
@@ -263,13 +279,13 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
             </div>
           </div>
 
-          <div className="card p-5" style={{ ["--i" as string]: 2 }}>
+          <div className="card p-5" style={{ ["--i" as string]: 3 }}>
             <p className="text-[15px] font-semibold">{approved ? "我的数字人页面 · My page" : "预览我的数字人 · Preview"}</p>
             <p className="mt-1 text-[13px] leading-relaxed text-ink-3">
               {approved ? "这就是访客扫码看到的页面。" : "这个链接只能看、不能改，可以发给同学帮你看看；老师审核通过后，访客扫码才能看到。"}
             </p>
             {approved ? (
-              <a href={`${base}/p/${p.slug}`} target="_blank" rel="noreferrer" className="btn-primary mt-3 w-full">
+              <a href={visitorLink} target="_blank" rel="noreferrer" className="btn-primary mt-3 w-full">
                 打开页面 <IconExternal size={15} />
               </a>
             ) : previewLink ? (

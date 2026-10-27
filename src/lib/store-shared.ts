@@ -1,4 +1,5 @@
 import { nanoid, customAlphabet } from "nanoid";
+import { getVercelOidcTokenSync } from "@vercel/oidc";
 import type { Person, PersonInput, PersonSource, PersonStatus, PublicPerson } from "./types";
 
 // Helpers shared by every storage driver (filesystem, Vercel Blob, …).
@@ -113,34 +114,60 @@ export function contentTypeForExt(ext: string): string {
   }
 }
 
-/** Resolve the Vercel Blob read-write token regardless of the exact env var
- *  name. Vercel usually injects BLOB_READ_WRITE_TOKEN, but some setups use a
- *  prefixed name (e.g. MYSTORE_READ_WRITE_TOKEN). Blob tokens always start with
- *  "vercel_blob_", so we fall back to detecting by value. Evaluated at request
- *  time so a runtime-only secret is never baked to undefined at build. */
+/** Public media credentials. Never scan arbitrary environment variables: a
+ *  second connected store may contain private records, not public media. */
 export function resolveBlobToken(): string | undefined {
-  if (process.env.BLOB_READ_WRITE_TOKEN) return process.env.BLOB_READ_WRITE_TOKEN;
-  for (const [k, v] of Object.entries(process.env)) {
-    if (typeof v === "string" && v.startsWith("vercel_blob_") && /token/i.test(k)) {
-      return v;
-    }
+  return process.env.BLOB_MEDIA_READ_WRITE_TOKEN?.trim() || process.env.BLOB_READ_WRITE_TOKEN?.trim() || undefined;
+}
+
+/** Resolve for each operation: Vercel injects the current token into request
+ *  context, which must take precedence over a potentially stale env token. */
+function currentBlobOidcToken(): string | undefined {
+  try {
+    return getVercelOidcTokenSync()?.trim() || undefined;
+  } catch {
+    return undefined;
   }
-  return undefined;
 }
 
-/** True when Blob can authenticate: either a static read-write token, or
- *  Vercel's OIDC token + a Blob store id (the SDK uses these automatically,
- *  so no manually-copied token is required). */
-export function blobConfigured(): boolean {
+export function hasBlobOidcToken(): boolean {
+  return !!currentBlobOidcToken();
+}
+
+export function mediaBlobConfigured(): boolean {
   if (resolveBlobToken()) return true;
-  return !!(process.env.VERCEL_OIDC_TOKEN && process.env.BLOB_STORE_ID);
+  return !!((process.env.BLOB_MEDIA_STORE_ID?.trim() || process.env.BLOB_STORE_ID?.trim()) && hasBlobOidcToken());
 }
 
-/** Auth option to spread into @vercel/blob calls. When there's a static token
- *  we pass it; otherwise we omit `token` so the SDK falls back to OIDC. */
-export function blobAuth(): { token?: string } {
-  const t = resolveBlobToken();
-  return t ? { token: t } : {};
+export function recordsBlobConfigured(): boolean {
+  return !!(process.env.BLOB_RECORDS_READ_WRITE_TOKEN?.trim() ||
+    (process.env.BLOB_RECORDS_STORE_ID?.trim() && hasBlobOidcToken()));
+}
+
+export function blobConfigured(): boolean {
+  return mediaBlobConfigured() || recordsBlobConfigured();
+}
+
+type BlobAuth = { token: string } | { storeId: string; oidcToken: string };
+
+/** Every call gets explicit credentials, including storeId on the OIDC path.
+ *  An unconfigured private store must never fall through to the public token. */
+export function mediaBlobAuth(): BlobAuth {
+  const token = resolveBlobToken();
+  if (token) return { token };
+  const storeId = process.env.BLOB_MEDIA_STORE_ID?.trim() || process.env.BLOB_STORE_ID?.trim();
+  const oidcToken = currentBlobOidcToken();
+  if (storeId && oidcToken) return { storeId, oidcToken };
+  throw new Error("Public media storage is not configured");
+}
+
+export function recordsBlobAuth(): BlobAuth {
+  const token = process.env.BLOB_RECORDS_READ_WRITE_TOKEN?.trim();
+  if (token) return { token };
+  const storeId = process.env.BLOB_RECORDS_STORE_ID?.trim();
+  const oidcToken = currentBlobOidcToken();
+  if (storeId && oidcToken) return { storeId, oidcToken };
+  throw new Error("Private records storage is not configured (BLOB_RECORDS_READ_WRITE_TOKEN or BLOB_RECORDS_STORE_ID + OIDC)");
 }
 
 /** What a visitor's browser receives. */

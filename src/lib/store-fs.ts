@@ -18,9 +18,9 @@ import {
 const DATA_DIR = path.join(process.cwd(), "data");
 const PEOPLE_DIR = path.join(DATA_DIR, "people");
 const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
-/** Pre-refactor single-file store; migrated to per-person files on first use. */
+/** Pre-refactor single-file store; read-only fallback, never moved on reads. */
 const LEGACY_DB = path.join(DATA_DIR, "people.json");
-const LEGACY_DONE = path.join(DATA_DIR, "people.legacy.json");
+const DELETED_DIR = path.join(DATA_DIR, "deleted");
 
 const personFile = (id: string) => path.join(PEOPLE_DIR, `${id}.json`);
 
@@ -31,9 +31,12 @@ async function ensureDirs() {
 
 async function readPersonFile(file: string): Promise<Person | null> {
   try {
-    return JSON.parse(await fs.readFile(file, "utf8")) as Person;
-  } catch {
-    return null;
+    const person = JSON.parse(await fs.readFile(file, "utf8")) as Person;
+    if (!safeId(person?.id) || !safeId(person?.slug)) throw new Error("Invalid stored person");
+    return person;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
   }
 }
 
@@ -46,52 +49,51 @@ async function writePerson(p: Person): Promise<void> {
   await fs.rename(tmp, file);
 }
 
-let migration: Promise<void> | null = null;
-/** One-time split of the old data/people.json into per-person files. */
-function migrateLegacy(): Promise<void> {
-  if (!migration) {
-    migration = (async () => {
-      await ensureDirs();
-      let raw: string;
-      try {
-        raw = await fs.readFile(LEGACY_DB, "utf8");
-      } catch {
-        return; // nothing to migrate
-      }
-      let people: Person[] = [];
-      try {
-        people = JSON.parse(raw) as Person[];
-      } catch {
-        console.error("[store-fs] legacy people.json is not valid JSON; leaving it alone");
-        return;
-      }
-      for (const p of people) {
-        if (!safeId(p?.id)) continue;
-        const exists = await readPersonFile(personFile(p.id));
-        if (!exists) await writePerson(p);
-      }
-      await fs.rename(LEGACY_DB, LEGACY_DONE);
-      console.log(`[store-fs] migrated ${people.length} people from people.json → data/people/`);
-    })().catch((err) => {
-      migration = null; // let the next request retry
-      throw err;
-    });
+async function readLegacy(): Promise<Person[]> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(LEGACY_DB, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
   }
-  return migration;
+  const people: unknown = JSON.parse(raw);
+  if (!Array.isArray(people)) throw new Error("Invalid legacy people list");
+  return people as Person[];
+}
+
+async function deletedPeople(): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  let files: string[];
+  try { files = await fs.readdir(DELETED_DIR); }
+  catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return out;
+    throw err;
+  }
+  for (const file of files.filter((f) => f.endsWith(".json"))) {
+    const p = JSON.parse(await fs.readFile(path.join(DELETED_DIR, file), "utf8"));
+    if (safeId(p.id) && safeId(p.slug)) out.set(p.id, p.slug);
+  }
+  return out;
 }
 
 async function readAll(): Promise<Person[]> {
-  await migrateLegacy();
-  let files: string[];
-  try {
-    files = await fs.readdir(PEOPLE_DIR);
-  } catch {
-    return [];
+  const deleted = await deletedPeople();
+  const byId = new Map<string, Person>();
+  let files: string[] = [];
+  try { files = await fs.readdir(PEOPLE_DIR); }
+  catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
-  const people = await Promise.all(
-    files.filter((f) => f.endsWith(".json")).map((f) => readPersonFile(path.join(PEOPLE_DIR, f)))
-  );
-  return people.filter((p): p is Person => !!p);
+  for (const file of files.filter((f) => f.endsWith(".json"))) {
+    const p = await readPersonFile(path.join(PEOPLE_DIR, file));
+    if (p && !deleted.has(p.id)) byId.set(p.id, p);
+  }
+  for (const p of await readLegacy()) {
+    if (!safeId(p?.id) || !safeId(p?.slug)) throw new Error("Invalid legacy person");
+    if (!byId.has(p.id) && !deleted.has(p.id)) byId.set(p.id, p);
+  }
+  return Array.from(byId.values());
 }
 
 export async function listPeople(): Promise<Person[]> {
@@ -100,14 +102,11 @@ export async function listPeople(): Promise<Person[]> {
 
 export async function getPerson(idOrSlug: string): Promise<Person | null> {
   if (!safeId(idOrSlug)) return null;
-  await migrateLegacy();
-  const byId = await readPersonFile(personFile(idOrSlug));
-  if (byId) return byId;
-  return (await readAll()).find((p) => p.slug === idOrSlug) ?? null;
+  return (await readAll()).find((p) => p.id === idOrSlug || p.slug === idOrSlug) ?? null;
 }
 
 export async function createPerson(input: CreatePersonInput): Promise<Person> {
-  const taken = new Set((await readAll()).map((p) => p.slug));
+  const taken = new Set([...(await readAll()).map((p) => p.slug), ...Array.from((await deletedPeople()).values())]);
   const slug = await uniqueSlug(input.name, async (s) => taken.has(s));
   const person = buildPerson(input, slug);
   await writePerson(person);
@@ -119,34 +118,20 @@ export async function updatePerson(
   patch: Partial<Omit<Person, "id" | "createdAt">>
 ): Promise<Person | null> {
   if (!safeId(id)) return null;
-  await migrateLegacy();
-  const current = await readPersonFile(personFile(id));
+  const current = await getPerson(id);
   if (!current) return null;
-  const next: Person = { ...current, ...patch, id: current.id, createdAt: current.createdAt, updatedAt: Date.now() };
+  const next: Person = { ...current, ...patch, id: current.id, slug: current.slug, createdAt: current.createdAt, updatedAt: Date.now() };
   await writePerson(next);
   return next;
 }
 
-async function removeUploads(id: string) {
-  try {
-    const files = await fs.readdir(UPLOAD_DIR);
-    await Promise.all(
-      files.filter((f) => f.startsWith(id + ".")).map((f) => fs.unlink(path.join(UPLOAD_DIR, f)))
-    );
-  } catch {
-    /* ignore */
-  }
-}
-
+/** Soft deletion also masks the read-only legacy copy. */
 export async function deletePerson(id: string): Promise<boolean> {
   if (!safeId(id)) return false;
-  await migrateLegacy();
-  try {
-    await fs.unlink(personFile(id));
-  } catch {
-    return false;
-  }
-  await removeUploads(id);
+  const person = await getPerson(id);
+  if (!person) return false;
+  await fs.mkdir(DELETED_DIR, { recursive: true });
+  await fs.writeFile(path.join(DELETED_DIR, `${id}.json`), JSON.stringify({ id, slug: person.slug, deletedAt: Date.now() }), "utf8");
   return true;
 }
 

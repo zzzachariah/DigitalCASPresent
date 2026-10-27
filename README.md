@@ -75,6 +75,7 @@ npm run dev                     # http://localhost:3000
 | `NEXT_PUBLIC_BASE_URL` | 二维码 / 学生链接用的公开网址（本地 `http://localhost:3000`，线上填 Vercel 域名）。 |
 | `AI_API_KEY` | packyapi 的 API key。**留空 = 演示模式**。 |
 | `AI_BASE_URL` / `AI_MODEL` | 默认 `https://www.packyapi.com/v1` 与 `claude-opus-4-8`。 |
+| `AI_API_PROTOCOL` | `auto`（默认）：Claude 使用 Anthropic Messages，其他模型使用 OpenAI Chat Completions；可显式设为 `anthropic` / `openai`。 |
 | `AI_MODEL_LIVE` | 可选但**建议设置**为一个更快的模型。现场实时回答（追问、未预生成的部分）用它；分段和预生成仍用 `AI_MODEL`。 |
 | `AVATAR_PROVIDER` | `mock`（默认）/ `a2e` / `did`。 |
 | `A2E_API_KEY` | 选 `a2e` 时填。 |
@@ -82,7 +83,9 @@ npm run dev                     # http://localhost:3000
 | `A2E_TTS_ID_MALE` / `A2E_TTS_ID_FEMALE` / `A2E_TTS_ID` | 音色 id，默认为多语言男声 / 女声。 |
 | `A2E_CARTOON_MODEL` | 卡通化模型，默认 `nano-banana-pro`。 |
 | `DID_API_KEY` / `DID_VOICE_ID` | 选 `did` 时填。 |
-| `BLOB_READ_WRITE_TOKEN` | Vercel 连接 Blob 后自动注入，**无需手填**。 |
+| `BLOB_READ_WRITE_TOKEN` | 公开媒体 Blob 的凭证，保留现有值；只用于照片、视频、音频与只读旧资料。 |
+| `BLOB_RECORDS_STORE_ID` | 独立的 **private** Blob store ID；项目启用 OIDC 后由当前请求身份访问。 |
+| `BLOB_RECORDS_READ_WRITE_TOKEN` | 不使用 OIDC 时，显式配置私有资料 store 的凭证；不能填公开媒体 store 的凭证。 |
 | `TRUST_PROXY` | 可选。部署在自己的反向代理（Nginx 等）后面时设为 `1`，限流才按真实访客 IP 计数；Vercel 上自动识别。 |
 
 ### 关于 packyapi
@@ -125,12 +128,15 @@ packyapi（PackyCode）是国内可直连的 OpenAI/Anthropic 兼容中转，支
 1. 把仓库导入 Vercel（Framework 自动识别为 Next.js）。
 2. 在 Project → Settings → Environment Variables 填入上表变量（`NEXT_PUBLIC_BASE_URL` 用你的 Vercel 域名）。
 3. **持久化存储（Vercel Blob）**：Vercel 函数文件系统是只读且临时的，所以线上自动改用 Vercel Blob。
-   - Vercel 项目 → **Storage** → **Create Database** → **Blob** → 连接到本项目。
-   - Vercel 会自动注入 `BLOB_READ_WRITE_TOKEN`；代码检测到它就自动切到 Blob，本地没有它则用 `./data` 文件存储。
-   - 连接后 **Redeploy** 一次即生效。
-4. 数据布局（Blob）：每位同学的记录是**私有**对象 `people/<id>/<版本>.json`（每次保存写一个新版本，只保留最近两个），
-   slug 索引 `slugs/<slug>` 一次性写入保证不重名，多人同时提交互不覆盖；照片 / 卡通 / 视频 / 语音是公开对象。
-   旧布局（单文件 `data/people.json`，或早期公开的 `people/<id>.json` + `slugs/<slug>.txt`）会在首次访问时自动迁移并删掉旧对象。
+   - 建立两个 Blob store：**public** 存放照片、卡通、视频、音频，**private** 存放学生资料与修改 token。
+   - 保留公开媒体 store 的 `BLOB_READ_WRITE_TOKEN`；私有 store 用 `BLOB_RECORDS_STORE_ID` 加项目 OIDC，或独立的 `BLOB_RECORDS_READ_WRITE_TOKEN`。
+   - 不要让新 store 覆盖旧媒体凭证。环境变量调整后重新部署，并实际验证保存与读回。
+   - 本地没有 Blob 配置时使用 `./data` 文件存储；Vercel 缺少私有资料配置会明确拒绝保存。
+4. 数据布局（Blob）：私有记录在 `people/<id>/<版本>.json`，每次保存产生一个新版本并读回校验；旧版本保留以便恢复。
+   私有 `slugs/<slug>` 索引保留稳定网址；删除使用私有标记，避免旧备份重新出现在名单里。
+   旧布局（`data/people.json` 或公开的 `people/<id>.json` + `slugs/<slug>.txt`）仅做只读兼容，浏览页面不会迁移或删除资料。
+   迁移前先备份；管理员可向 `/api/admin/storage-migrate` POST `{"dryRun":true,"ids":["指定ID"]}` 预检，再显式设 `dryRun:false` 复制并校验。源文件不会删除，新版资料不会被覆盖。
+   后台新建或学生提交成功后自动生成访客二维码；学生仍需审核，发布后使用同一个二维码。
 5. 登录后打开 `/api/admin/health` 可查看线上实际生效的配置（只显示布尔值，不显示密钥）。
 6. Hobby 套餐的函数上限是 60 秒：「预生成讲解与语音」是逐部分落盘的，超时只会少几段，再点一次会补齐剩下的；
    讲稿很长的同学建议用「一键准备素材」按人逐个跑。
@@ -164,7 +170,7 @@ src/
     QrModal / LoginForm / Unpublished / Loading
   lib/
     store.ts                  数据层调度（按环境自动选 文件 / Vercel Blob）
-    store-fs.ts / store-blob.ts   两种存储实现（每人一条记录 + 旧数据迁移）
+    store-fs.ts / store-blob.ts   两种存储实现（每人一条记录 + 旧资料只读兼容）
     validate.ts               输入校验与长度上限
     access.ts                 谁能看未发布页面（本人 token / 老师）
     ratelimit.ts              内存限流

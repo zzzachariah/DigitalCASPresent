@@ -8,10 +8,12 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "seed": "node scripts/seed.mjs"
+    "seed": "node scripts/seed.mjs",
+    "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
     "@vercel/blob": "^2.5.0",
+    "@vercel/oidc": "3.7.1",
     "mammoth": "^1.8.0",
     "nanoid": "^5.0.7",
     "next": "^14.2.35",

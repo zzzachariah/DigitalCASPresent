@@ -2,9 +2,7 @@
 // Data layer entry point.
 //
 // Picks a storage driver PER REQUEST (not at module load):
-//   • Vercel Blob  — when a Blob read-write token is present in the runtime
-//     environment (resolved by value, so a non-standard env var name still
-//     works, and a runtime-only secret is never baked to undefined at build).
+//   • Vercel Blob  — explicit public-media and private-record configuration.
 //   • Filesystem   — otherwise (local dev, or a single always-on server).
 //
 // Both drivers keep ONE record per person, so many people can be created or
@@ -15,11 +13,11 @@
 
 import * as fsDriver from "./store-fs";
 import * as blobDriver from "./store-blob";
-import { blobConfigured, type CreatePersonInput } from "./store-shared";
+import { blobConfigured, mediaBlobConfigured, recordsBlobConfigured, type CreatePersonInput } from "./store-shared";
 import type { Person } from "./types";
 
 function driver() {
-  return blobConfigured() ? blobDriver : fsDriver;
+  return blobConfigured() || process.env.VERCEL ? blobDriver : fsDriver;
 }
 
 export function listPeople(): Promise<Person[]> {
@@ -67,18 +65,27 @@ export { toPublic, toOwner, isPublished } from "./store-shared";
 export type { CreatePersonInput } from "./store-shared";
 
 export function storageDriverName(): "vercel-blob" | "filesystem" {
-  return blobConfigured() ? "vercel-blob" : "filesystem";
+  return blobConfigured() || process.env.VERCEL ? "vercel-blob" : "filesystem";
 }
 
 /** Guard for write endpoints: the filesystem driver can't write on Vercel
  *  (read-only FS), so surface a clear, actionable message instead of a crash. */
 export function storageWritable(): { ok: true } | { ok: false; reason: string } {
-  if (!blobConfigured() && process.env.VERCEL) {
+  if ((blobConfigured() || process.env.VERCEL) && !recordsBlobConfigured()) {
     return {
       ok: false,
       reason:
-        "线上还没有连接持久化存储，无法保存。请在 Vercel 项目里 Storage → Create → Blob，连接到本项目后 Redeploy，再重试。 / No storage connected: create & connect a Vercel Blob store, then redeploy.",
+        "私有资料存储尚未配置，暂时无法保存，请联系管理员。 / Private records storage is not configured; contact the administrator.",
     };
   }
+  if ((blobConfigured() || process.env.VERCEL) && !mediaBlobConfigured()) {
+    return { ok: false, reason: "照片与音视频存储尚未配置，请联系管理员。 / Public media storage is not configured; contact the administrator." };
+  }
   return { ok: true };
+}
+
+/** Explicit admin migration only; ordinary reads never invoke this. */
+export async function migrateLegacyRecords(options: { dryRun: boolean; ids?: string[] }) {
+  if (storageDriverName() !== "vercel-blob") throw new Error("Blob migration is unavailable for the filesystem driver");
+  return blobDriver.migrateLegacyRecords(options);
 }
