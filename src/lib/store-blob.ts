@@ -58,6 +58,19 @@ async function readPrivateText(pathname: string): Promise<string | null> {
   return new Response(res.stream).text();
 }
 
+/** The SDK must send cache=0 (requires @vercel/blob >=2.6.1). A rare missing
+ *  read immediately after a write gets two short read-only retries. Never
+ *  repeat the write, retry authorization errors, or accept different bytes. */
+async function verifyPrivateWrite(pathname: string, expected: string, message: string): Promise<void> {
+  const delays = [100, 300];
+  for (let attempt = 0; ; attempt++) {
+    const raw = await readPrivateText(pathname);
+    if (raw === expected) return;
+    if (raw !== null || attempt >= delays.length) throw new Error(message);
+    await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+  }
+}
+
 async function readPublicText(blob: BlobEntry): Promise<string> {
   const separator = blob.url.includes("?") ? "&" : "?";
   const res = await fetch(`${blob.url}${separator}v=${Date.now()}`, {
@@ -158,9 +171,11 @@ async function writeSlug(slug: string, id: string): Promise<void> {
     });
   } catch (err) {
     // Another identical migration may have reserved the same mapping.
-    if (await privateSlugId(slug) !== id) throw err;
+    try { await verifyPrivateWrite(slugPath(slug), id, "Slug verification failed"); }
+    catch { throw err; }
+    return;
   }
-  if (await privateSlugId(slug) !== id) throw new Error("Slug verification failed");
+  await verifyPrivateWrite(slugPath(slug), id, "Slug verification failed");
 }
 
 /** Append an immutable private version and verify the exact saved bytes.
@@ -176,7 +191,7 @@ async function writePerson(p: Person): Promise<void> {
     access: "private", addRandomSuffix: false, allowOverwrite: false,
     contentType: "application/json", ...recordsBlobAuth(),
   });
-  if (await readPrivateText(pathname) !== raw) throw new Error("Saved record verification failed");
+  await verifyPrivateWrite(pathname, raw, "Saved record verification failed");
 }
 
 /** A fixed lowest-priority import version cannot outrank a concurrently saved
@@ -190,9 +205,11 @@ async function copyLegacyPerson(p: Person): Promise<void> {
       contentType: "application/json", ...recordsBlobAuth(),
     });
   } catch (err) {
-    if (await readPrivateText(pathname) !== raw) throw err;
+    try { await verifyPrivateWrite(pathname, raw, "Copied record verification failed"); }
+    catch { throw err; }
+    return;
   }
-  if (await readPrivateText(pathname) !== raw) throw new Error("Copied record verification failed");
+  await verifyPrivateWrite(pathname, raw, "Copied record verification failed");
 }
 
 export async function listPeople(): Promise<Person[]> {
@@ -282,7 +299,7 @@ export async function deletePerson(id: string): Promise<boolean> {
     access: "private", addRandomSuffix: false, allowOverwrite: true,
     contentType: "application/json", ...recordsBlobAuth(),
   });
-  if (await readPrivateText(tombstonePath(id)) !== raw) throw new Error("Deletion verification failed");
+  await verifyPrivateWrite(tombstonePath(id), raw, "Deletion verification failed");
   return true;
 }
 

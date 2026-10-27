@@ -64,6 +64,8 @@ export function findUrl(obj: unknown, hint?: RegExp): string | null {
 // Multilingual (zh + en) default voices, per gender. Override via env.
 const VOICE_MALE = process.env.A2E_TTS_ID_MALE || "66d3fb1bc051cfb134c60f20"; // Andrew Multilingual
 const VOICE_FEMALE = process.env.A2E_TTS_ID_FEMALE || "66d3fb89357648b14c4f4f26"; // Emma Multilingual
+const HAN_SCRIPT = new RegExp("\\p{Script=Han}", "u");
+const SPEAKABLE_TEXT = new RegExp("[\\p{L}\\p{N}]", "u");
 
 function voiceFor(gender?: "male" | "female"): string {
   if (gender === "female") return VOICE_FEMALE;
@@ -85,7 +87,15 @@ async function a2eHostedImage(srcUrl: string): Promise<string> {
 /** Text-to-speech: returns an audio URL. This call is synchronous/fast (no
  *  polling needed) — this is what makes the "fast" avatar path near-instant. */
 export async function a2eTts(text: string, gender?: "male" | "female", signal?: AbortSignal): Promise<string> {
-  const tts = await a2e("/api/v1/video/send_tts", "POST", { msg: text, tts_id: voiceFor(gender) }, signal);
+  if (!SPEAKABLE_TEXT.test(text)) throw new Error("send_tts requires speakable text.");
+  // Set the locale for each spoken chunk, including bilingual answers. Leaving
+  // it to upstream detection can reject short/mixed Chinese chunks with 1005.
+  // A2E's documented locale fields are country (language) + region, not `lang`.
+  // https://video.a2e.ai/dev/text-to-speech-api
+  const locale = HAN_SCRIPT.test(text)
+    ? { country: "zh", region: "CN" }
+    : { country: "en", region: "US" };
+  const tts = await a2e("/api/v1/video/send_tts", "POST", { msg: text, tts_id: voiceFor(gender), ...locale }, signal);
   if (!tts.ok) throw new Error(`send_tts failed (${tts.httpStatus}): ${JSON.stringify(tts.json).slice(0, 200)}`);
   const audioUrl = typeof tts.json?.data === "string" ? tts.json.data : findUrl(tts.json?.data);
   if (!audioUrl || !/^https?:\/\//.test(audioUrl)) {

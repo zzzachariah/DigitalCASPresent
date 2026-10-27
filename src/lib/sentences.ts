@@ -39,6 +39,7 @@ export function markerHoldback(buf: string): number {
 const END = /[。！？!?]+["'”’)）]*|[.;；]+["'”’)）]*(?=\s|$)|\n+/g;
 const MIN = 12;
 const MAX = 140;
+const SPEAKABLE_TEXT = new RegExp("[\\p{L}\\p{N}]", "u");
 
 /** Pull complete sentences off the front of `buf`. Returns the chunks ready
  *  for TTS and the remainder still being written. Short sentences are merged
@@ -76,5 +77,7 @@ export function takeSentences(buf: string, flush = false): { chunks: string[]; r
     chunks.push(rest.trim());
     rest = "";
   }
-  return { chunks, rest };
+  // Closing quotes/Markdown can arrive after the last spoken sentence. Keep
+  // them in displayed text, but never send a punctuation-only chunk to TTS.
+  return { chunks: chunks.filter((chunk) => SPEAKABLE_TEXT.test(chunk)), rest };
 }

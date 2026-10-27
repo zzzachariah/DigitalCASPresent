@@ -66,6 +66,9 @@ function setup(extraEnv = {}) {
       assert.equal(options.access, 'private'); assert.equal(store, 'records');
       assert.equal(options.useCache, false);
       if (failures.get(pathname) === 'private-read') throw new Error('Temporary private read failure');
+      const misses = failures.get(pathname);
+      if (typeof misses === 'number' && misses > 0) { failures.set(pathname, misses - 1); return null; }
+      if (failures.get(pathname) === 'mismatched-read') return { statusCode: 200, stream: new Response('different-bytes').body };
       const text = stores[store].get(pathname);
       if (text === undefined) return null;
       return { statusCode: 200, stream: new Response(text).body };
@@ -239,6 +242,40 @@ test('new saves are private and photo uploads stay in the original public media 
   assert.ok(writes(s).some((c) => c.store === 'media' && c.access === 'public'));
   await s.driver.updatePerson(created.id, { name: 'Changed name', slug: 'must-not-change' });
   assert.equal((await s.driver.getPerson(created.id)).slug, created.slug);
+});
+
+test('write verification retries only missing reads without repeating writes', async () => {
+  const s = setup();
+  s.setOnPut((pathname) => { s.failures.set(pathname, 2); });
+  const created = await s.driver.createPerson({ name: 'New student', script: 'New text', sections: [], language: 'auto' });
+  const putCalls = writes(s);
+  assert.equal(putCalls.length, 2);
+  for (const putCall of putCalls) {
+    const afterPut = s.calls.slice(s.calls.indexOf(putCall) + 1);
+    assert.equal(afterPut.filter((c) => c.op === 'get' && c.path === putCall.path).length, 3);
+  }
+  assert.equal((await s.driver.getPerson(created.id)).name, 'New student');
+});
+
+test('missing write verification is bounded and never falsely reports a saved record', async () => {
+  const s = setup();
+  s.setOnPut((pathname) => { s.failures.set(pathname, 99); });
+  await assert.rejects(s.driver.createPerson({ name: 'Missing read', script: 'text', sections: [], language: 'auto' }), /Slug verification failed/);
+  assert.equal(writes(s).length, 1);
+  const putCall = writes(s)[0];
+  assert.equal(s.calls.slice(s.calls.indexOf(putCall) + 1).filter((c) => c.op === 'get').length, 3);
+  assert.equal([...s.stores.records.keys()].some((key) => key.startsWith('people/')), false);
+});
+
+test('write verification never retries different bytes or read errors', async () => {
+  for (const failure of ['mismatched-read', 'private-read']) {
+    const s = setup();
+    s.setOnPut((pathname) => { s.failures.set(pathname, failure); });
+    await assert.rejects(s.driver.createPerson({ name: 'Failed read', script: 'text', sections: [], language: 'auto' }), /verification failed|private read failure/);
+    const putCall = writes(s)[0];
+    assert.equal(writes(s).length, 1);
+    assert.equal(s.calls.slice(s.calls.indexOf(putCall) + 1).filter((c) => c.op === 'get').length, 1);
+  }
 });
 
 test('filesystem reads keep legacy source in place and deletion masks it', async () => {

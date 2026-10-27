@@ -49,6 +49,9 @@ const ttsCache = new Map<string, { url: string; at: number }>();
 let ttsInFlight = 0;
 const ttsWaiters: (() => void)[] = [];
 const TTS_MAX_CONCURRENT = 6;
+// Longer Chinese sentences can take over 15 seconds upstream. Keep a bounded
+// allowance within this route's 60-second limit without issuing paid retries.
+const TTS_TIMEOUT_MS = 30_000;
 
 async function withTtsSlot<T>(fn: () => Promise<T>): Promise<T> {
   if (ttsInFlight >= TTS_MAX_CONCURRENT) await new Promise<void>((r) => ttsWaiters.push(r));
@@ -65,7 +68,7 @@ async function synth(text: string, gender: Person["gender"], signal: AbortSignal
   const key = `${gender || ""}|${text}`;
   const hit = ttsCache.get(key);
   if (hit && Date.now() - hit.at < TTS_CACHE_MS) return hit.url;
-  const url = await withTtsSlot(() => a2eTts(text, gender, AbortSignal.any([signal, AbortSignal.timeout(15_000)])));
+  const url = await withTtsSlot(() => a2eTts(text, gender, AbortSignal.any([signal, AbortSignal.timeout(TTS_TIMEOUT_MS)])));
   if (ttsCache.size >= TTS_CACHE_MAX) ttsCache.delete(ttsCache.keys().next().value as string);
   ttsCache.set(key, { url, at: Date.now() });
   return url;
