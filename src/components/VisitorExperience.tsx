@@ -4,9 +4,10 @@ import { useEffect, useRef, useState } from "react";
 import type { PublicPerson, ChatTurn } from "@/lib/types";
 import { ThinkingDots, TopProgress } from "./Loading";
 import { useDidStream } from "./useDidStream";
+import { useVisitorViewport } from "./useVisitorViewport";
 import { readJson } from "@/lib/http";
 import { takeSentences } from "@/lib/sentences";
-import { IconArrowRight, IconReplay, IconStop } from "./icons";
+import { IconArrowRight, IconChevronDown, IconReplay, IconStop } from "./icons";
 
 type Stage = "intro" | "thinking" | "speaking" | "ready";
 
@@ -109,6 +110,9 @@ export default function VisitorExperience({
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoLoading, setVideoLoading] = useState(false);
   const [input, setInput] = useState("");
+  const [questionFocused, setQuestionFocused] = useState(false);
+  const [partsOpen, setPartsOpen] = useState(false);
+  const { style: viewportStyle, isKeyboardOpen } = useVisitorViewport(questionFocused);
   const [lastText, setLastText] = useState<string>("");
   const [lastLang, setLastLang] = useState<"en" | "zh">(initialLang);
   const [audioPlaying, setAudioPlaying] = useState(false);
@@ -137,7 +141,8 @@ export default function VisitorExperience({
   const abortRef = useRef<AbortController | null>(null);
   const silencedRunRef = useRef(-1);
   const unlockedRef = useRef(false);
-  const captionRef = useRef<HTMLDivElement>(null);
+  const phoneContentRef = useRef<HTMLDivElement>(null);
+  const questionRef = useRef<HTMLInputElement>(null);
   const timersRef = useRef<Set<number>>(new Set());
   const lastPayloadRef = useRef<Parameters<typeof run>[0] | null>(null);
   const [warmMedia, setWarmMedia] = useState(false);
@@ -207,8 +212,8 @@ export default function VisitorExperience({
 
   useEffect(() => {
     transcriptRef.current?.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: streaming ? "auto" : "smooth" });
-    // Phone caption: keep the newest words in view while the answer streams.
-    if (streaming) captionRef.current?.scrollTo({ top: captionRef.current.scrollHeight });
+    // The phone has a single reading area. Leave its position under the
+    // visitor's control instead of pulling them away from earlier sentences.
   }, [messages, stage, streaming]);
 
   function historyTurns(): ChatTurn[] {
@@ -377,6 +382,9 @@ export default function VisitorExperience({
       | { mode: "section"; sectionId: string; label: string }
       | { mode: "followup"; question: string }
   ) {
+    setPartsOpen(false);
+    questionRef.current?.blur();
+    phoneContentRef.current?.scrollTo({ top: 0 });
     // Supersede whatever is in flight: abort its stream, silence its voice.
     abortRef.current?.abort();
     const ac = new AbortController();
@@ -720,7 +728,13 @@ export default function VisitorExperience({
   );
 
   return (
-    <div className="visitor-shell text-ink">
+    <div
+      className="visitor-shell text-ink"
+      style={viewportStyle}
+      data-conversation={messages.length > 0 ? "true" : undefined}
+      data-editing={isKeyboardOpen ? "true" : undefined}
+      data-short-keyboard={isKeyboardOpen && Number.parseFloat(viewportStyle?.["--visitor-height"] ?? "0") < 240 ? "true" : undefined}
+    >
       {/* Narration audio (A2E TTS fast path) — hidden, played over the loop
           video. No onPlay handler: audioPlaying is set explicitly in
           playNarration(), so the silent autoplay-unlock play() in run() can
@@ -736,12 +750,12 @@ export default function VisitorExperience({
       />
 
       {/* ── Header ── */}
-      <header className="[grid-area:header] flex items-start justify-between gap-4 px-5 pb-3 pt-4 lg:h-16 lg:items-center lg:border-b lg:border-line lg:px-0 lg:py-0">
+      <header className="visitor-header [grid-area:header] flex items-start justify-between gap-4 px-4 pb-3 pt-3 lg:h-16 lg:items-center lg:border-b lg:border-line lg:px-0 lg:py-0">
         {/* phone: identity block */}
         <div className="min-w-0 lg:hidden">
           <h1 className="truncate font-display text-[22px] font-semibold leading-tight tracking-[-0.01em]">{person.name}</h1>
-          {person.subtitle && <p className="line-clamp-2 text-[13px] leading-snug text-ink-2">“{person.subtitle}”</p>}
-          <p className="eyebrow mt-1">
+          {person.subtitle && <p className="visitor-identity-detail line-clamp-2 text-[14px] leading-snug text-ink-2">“{person.subtitle}”</p>}
+          <p className="visitor-identity-detail mt-1 text-[13px] leading-snug text-ink-3">
             {t.exhibition} · {t.parts(person.sections.length)}
           </p>
         </div>
@@ -760,19 +774,12 @@ export default function VisitorExperience({
 
       {/* ── Stage: the digital human ── */}
       <section
-        data-compact={messages.length > 0 ? "true" : undefined}
-        className={`visitor-stage [grid-area:stage] relative mx-5 flex min-h-0 flex-col overflow-hidden rounded-xl border border-line bg-surface-2 transition-[box-shadow,height] duration-500 ease-out lg:mx-0 ${
+        className={`visitor-stage [grid-area:stage] relative mx-4 flex min-h-0 flex-col overflow-hidden rounded-xl border border-line bg-surface-2 transition-shadow duration-200 ease-out lg:mx-0 ${
           talking ? "animate-speaking-ring" : ""
         }`}
       >
         {(stage === "thinking" || videoLoading) && <TopProgress />}
-        {person.status === "pending" && (
-          <div className="z-10 shrink-0 bg-warning-soft px-3 py-1.5 text-center text-[11px] leading-snug text-warning">
-            {t.preview}
-          </div>
-        )}
-
-        <div className="relative min-h-0 flex-1 overflow-hidden">
+        <div className="visitor-media relative min-h-0 flex-1 overflow-hidden">
           {/* Blurred still behind the contained media: no letterbox bars,
               whatever the aspect ratio of the photo / loop video. */}
           {displayImage && (
@@ -854,8 +861,8 @@ export default function VisitorExperience({
         </div>
 
         {/* status strip */}
-        <div className="z-10 flex shrink-0 items-center justify-between gap-3 border-t border-line bg-surface px-3.5 py-2.5">
-          <div className="flex min-w-0 items-center gap-2.5">
+        <div className="visitor-status z-10 flex shrink-0 items-center justify-between gap-3 border-t border-line bg-surface px-3 py-2">
+          <div className="visitor-status-copy flex min-w-0 items-center gap-2.5">
             <span
               className={`dot ${
                 stage === "thinking" || videoLoading
@@ -865,68 +872,87 @@ export default function VisitorExperience({
                     : "bg-success"
               }`}
             />
-            <span className="eyebrow shrink-0 !text-accent">{statusLabel}</span>
-            <span className="truncate text-[12px] text-ink-3">{statusMeta}</span>
+            <span className="visitor-status-label shrink-0 text-[13px] text-accent">{statusLabel}</span>
+            <span className="visitor-status-meta truncate text-[13px] text-ink-3">{statusMeta}</span>
           </div>
           {talking && !avatarStream ? (
-            <button type="button" onClick={stopSpeaking} className="chip min-h-[36px] text-ink-2">
+            <button type="button" onClick={stopSpeaking} className="chip min-h-[44px] text-ink-2">
               <IconStop size={15} /> {t.stop}
             </button>
           ) : canReplay ? (
-            <button type="button" onClick={replay} className="chip min-h-[36px] text-ink-3">
+            <button type="button" onClick={replay} className="chip min-h-[44px] text-ink-3">
               <IconReplay size={15} /> {t.replay}
             </button>
           ) : null}
         </div>
       </section>
 
+      <div className="visitor-content" ref={phoneContentRef}>
       {/* ── Caption (phone only) ── */}
-      <div className="[grid-area:caption] px-5 pt-3 lg:hidden">
-        <div key={lastAssistant?.id ?? "greeting"} ref={captionRef} className="max-h-[19dvh] overflow-y-auto animate-rise">
+      <div className="visitor-caption px-4 pt-3 lg:hidden">
+        {person.status === "pending" && (
+          <p className="mb-3 rounded-lg bg-warning-soft px-3 py-2 text-[13px] leading-snug text-warning">
+            {t.preview}
+          </p>
+        )}
+        <div key={lastAssistant?.id ?? "greeting"}>
           {lastUser?.kind === "question" && (
-            <p className="mb-1 truncate text-[12px] text-ink-3">
+            <p className="mb-2 break-words text-[14px] leading-relaxed text-ink-3">
               {uiLang === "zh" ? "你问" : "You asked"}：{lastUser.text}
             </p>
           )}
           {stage === "thinking" && !streaming ? (
-            <p className="flex items-center gap-2 text-[15px] text-ink-3">
+            <p className="flex items-center gap-2 text-[16px] text-ink-3">
               <ThinkingDots /> {t.thinking}…
             </p>
           ) : lastAssistant?.kind === "error" ? (
             <div className="flex flex-wrap items-center gap-2">
               <p className="text-[14px] text-danger">{lastAssistant.text}</p>
-              <button type="button" onClick={retry} className="chip min-h-[36px]">
+              <button type="button" onClick={retry} className="chip min-h-[44px]">
                 <IconReplay size={14} /> {t.retry}
               </button>
             </div>
           ) : (
-            <p className="text-[15px] leading-[1.6] text-ink [text-wrap:pretty]">
+            <p className="break-words text-[17px] leading-[1.65] text-ink [text-wrap:pretty]">
               {caption}
               {streaming && <span className="caret" aria-hidden />}
             </p>
           )}
           {messages.length === 0 && (
-            <p className="mt-1.5 text-[12px] text-ink-3">
+            <p className="visitor-sound-hint mt-1.5 text-[13px] leading-snug text-ink-3">
               {t.soundHint}
               {fixedLanguage || person.language === "bilingual" ? ` · ${t.speaksIn(person.language as "en" | "zh" | "bilingual")}` : ""}
             </p>
           )}
           {error && <p className="mt-2 text-[13px] text-danger">{error}</p>}
         </div>
+        {showSuggestions && <div className="visitor-phone-suggestions mt-4">{suggestionChips}</div>}
       </div>
 
       {/* ── Index (parts) ── */}
-      <nav className="[grid-area:index] flex min-h-0 flex-col px-5 pt-3 lg:px-0 lg:pt-6">
+      <nav aria-label={uiLang === "zh" ? "讲解目录" : "Exhibition parts"} className="visitor-index [grid-area:index] flex min-h-0 flex-col px-4 pb-4 pt-4 lg:px-0 lg:pb-0 lg:pt-6">
+        {messages.length > 0 && (
+          <button
+            type="button"
+            className="visitor-parts-toggle flex min-h-[48px] w-full items-center justify-between gap-3 rounded-lg border border-line bg-surface px-3.5 text-left text-[15px] font-medium lg:hidden"
+            aria-expanded={partsOpen}
+            aria-controls="visitor-parts"
+            onClick={() => setPartsOpen((open) => !open)}
+          >
+            <span>{t.other} · {t.parts(person.sections.length)}</span>
+            <IconChevronDown size={18} className={partsOpen ? "rotate-180" : ""} />
+          </button>
+        )}
         <div className="mb-4 hidden lg:block">
           <h1 className="font-display text-[30px] font-semibold leading-[1.05] tracking-[-0.015em]">{person.name}</h1>
           {person.subtitle && <p className="mt-2 text-[15px] leading-snug text-ink-2 [text-wrap:pretty]">“{person.subtitle}”</p>}
         </div>
-        <div className="card flex min-h-0 flex-1 flex-col overflow-hidden lg:max-h-[calc(100dvh-300px)] lg:flex-none">
+        <div id="visitor-parts" className={`visitor-parts card min-h-0 flex-col overflow-hidden lg:max-h-[calc(100dvh-300px)] lg:flex ${messages.length > 0 && !partsOpen ? "hidden" : "flex"} ${messages.length > 0 ? "mt-2 lg:mt-0" : ""}`}>
           <div className="flex items-center justify-between border-b border-line px-3.5 py-2.5">
-            <span className="eyebrow">{t.index}</span>
-            <span className="eyebrow">{messages.length === 0 ? t.pick : t.other}</span>
+            <span className="text-[13px] text-ink-3">{t.index}</span>
+            <span className="text-[13px] text-ink-3">{messages.length === 0 ? t.pick : t.other}</span>
           </div>
-          <div className="stagger scroll-fade min-h-0 overflow-y-auto">
+          <div className="stagger min-h-0 lg:overflow-y-auto">
             {person.sections.map((s, i) => {
               const active = s.id === currentSectionId;
               return (
@@ -942,8 +968,8 @@ export default function VisitorExperience({
                 >
                   <span className={`w-6 shrink-0 font-mono text-[11px] ${active ? "text-accent" : "text-ink-4"}`}>{pad(i)}</span>
                   <span className="min-w-0 flex-1">
-                    <span className={`block text-[14px] font-medium leading-snug [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] overflow-hidden ${active ? "text-ink" : "text-ink-2"}`}>{s.title}</span>
-                    {s.hint && <span className="block truncate text-[12px] text-ink-3">{s.hint}</span>}
+                    <span className={`block text-[16px] font-medium leading-snug lg:text-[14px] ${active ? "text-ink" : "text-ink-2"}`}>{s.title}</span>
+                    {s.hint && <span className="mt-1 block text-[13px] leading-snug text-ink-3 lg:mt-0 lg:truncate lg:text-[12px]">{s.hint}</span>}
                   </span>
                   {active && <span className="dot bg-accent" />}
                 </button>
@@ -956,9 +982,15 @@ export default function VisitorExperience({
         </div>
         <p className="mt-3 hidden text-[12px] leading-relaxed text-ink-3 lg:block">{t.empty}</p>
       </nav>
+      </div>
 
       {/* ── Transcript (desktop only) ── */}
       <section className="[grid-area:transcript] card hidden min-h-0 flex-col overflow-hidden lg:flex lg:mt-6">
+        {person.status === "pending" && (
+          <p className="shrink-0 bg-warning-soft px-3 py-2 text-[13px] leading-snug text-warning">
+            {t.preview}
+          </p>
+        )}
         <div className="flex items-center justify-between border-b border-line px-3.5 py-2.5">
           <span className="eyebrow">{t.conversation}</span>
           <span className="eyebrow">{t.turns(messages.length)}</span>
@@ -1002,14 +1034,16 @@ export default function VisitorExperience({
           e.preventDefault();
           submitFollowUp(input);
         }}
-        className="[grid-area:ask] flex flex-col gap-2.5 px-5 pb-4 pt-3 lg:px-0 lg:pb-0 lg:pt-4"
+        className="visitor-ask [grid-area:ask] flex flex-col gap-2.5 border-t border-line bg-bg px-4 pb-3 pt-2 lg:border-t-0 lg:bg-transparent lg:px-0 lg:pb-0 lg:pt-4"
       >
-        {showSuggestions && <div className="lg:hidden">{suggestionChips}</div>}
         <div className="flex items-center gap-2 rounded-lg border border-line-strong bg-surface p-1 pl-3.5 transition-[border-color,box-shadow] duration-200 ease-out focus-within:border-accent focus-within:shadow-ring">
           <input
-            className="min-w-0 flex-1 bg-transparent py-2 text-[15px] text-ink outline-none placeholder:text-ink-4"
+            ref={questionRef}
+            className="min-w-0 flex-1 bg-transparent py-2 text-[16px] text-ink outline-none placeholder:text-ink-3"
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            onFocus={() => setQuestionFocused(true)}
+            onBlur={() => setQuestionFocused(false)}
             placeholder={t.askPlaceholder(person.name)}
             aria-label={t.askPlaceholder(person.name)}
             enterKeyHint="send"
@@ -1019,7 +1053,7 @@ export default function VisitorExperience({
           <button
             type="submit"
             disabled={busy || !input.trim()}
-            className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-accent text-accent-on transition-[background-color,opacity,transform] duration-200 ease-out hover:bg-accent-hover active:scale-95 disabled:opacity-40"
+            className="grid h-11 w-11 shrink-0 place-items-center rounded-md bg-accent text-accent-on transition-[background-color,opacity,transform] duration-200 ease-out hover:bg-accent-hover active:scale-95 disabled:opacity-40"
             aria-label={t.send}
           >
             <IconArrowRight size={17} />
