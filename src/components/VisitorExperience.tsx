@@ -36,6 +36,7 @@ const T = {
     askPlaceholder: (n: string) => `向 ${n} 提问…`,
     send: "发送",
     thinking: "正在思考",
+    preparing: "正在准备讲解",
     speaking: "正在讲解",
     ready: "准备好了",
     rendering: "数字人生成中",
@@ -69,6 +70,7 @@ const T = {
     askPlaceholder: (n: string) => `Ask ${n} a question…`,
     send: "Send",
     thinking: "Thinking",
+    preparing: "Preparing narration",
     speaking: "Speaking",
     ready: "Ready",
     rendering: "Generating avatar",
@@ -130,6 +132,10 @@ export default function VisitorExperience({
   const [lastText, setLastText] = useState<string>("");
   const [lastLang, setLastLang] = useState<"en" | "zh">(initialLang);
   const [audioPlaying, setAudioPlaying] = useState(false);
+  // Hold this answer until actual playback starts, not merely until its
+  // audio URL is queued. Errors still reveal readable text and recovery UI.
+  const [awaitingVoice, setAwaitingVoice] = useState(false);
+  const [awaitingAnswerId, setAwaitingAnswerId] = useState<string | null>(null);
   const [error, setError] = useState("");
   // The section the visitor is currently hearing — gives follow-ups context
   // and marks the index row.
@@ -179,6 +185,10 @@ export default function VisitorExperience({
   const streamUsable = avatarStream && streamPlaying;
   // Unified "is the avatar talking right now?" flag (stream / narration audio / browser TTS).
   const talking = streamSpeaking || stage === "speaking" || audioPlaying || narrating;
+
+  useEffect(() => {
+    if (streamSpeaking) setAwaitingVoice(false);
+  }, [streamSpeaking]);
 
   useEffect(() => {
     if (avatarStream) startStream();
@@ -265,6 +275,7 @@ export default function VisitorExperience({
    *  streamed sentences can be handed over as they complete. */
   function speak(text: string, lang: "en" | "zh") {
     if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
+      setAwaitingVoice(false);
       setStage("ready");
       return;
     }
@@ -283,9 +294,11 @@ export default function VisitorExperience({
       ttsCountRef.current = Math.max(0, ttsCountRef.current - 1);
       if (ttsCountRef.current === 0) setStage("ready");
     };
-    u.onstart = () => { if (current()) setStage("speaking"); };
+    u.onstart = () => {
+      if (current()) { setAwaitingVoice(false); setStage("speaking"); }
+    };
     u.onend = finish;
-    u.onerror = finish;
+    u.onerror = () => { if (current()) setAwaitingVoice(false); finish(); };
     setStage("speaking");
     synth.speak(u);
     // Safety net: if the engine never starts (no matching voice), don't get
@@ -294,6 +307,7 @@ export default function VisitorExperience({
       timersRef.current.delete(timer);
       if (!current()) return;
       if (!synth.speaking && !synth.pending) {
+        setAwaitingVoice(false);
         ttsCountRef.current = 0;
         setStage("ready");
       }
@@ -305,7 +319,13 @@ export default function VisitorExperience({
     voiceEpochRef.current++;
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     ttsCountRef.current = 0;
-    takeSentences(text, true).chunks.forEach((c) => speak(c, /[一-鿿]/.test(c) ? "zh" : lang));
+    const chunks = takeSentences(text, true).chunks;
+    if (!chunks.length) {
+      setAwaitingVoice(false);
+      setStage("ready");
+      return;
+    }
+    chunks.forEach((c) => speak(c, /[一-鿿]/.test(c) ? "zh" : lang));
   }
 
   // ── Narration queue (server-synthesized audio, one item per sentence) ──
@@ -314,6 +334,7 @@ export default function VisitorExperience({
       narrationRef.current = createNarrationPlayer({
         audio: () => audioRef.current,
         state: ({ playing, narrating, recovery }) => {
+          if (playing || recovery) setAwaitingVoice(false);
           setAudioPlaying(playing);
           setNarrating(narrating);
           setAudioRecovery(recovery);
@@ -322,10 +343,14 @@ export default function VisitorExperience({
           if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") return;
           const utterance = new SpeechSynthesisUtterance(text);
           utterance.lang = /[一-鿿]/.test(text) ? "zh-CN" : "en-US";
+          utterance.onstart = handlers.started;
+          utterance.onboundary = (event) => handlers.progress(event.charIndex);
           utterance.onend = handlers.ended;
           utterance.onerror = (event) => handlers.failed(event.error);
           window.speechSynthesis.speak(utterance);
           return () => {
+            utterance.onstart = null;
+            utterance.onboundary = null;
             utterance.onend = null;
             utterance.onerror = null;
             window.speechSynthesis.cancel();
@@ -358,6 +383,7 @@ export default function VisitorExperience({
   /** Silence everything (voice, narration queue, rendered video). The text of
    *  an answer still streaming keeps arriving; it just won't be voiced. */
   function stopSpeaking() {
+    setAwaitingVoice(false);
     silencedRunRef.current = runIdRef.current;
     voiceEpochRef.current++;
     timersRef.current.forEach((t) => window.clearTimeout(t));
@@ -402,6 +428,7 @@ export default function VisitorExperience({
     const ac = new AbortController();
     abortRef.current = ac;
     const myRun = ++runIdRef.current;
+    setAwaitingVoice(true);
     const alive = () => runIdRef.current === myRun;
     const silenced = () => silencedRunRef.current === myRun;
     lastPayloadRef.current = payload;
@@ -437,6 +464,7 @@ export default function VisitorExperience({
     setStage("thinking");
 
     const assistantId = rid();
+    setAwaitingAnswerId(assistantId);
     let text = "";
     // Mutable box: these are set from inside the event handler closure, so a
     // plain `let` would be narrowed by TypeScript to its initial value.
@@ -582,6 +610,7 @@ export default function VisitorExperience({
       }
     } catch (e) {
       if (!alive() || (e instanceof DOMException && e.name === "AbortError")) return;
+      setAwaitingVoice(false);
       if (frame) cancelAnimationFrame(frame);
       setStreaming(false);
       const raw = e instanceof Error ? e.message : "";
@@ -676,10 +705,12 @@ export default function VisitorExperience({
   const caption = messages.length === 0 ? `${t.greeting(person.name)} ${t.pick}` : lastAssistant?.text || "";
   const currentSection = person.sections.find((s) => s.id === currentSectionId);
   const currentIndex = person.sections.findIndex((s) => s.id === currentSectionId);
-  const canReplay = !audioRecovery && !streaming && stage !== "thinking" && !talking && !videoLoading && !!lastText;
-  const showSuggestions = !streaming && stage !== "thinking" && !talking && !videoLoading && messages.length > 0;
+  const canReplay = !awaitingVoice && !audioRecovery && !streaming && stage !== "thinking" && !talking && !videoLoading && !!lastText;
+  const showSuggestions = !awaitingVoice && !streaming && stage !== "thinking" && !talking && !videoLoading && messages.length > 0;
 
-  const statusLabel = videoLoading
+  const statusLabel = awaitingVoice
+    ? t.preparing
+    : videoLoading
     ? t.rendering
     : stage === "thinking"
       ? t.thinking
@@ -819,6 +850,7 @@ export default function VisitorExperience({
               playsInline
               controls={false}
               onEnded={() => setStage("ready")}
+              onPlaying={() => setAwaitingVoice(false)}
               onError={() => {
                 setStage("ready");
                 if (lastText) speakAll(lastText, lastLang);
@@ -907,9 +939,9 @@ export default function VisitorExperience({
               {uiLang === "zh" ? "你问" : "You asked"}：{lastUser.text}
             </p>
           )}
-          {stage === "thinking" && !streaming ? (
-            <p className="flex items-center gap-2 text-[16px] text-ink-3">
-              <ThinkingDots /> {t.thinking}…
+          {awaitingVoice || (stage === "thinking" && !streaming) ? (
+            <p className="flex items-center gap-2 text-[16px] text-ink-3" role="status">
+              <ThinkingDots /> {awaitingVoice ? t.preparing : t.thinking}…
             </p>
           ) : lastAssistant?.kind === "error" ? (
             <div className="flex flex-wrap items-center gap-2">
@@ -1018,6 +1050,10 @@ export default function VisitorExperience({
               <div key={m.id} className="max-w-[85%] self-end rounded-lg bg-accent-soft px-3 py-1.5 text-[13px] text-accent animate-rise">
                 {m.text}
               </div>
+            ) : awaitingVoice && m.id === awaitingAnswerId ? (
+              <p key={m.id} className="flex items-center gap-2 text-[15px] text-ink-3" role="status">
+                <ThinkingDots /> {t.preparing}…
+              </p>
             ) : (
               <p key={m.id} className="text-[15px] leading-[1.6] text-ink [text-wrap:pretty] animate-rise">
                 {m.text}
