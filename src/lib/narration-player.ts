@@ -14,9 +14,24 @@ export interface NarrationState {
 interface NarrationOptions {
   audio: () => HTMLAudioElement | null;
   state: (state: NarrationState) => void;
+  /** Injectable so recovery deadlines can be tested without real waiting. */
+  clock?: {
+    setTimeout: (callback: () => void, delay: number) => unknown;
+    clearTimeout: (handle: unknown) => void;
+  };
   /** Return a cancellation function; handlers belong only to this attempt. */
-  speak: (text: string, handlers: { ended: () => void; failed: (reason?: string) => void }) => (() => void) | undefined;
+  speak: (text: string, handlers: {
+    started: () => void;
+    progress: (charIndex: number) => void;
+    ended: () => void;
+    failed: (reason?: string) => void;
+  }) => (() => void) | undefined;
 }
+
+const START_OR_STALL_TIMEOUT = 20_000;
+// Some voices never emit boundary events. Allow slow speech plus a generous
+// margin before treating a missing end/error event as a recoverable failure.
+const speechCompletionTimeout = (text: string) => Math.max(45_000, Array.from(text).length * 700 + 30_000);
 
 /** Preserve seq and null URLs so replay includes browser-voice fallbacks too. */
 export function rememberNarration(clips: Map<number, NarrationClip>, clip: NarrationClip): NarrationClip[] {
@@ -41,13 +56,22 @@ export function createNarrationPlayer(options: NarrationOptions) {
   let unlocked = false;
   let priming = 0;
   let lastElement: HTMLAudioElement | null = null;
+  const clock = options.clock ?? {
+    setTimeout: (callback: () => void, delay: number) => setTimeout(callback, delay),
+    clearTimeout: (handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  };
+  let watchdog: unknown;
   const element = () => {
     lastElement = options.audio() ?? lastElement;
     return lastElement;
   };
 
   const notify = (playing = false, narrating = false) => options.state({ playing, narrating, recovery });
-  const detach = () => { const cleanup = clean; clean = undefined; cleanup?.(); };
+  const clearWatchdog = () => {
+    if (watchdog !== undefined) clock.clearTimeout(watchdog);
+    watchdog = undefined;
+  };
+  const detach = () => { clearWatchdog(); const cleanup = clean; clean = undefined; cleanup?.(); };
 
   function pump() {
     const audio = element();
@@ -59,6 +83,10 @@ export function createNarrationPlayer(options: NarrationOptions) {
     const forGeneration = generation;
     const forAttempt = ++attempt;
     const current = () => generation === forGeneration && attempt === forAttempt && busy;
+    const watch = (delay: number, expired: () => void) => {
+      clearWatchdog();
+      watchdog = clock.setTimeout(() => { if (current()) expired(); }, delay);
+    };
     const fail = (reason: AudioRecovery) => {
       if (!current()) return;
       busy = false;
@@ -80,8 +108,26 @@ export function createNarrationPlayer(options: NarrationOptions) {
     notify(false, true);
 
     if (!clip.url) {
+      let started = false;
+      let lastCharIndex = 0;
+      const onStarted = () => {
+        if (!current() || started) return;
+        started = true;
+        notify(true, true);
+        watch(speechCompletionTimeout(clip.text), () => fail("error"));
+      };
       try {
+        watch(START_OR_STALL_TIMEOUT, () => fail("error"));
         const cancel = options.speak(clip.text, {
+          started: onStarted,
+          progress: (charIndex) => {
+            if (!current() || !Number.isFinite(charIndex)) return;
+            onStarted();
+            const nextCharIndex = Math.max(0, Math.min(Math.floor(charIndex), clip.text.length));
+            if (nextCharIndex <= lastCharIndex) return;
+            lastCharIndex = nextCharIndex;
+            watch(speechCompletionTimeout(clip.text.slice(lastCharIndex)), () => fail("error"));
+          },
           ended,
           failed: (reason) => fail(reason === "not-allowed" ? "blocked" : "error"),
         });
@@ -103,6 +149,26 @@ export function createNarrationPlayer(options: NarrationOptions) {
       }
       const source = loaded.source;
       const sourceMatches = () => audio.src === source && (!audio.currentSrc || audio.currentSrc === source);
+      let lastTime = audio.currentTime;
+      let started = false;
+      const armMediaWatchdog = () => watch(START_OR_STALL_TIMEOUT, () => {
+        // Check the element too: timeupdate events may be throttled while
+        // audio itself continues. A long recording has no total-time limit.
+        if (sourceMatches() && !audio.paused && audio.currentTime > lastTime + 0.01) {
+          lastTime = audio.currentTime;
+          armMediaWatchdog();
+          return;
+        }
+        fail("error");
+        // Invalidate/detach first so pause or a late play promise cannot
+        // replace the recovery state or advance this unfinished sentence.
+        audio.pause();
+      });
+      const onProgress = () => {
+        if (!current() || !sourceMatches() || audio.paused || audio.currentTime <= lastTime + 0.01) return;
+        lastTime = audio.currentTime;
+        armMediaWatchdog();
+      };
       const onEnded = () => { if (sourceMatches() && audio.ended) ended(); };
       const onError = () => { if (current() && sourceMatches() && audio.error) { loaded = undefined; fail("error"); } };
       const onPause = () => {
@@ -110,23 +176,30 @@ export function createNarrationPlayer(options: NarrationOptions) {
         if (audio.error) loaded = undefined;
         fail(audio.error ? "error" : "paused");
       };
-      const onPlaying = () => { if (current() && sourceMatches() && !audio.paused) notify(true, true); };
+      const onPlaying = () => {
+        if (!current() || !sourceMatches() || audio.paused) return;
+        if (!started) { started = true; armMediaWatchdog(); }
+        notify(true, true);
+      };
       audio.addEventListener("ended", onEnded);
       audio.addEventListener("error", onError);
       audio.addEventListener("pause", onPause);
       audio.addEventListener("playing", onPlaying);
+      audio.addEventListener("timeupdate", onProgress);
       clean = () => {
         audio.removeEventListener("ended", onEnded);
         audio.removeEventListener("error", onError);
         audio.removeEventListener("pause", onPause);
         audio.removeEventListener("playing", onPlaying);
+        audio.removeEventListener("timeupdate", onProgress);
       };
+      armMediaWatchdog();
       // Keep this call in the button/event stack; do not await anything first.
-      const started = audio.play();
-      Promise.resolve(started).then(() => {
+      const playback = audio.play();
+      Promise.resolve(playback).then(() => {
         if (!current() || !sourceMatches()) return;
         unlocked = true;
-        if (!audio.paused) notify(true, true);
+        onPlaying();
       }).catch((error: unknown) => {
         if (!current()) return;
         const name = error && typeof error === "object" && "name" in error ? error.name : "";
