@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { isAdmin } from "@/lib/auth";
 import { deletePerson, getPerson, updatePerson, storageWritable } from "@/lib/store";
 import { parsePersonInput } from "@/lib/validate";
+import { readinessForPerson } from "@/lib/readiness";
 import type { Person } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -44,6 +45,21 @@ export async function PUT(
   const writable = storageWritable();
   if (!writable.ok) {
     return NextResponse.json({ error: writable.reason }, { status: 503 });
+  }
+
+  if (patch.status === "approved") {
+    const current = await getPerson(params.id);
+    if (!current) return NextResponse.json({ error: "not found" }, { status: 404 });
+    const readiness = readinessForPerson({ ...current, ...patch });
+    if (!readiness.publishable) {
+      return NextResponse.json(
+        {
+          error: `发布前必须补齐：${readiness.blockers.map((item) => item.label).join("、")}`,
+          readiness,
+        },
+        { status: 409 }
+      );
+    }
   }
 
   try {

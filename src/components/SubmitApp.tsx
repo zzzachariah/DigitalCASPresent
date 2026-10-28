@@ -6,8 +6,7 @@ import { readJson } from "@/lib/http";
 import { studentApi, type StudentTokens } from "@/lib/editor-api";
 import SubmitWizard, { readStoredDraft } from "./SubmitWizard";
 import DraftPreview, { type Draft } from "./DraftPreview";
-import QrCodePanel from "./QrCodePanel";
-import { IconArrowRight, IconCheck, IconCopy, IconEdit, IconExternal, IconLink } from "./icons";
+import { IconArrowRight, IconCheck, IconCopy, IconEdit, IconExternal, IconLink, IconQr } from "./icons";
 
 // ─────────────────────────────────────────────────────────────────────
 // Student self-submission flow:
@@ -59,9 +58,10 @@ function baseUrl(): string {
 
 const STEPS: [string, string, string][] = [
   ["01", "上传照片", "一张清晰的正脸照片，JPG 或 PNG。"],
-  ["02", "放入讲稿", "粘贴文字，或上传 PDF / Word / txt 自动提取。"],
-  ["03", "AI 分段", "自动分成引入、每个物品、结论几个部分，可以手动调整。"],
-  ["04", "提交审核", "保存好你的专属修改链接；老师审核通过后页面上线。"],
+  ["02", "填写信息", "姓名、班级或小组、声音和回答语言。"],
+  ["03", "放入讲稿", "粘贴文字，或上传 PDF / Word / txt 自动提取。"],
+  ["04", "AI 分段", "自动分成引入、每个物品、结论几个部分，可以手动调整。"],
+  ["05", "提交审核", "保存好专属修改链接；二维码由老师审核后统一发放。"],
 ];
 
 export default function SubmitApp({ id, token }: { id?: string; token?: string }) {
@@ -239,23 +239,22 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
               {stage.justSubmitted ? "已提交，等待老师审核" : approved ? "我的数字人已发布" : "我的提交 · 等待审核"}
             </h1>
             <p className="mt-2 text-[15px] text-ink-2">
-              {p.name} · {p.sections.length} 个部分{p.photoUrl ? "" : " · 还没有照片"}。
-              {approved && !stage.justSubmitted ? "访客扫你的二维码就能看到。修改并重新提交后会暂时下线，等老师再次审核。" : "老师通过后，你的二维码页面就会对访客开放。"}
+              {p.name}{p.cohort ? ` · ${p.cohort}` : ""} · {p.sections.length} 个部分{p.photoUrl ? "" : " · 还没有照片"}。
+              {approved && !stage.justSubmitted ? "审核已经通过；访客二维码由老师统一发放。修改并重新提交后会暂时下线，等老师再次审核。" : "老师通过并完成现场准备后，会统一发放二维码。"}
             </p>
           </div>
 
           <div className="card p-5" style={{ ["--i" as string]: 1 }}>
-            <p className="text-[15px] font-semibold">你的展览二维码 · Visitor QR code</p>
-            <p className="mt-1 text-[13px] leading-relaxed text-ink-3">
-              {approved
-                ? "这是给访客扫描的二维码，可以下载、打印或分享。"
-                : "这里会自动生成你的二维码，可下载保存。审核通过前，访客扫码只会看到待审核提示；老师发布后，同一个二维码即可使用。"}
-              <br />
-              {approved
-                ? "Download, print or share this code with visitors."
-                : "Save this code now. Visitors can open your guide only after teacher approval; the QR code stays the same."}
-            </p>
-            <div className="mt-4"><QrCodePanel link={visitorLink} downloadName={`qr-${p.slug}`} /></div>
+            <div className="flex items-start gap-3">
+              <span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-accent-soft text-accent"><IconQr size={19} /></span>
+              <div>
+                <p className="text-[15px] font-semibold">二维码由老师统一发放</p>
+                <p className="mt-1 text-[13px] leading-relaxed text-ink-3">
+                  系统已经保留你的固定访客地址。老师会完成审核和现场检查，再统一打印或发送二维码；你不需要自己下载。
+                  <br />Your teacher will review, test and distribute the final visitor QR code.
+                </p>
+              </div>
+            </div>
           </div>
 
           <div className="card p-5" style={{ ["--i" as string]: 2 }}>
@@ -314,7 +313,7 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
             TOK 展览讲稿
           </h1>
           <p className="mt-5 max-w-md text-[16px] leading-relaxed text-ink-2" style={{ ["--i" as string]: 2 }}>
-            提交后，系统会为你生成一个“数字人”：访客扫你的专属二维码，就能听你讲解自己的展览，还可以追问。
+            提交后，系统会为你生成一个“数字人”：老师审核并统一发放二维码后，访客扫码就能听你讲解自己的展览，还可以追问。
           </p>
           <p className="mt-2 max-w-md text-[13px] leading-relaxed text-ink-3" style={{ ["--i" as string]: 3 }}>
             Upload a photo and your script; visitors will scan your code, hear your talk part by part, and ask questions.

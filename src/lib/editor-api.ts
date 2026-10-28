@@ -9,6 +9,7 @@ import { readJson } from "./http";
 
 export interface SavePayload {
   name: string;
+  cohort?: string;
   subtitle: string;
   gender: "" | "male" | "female";
   language: Person["language"];

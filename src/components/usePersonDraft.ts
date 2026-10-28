@@ -54,6 +54,7 @@ export function usePersonDraft({
   const addedIdRef = useRef<string | null>(null);
 
   const [name, setName] = useState(person?.name ?? "");
+  const [cohort, setCohort] = useState(person?.cohort ?? "");
   const [subtitle, setSubtitle] = useState(person?.subtitle ?? "");
   const [gender, setGender] = useState<"" | "male" | "female">(person?.gender ?? "");
   const [language, setLanguage] = useState<Person["language"]>(person?.language ?? "auto");
@@ -281,7 +282,7 @@ export function usePersonDraft({
     }
     setSaving(true);
     try {
-      const payload: SavePayload = { name, subtitle, gender, language, script, sections };
+      const payload: SavePayload = { name, cohort, subtitle, gender, language, script, sections };
       if (admin) {
         if (cartoonUrl) payload.cartoonUrl = cartoonUrl;
         if (loopVideoUrl) payload.loopVideoUrl = loopVideoUrl;
@@ -314,7 +315,7 @@ export function usePersonDraft({
     } finally {
       setSaving(false);
     }
-  }, [admin, api, cartoonUrl, existing, fail, gender, language, loopVideoUrl, name, onCreated, photoFile, script, sections, subtitle]);
+  }, [admin, api, cartoonUrl, cohort, existing, fail, gender, language, loopVideoUrl, name, onCreated, photoFile, script, sections, subtitle]);
 
   const draft = useMemo<Draft>(() => ({ name, subtitle, photo: photoPreview, sections }), [name, subtitle, photoPreview, sections]);
 
@@ -325,6 +326,7 @@ export function usePersonDraft({
     if (!base) return !!(name.trim() || subtitle.trim() || script.trim() || sections.length);
     const same =
       name === base.name &&
+      cohort === (base.cohort || "") &&
       (subtitle || "") === (base.subtitle || "") &&
       (gender || "") === (base.gender || "") &&
       language === base.language &&
@@ -332,7 +334,7 @@ export function usePersonDraft({
       JSON.stringify(sections.map((s) => [s.id, s.title, s.hint || "", s.content])) ===
         JSON.stringify(base.sections.map((s) => [s.id, s.title, s.hint || "", s.content]));
     return !same;
-  }, [gender, language, name, person, photoFile, script, sections, subtitle]);
+  }, [cohort, gender, language, name, person, photoFile, script, sections, subtitle]);
 
   return {
     existing,
@@ -342,6 +344,7 @@ export function usePersonDraft({
     lastAddedId: addedIdRef,
     adoptCreated,
     name, setName,
+    cohort, setCohort,
     subtitle, setSubtitle,
     gender, setGender,
     language, setLanguage,

@@ -230,6 +230,10 @@ export default function PersonEditor({
             <input id="pe-name" className="input" value={d.name} onChange={(e) => d.setName(e.target.value)} placeholder="例如：李雷 / Li Lei" maxLength={60} />
           </div>
           <div>
+            <label className="label" htmlFor="pe-cohort">班级 / 小组 · Class / group <span className="text-ink-4">可选</span></label>
+            <input id="pe-cohort" className="input" value={d.cohort} onChange={(e) => d.setCohort(e.target.value)} placeholder="例如：G11-2 / Group B" maxLength={80} />
+          </div>
+          <div className="sm:col-span-2">
             <label className="label" htmlFor="pe-sub">副标题 · Subtitle <span className="text-ink-4">可选</span></label>
             <input id="pe-sub" className="input" value={d.subtitle} onChange={(e) => d.setSubtitle(e.target.value)} placeholder="例如：Why do we seek knowledge?" maxLength={140} />
           </div>

@@ -42,6 +42,7 @@ const LAST = STEPS.length - 1;
 export const DRAFT_KEY = "dcp_submit_draft";
 interface StoredDraft {
   name: string;
+  cohort: string;
   subtitle: string;
   gender: "" | "male" | "female";
   language: Person["language"];
@@ -130,6 +131,7 @@ export default function SubmitWizard({
     const dr = readStoredDraft();
     if (dr) {
       d.setName(dr.name || "");
+      d.setCohort(dr.cohort || "");
       d.setSubtitle(dr.subtitle || "");
       d.setGender(dr.gender || "");
       d.setLanguage(dr.language || "auto");
@@ -144,6 +146,7 @@ export default function SubmitWizard({
           id: dr.createdId,
           slug: "",
           name: dr.name || "",
+          cohort: dr.cohort || undefined,
           subtitle: dr.subtitle,
           script: dr.script || "",
           sections: Array.isArray(dr.sections) ? dr.sections : [],
@@ -172,6 +175,7 @@ export default function SubmitWizard({
         if (!hasContent) return;
         const stored: StoredDraft = {
           name: d.name,
+          cohort: d.cohort,
           subtitle: d.subtitle,
           gender: d.gender,
           language: d.language,
@@ -190,7 +194,7 @@ export default function SubmitWizard({
       }
     }, 400);
     return () => clearTimeout(t);
-  }, [person, d.name, d.subtitle, d.gender, d.language, d.script, d.sections, step, reached, d.existing, tokens]);
+  }, [person, d.name, d.cohort, d.subtitle, d.gender, d.language, d.script, d.sections, step, reached, d.existing, tokens]);
 
   // Warn before the tab is closed with unsaved changes.
   useEffect(() => {
@@ -203,7 +207,7 @@ export default function SubmitWizard({
     return () => window.removeEventListener("beforeunload", h);
   }, [d.dirty]);
 
-  const hasContent = !!(d.name.trim() || d.script.trim() || d.sections.length || d.photoPreview);
+  const hasContent = !!(d.name.trim() || d.cohort.trim() || d.script.trim() || d.sections.length || d.photoPreview);
   function cancel() {
     if (person) {
       if (d.dirty && !confirm("放弃这次的修改？\nDiscard your changes?")) return;
@@ -225,6 +229,7 @@ export default function SubmitWizard({
     if (!confirm("清空草稿，从头开始？ / Clear the draft and start over?")) return;
     clearStoredDraft();
     d.setName("");
+    d.setCohort("");
     d.setSubtitle("");
     d.setGender("");
     d.setLanguage("auto");
@@ -454,6 +459,10 @@ export default function SubmitWizard({
               />
             </div>
             <div>
+              <label className="label" htmlFor="sw-cohort">班级 / 小组 · Class / group <span className="font-normal text-ink-3">可选</span></label>
+              <input id="sw-cohort" className="input" value={d.cohort} onChange={(e) => d.setCohort(e.target.value)} placeholder="例如：G11-2 / Group B" maxLength={80} />
+            </div>
+            <div>
               <label className="label" htmlFor="sw-sub">副标题 · Subtitle <span className="font-normal text-ink-3">可选，通常写你的知识问题</span></label>
               <input id="sw-sub" className="input" value={d.subtitle} onChange={(e) => d.setSubtitle(e.target.value)} placeholder="例如：Why do we seek knowledge?" maxLength={140} />
             </div>
@@ -613,6 +622,7 @@ export default function SubmitWizard({
                 [
                   ["照片 · Photo", d.photoPreview ? "已上传" : "未上传（可稍后补）", 0, !!d.photoPreview],
                   ["姓名 · Name", d.name.trim() || "—", 1, !!d.name.trim()],
+                  ["班级 / 小组 · Class / group", d.cohort.trim() || "未填写", 1, true],
                   ["副标题 · Subtitle", d.subtitle.trim() || "未填写", 1, true],
                   ["讲稿 · Script", d.script.trim() ? `${d.script.trim().length} 字` : "—", 2, !!d.script.trim()],
                 ] as [string, string, number, boolean][]

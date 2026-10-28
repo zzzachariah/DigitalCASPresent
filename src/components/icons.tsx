@@ -43,6 +43,9 @@ export const IconPlus = (p: P) => (
 export const IconQr = (p: P) => (
   <Base {...p}><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><path d="M14 14h3v3" /><path d="M21 14v3" /><path d="M14 21h3" /><path d="M21 21h-1" /></Base>
 );
+export const IconPrint = (p: P) => (
+  <Base {...p}><path d="M7 9V3h10v6" /><path d="M7 18H5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" /><rect x="7" y="14" width="10" height="7" rx="1" /><path d="M17 12h.01" /></Base>
+);
 export const IconEdit = (p: P) => (
   <Base {...p}><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></Base>
 );
