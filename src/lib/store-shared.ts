@@ -66,6 +66,7 @@ export function buildPerson(input: CreatePersonInput, slug: string): Person {
     id: newId(),
     slug,
     name: input.name,
+    cohort: input.cohort,
     subtitle: input.subtitle,
     gender: input.gender,
     script: input.script,

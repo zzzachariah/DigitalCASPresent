@@ -29,7 +29,7 @@ export async function POST(req: NextRequest) {
     const person = await createPerson({
       ...(parsed.value as PersonInput),
       source: "admin",
-      status: "approved",
+      status: "pending",
     });
     return NextResponse.json({ person });
   } catch (err) {

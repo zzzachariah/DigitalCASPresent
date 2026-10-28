@@ -2,7 +2,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import dynamic from "next/dynamic";
 import type { Person } from "@/lib/types";
+import { readinessForPerson } from "@/lib/readiness";
 import { readJson } from "@/lib/http";
 import { generateAsset } from "@/lib/editor-api";
 import { pad2, timeAgo } from "@/lib/format";
@@ -25,6 +27,7 @@ import {
   IconLink,
   IconLogout,
   IconPlus,
+  IconPrint,
   IconQr,
   IconRefresh,
   IconSearch,
@@ -33,26 +36,17 @@ import {
   IconWarning,
 } from "./icons";
 
+const QrBatchPanel = dynamic(() => import("./QrBatchPanel"), { ssr: false });
+
 type View = { kind: "list" } | { kind: "new" } | { kind: "edit"; person: Person };
 type Qr = { title: string; subtitle?: string; link: string; downloadName: string } | null;
-type Filter = "all" | "pending" | "published";
+type Filter = "all" | "pending" | "needs_work" | "ready" | "published";
 
 function baseUrl(): string {
   return (
     process.env.NEXT_PUBLIC_BASE_URL?.replace(/\/$/, "") ||
     (typeof window !== "undefined" ? window.location.origin : "")
   );
-}
-
-function assetSummary(p: Person): string[] {
-  const out: string[] = [];
-  out.push(p.photoUrl ? "照片" : "无照片");
-  if (p.cartoonUrl) out.push("卡通");
-  if (p.loopVideoUrl) out.push("视频");
-  const pre = p.sections.filter((s) => s.cachedAnswers && Object.keys(s.cachedAnswers).length > 0).length;
-  const audio = p.sections.filter((s) => s.cachedAudio && Object.keys(s.cachedAudio).length > 0).length;
-  if (pre > 0) out.push(`预生成 ${pre}/${p.sections.length}${audio > 0 ? ` · 语音 ${audio}` : ""}`);
-  return out;
 }
 
 export default function AdminApp() {
@@ -62,6 +56,7 @@ export default function AdminApp() {
   const [error, setError] = useState("");
   const [view, setView] = useState<View>({ kind: "list" });
   const [qr, setQr] = useState<Qr>(null);
+  const [qrPackOpen, setQrPackOpen] = useState(false);
   const [copied, setCopied] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [pregenId, setPregenId] = useState<string | null>(null);
@@ -136,6 +131,15 @@ export default function AdminApp() {
   }
 
   async function setStatus(p: Person, status: "approved" | "pending") {
+    if (status === "approved") {
+      const readiness = readinessForPerson(p);
+      if (!readiness.publishable) {
+        setSelectedId(p.id);
+        setError(`发布前必须补齐：${readiness.blockers.map((item) => item.label).join("、")}`);
+        return;
+      }
+      if (readiness.warnings.length && !confirm(`还有 ${readiness.warnings.map((item) => item.label).join("、")} 未完成。\n\n仍然发布？访客页面可以使用，但会采用静态或现场生成的备用方案。`)) return;
+    }
     setBusyId(p.id);
     setError("");
     try {
@@ -267,22 +271,32 @@ export default function AdminApp() {
     );
     setSelectedId(saved.id);
     setView({ kind: "list" });
-    if (isNew) openQrFor(saved);
+    if (isNew) notify(`已创建：${saved.name}。完成现场准备并发布后再统一发放二维码。`);
   }
 
   const base = baseUrl();
   const submitLink = `${base}/submit`;
   const pendingCount = people.filter((p) => p.status === "pending").length;
+  const readyCount = people.filter((p) => readinessForPerson(p).ready).length;
+  const needsWorkCount = people.filter((p) => !readinessForPerson(p).ready).length;
+  const publishedCount = people.filter((p) => p.status !== "pending").length;
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return people
-      .filter((p) => (filter === "pending" ? p.status === "pending" : filter === "published" ? p.status !== "pending" : true))
-      .filter((p) => !q || p.name.toLowerCase().includes(q) || p.slug.includes(q) || (p.subtitle || "").toLowerCase().includes(q))
+      .filter((p) => {
+        if (filter === "pending") return p.status === "pending";
+        if (filter === "published") return p.status !== "pending";
+        if (filter === "ready") return readinessForPerson(p).ready;
+        if (filter === "needs_work") return !readinessForPerson(p).ready;
+        return true;
+      })
+      .filter((p) => !q || p.name.toLowerCase().includes(q) || p.slug.includes(q) || (p.cohort || "").toLowerCase().includes(q) || (p.subtitle || "").toLowerCase().includes(q))
       .sort((a, b) => Number(b.status === "pending") - Number(a.status === "pending") || a.createdAt - b.createdAt);
   }, [people, filter, query]);
 
   const selected = people.find((p) => p.id === selectedId) || null;
+  const selectedReadiness = selected ? readinessForPerson(selected) : null;
 
   function editLink(p: Person): string | null {
     return p.editToken ? `${base}/submit/${p.id}?token=${encodeURIComponent(p.editToken)}` : null;
@@ -344,6 +358,7 @@ export default function AdminApp() {
           <p className="mt-1 flex flex-wrap items-center gap-2 text-[12px] text-ink-3">
             {statusBadge(selected)}
             {selected.source === "student" && <span className="badge-student">学生提交</span>}
+            {selected.cohort && <span>{selected.cohort}</span>}
             <span>{selected.submittedAt ? `提交于 ${timeAgo(selected.submittedAt)}` : `更新于 ${timeAgo(selected.updatedAt)}`}</span>
           </p>
         </div>
@@ -386,11 +401,11 @@ export default function AdminApp() {
         ) : null}
         <div className="grid grid-cols-2 gap-2">
           <a href={`${base}/p/${selected.slug}`} target="_blank" rel="noreferrer" className="btn-secondary"><IconExternal size={15} /> 预览页面</a>
-          <button type="button" className="btn-secondary" onClick={() => openQrFor(selected)}><IconQr size={15} /> 二维码</button>
+          <button type="button" className="btn-secondary" onClick={() => openQrFor(selected)} disabled={selected.status === "pending"} title={selected.status === "pending" ? "发布后才可发放访客二维码" : "查看访客二维码"}><IconQr size={15} /> 二维码</button>
           <button type="button" className="btn-secondary" onClick={() => setView({ kind: "edit", person: selected })}><IconEdit size={15} /> 编辑</button>
           {editLink(selected) ? (
             <button type="button" className="btn-secondary" onClick={() => copy(editLink(selected)!, selected.id)}>
-              {copied === selected.id ? <IconCheck size={15} /> : <IconLink size={15} />} {copied === selected.id ? "已复制" : "学生链接"}
+              {copied === selected.id ? <IconCheck size={15} /> : <IconLink size={15} />} {copied === selected.id ? "已复制" : "复制修改链接"}
             </button>
           ) : (
             <button type="button" className="btn-secondary" onClick={() => copy(`${base}/p/${selected.slug}`, selected.id)}>
@@ -398,7 +413,40 @@ export default function AdminApp() {
             </button>
           )}
         </div>
+        {editLink(selected) && <p className="text-[11px] leading-relaxed text-ink-3">修改链接是私密的；同学需要补资料时，由老师重新发给本人。</p>}
       </div>
+
+      {selectedReadiness && (
+        <div className="rounded-lg border border-line bg-surface p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <span className="eyebrow">现场准备 · Readiness</span>
+              <p className="mt-1 text-[13px] font-medium text-ink-2">
+                {selectedReadiness.ready ? "全部就绪" : `${selectedReadiness.done}/${selectedReadiness.total} 项完成`}
+              </p>
+            </div>
+            <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${selectedReadiness.ready ? "bg-success-soft text-success" : selectedReadiness.publishable ? "bg-warning-soft text-warning-ink" : "bg-danger-soft text-danger"}`}>
+              {selectedReadiness.ready ? "可发放" : selectedReadiness.publishable ? "可备用发布" : "不可发布"}
+            </span>
+          </div>
+          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-surface-2">
+            <div className={`h-full rounded-full transition-[width] ${selectedReadiness.ready ? "bg-success" : selectedReadiness.publishable ? "bg-warning" : "bg-danger"}`} style={{ width: `${selectedReadiness.percent}%` }} />
+          </div>
+          <ul className="mt-3 grid gap-1.5">
+            {selectedReadiness.items.map((item) => (
+              <li key={item.key} className="flex items-start gap-2 text-[12px]">
+                <span className={`mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full ${item.ready ? "bg-success-soft text-success" : item.required ? "bg-danger-soft text-danger" : "bg-warning-soft text-warning-ink"}`}>
+                  {item.ready ? <IconCheck size={11} /> : <IconWarning size={10} />}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="font-medium text-ink-2">{item.label}</span>
+                  {!item.ready && <span className="ml-1 text-ink-3">· {item.detail}</span>}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Assets: what the digital human needs before the event */}
       <div className="rounded-lg border border-line bg-surface-2/60 p-3">
@@ -472,8 +520,17 @@ export default function AdminApp() {
         <IconInbox size={16} /> 待审核
         {pendingCount > 0 && <span className="ml-auto rounded-full bg-warning px-1.5 font-mono text-[10px] font-medium text-bg">{pendingCount}</span>}
       </button>
+      <button type="button" onClick={() => setFilter("needs_work")} className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] transition-colors ${filter === "needs_work" ? "bg-surface font-medium text-ink shadow-1" : "text-ink-2 hover:bg-surface"}`}>
+        <IconWarning size={16} /> 待准备 <span className="ml-auto font-mono text-[11px] text-ink-3">{needsWorkCount}</span>
+      </button>
+      <button type="button" onClick={() => setFilter("ready")} className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] transition-colors ${filter === "ready" ? "bg-surface font-medium text-ink shadow-1" : "text-ink-2 hover:bg-surface"}`}>
+        <IconCheck size={16} /> 已就绪 <span className="ml-auto font-mono text-[11px] text-ink-3">{readyCount}</span>
+      </button>
       <button type="button" onClick={openSubmitQr} className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] text-ink-2 transition-colors hover:bg-surface">
         <IconQr size={16} /> 学生提交入口
+      </button>
+      <button type="button" onClick={() => setQrPackOpen(true)} className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] text-ink-2 transition-colors hover:bg-surface" disabled={publishedCount === 0}>
+        <IconPrint size={16} /> 统一二维码包 <span className="ml-auto font-mono text-[11px] text-ink-3">{publishedCount}</span>
       </button>
     </>
   );
@@ -503,6 +560,7 @@ export default function AdminApp() {
           </div>
           <div className="flex items-center gap-1">
             <button type="button" onClick={openSubmitQr} className="btn-icon" title="学生提交入口" aria-label="学生提交入口"><IconQr size={18} /></button>
+            <button type="button" onClick={() => setQrPackOpen(true)} className="btn-icon" title="统一二维码打印包" aria-label="统一二维码打印包" disabled={publishedCount === 0}><IconPrint size={18} /></button>
             <button type="button" onClick={load} className="btn-icon" title="刷新" aria-label="刷新"><IconRefresh size={18} /></button>
             <button type="button" onClick={logout} className="btn-icon" title="退出" aria-label="退出"><IconLogout size={18} /></button>
           </div>
@@ -520,14 +578,16 @@ export default function AdminApp() {
         <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center">
           <label className="relative flex-1 lg:max-w-xs">
             <IconSearch size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-4" />
-            <input className="input py-2 pl-9 text-[14px]" placeholder="搜索姓名或链接…" value={query} onChange={(e) => setQuery(e.target.value)} />
+            <input className="input py-2 pl-9 text-[14px]" placeholder="搜索姓名、班级或链接…" value={query} onChange={(e) => setQuery(e.target.value)} />
           </label>
           <div className="flex items-center gap-2 overflow-x-auto [scrollbar-width:none]">
             {(
               [
                 ["all", `全部 ${people.length}`],
                 ["pending", `待审核 ${pendingCount}`],
-                ["published", `已发布 ${people.length - pendingCount}`],
+                ["needs_work", `待准备 ${needsWorkCount}`],
+                ["ready", `已就绪 ${readyCount}`],
+                ["published", `已发布 ${publishedCount}`],
               ] as [Filter, string][]
             ).map(([k, label]) => (
               <button
@@ -540,7 +600,10 @@ export default function AdminApp() {
               </button>
             ))}
           </div>
-          <button type="button" className="btn-primary lg:ml-auto" onClick={() => setView({ kind: "new" })}>
+          <button type="button" className="btn-secondary lg:ml-auto" onClick={() => setQrPackOpen(true)} disabled={publishedCount === 0}>
+            <IconPrint size={16} /> 二维码打印包
+          </button>
+          <button type="button" className="btn-primary" onClick={() => setView({ kind: "new" })}>
             <IconPlus size={16} /> 新增同学
           </button>
         </div>
@@ -565,12 +628,13 @@ export default function AdminApp() {
               <span className="eyebrow">姓名</span>
               <span className="eyebrow">部分</span>
               <span className="eyebrow">状态</span>
-              <span className="eyebrow">素材</span>
+              <span className="eyebrow">现场准备</span>
               <span />
             </div>
             <ul className="stagger divide-y divide-line">
               {filtered.map((p, i) => {
                 const isSel = p.id === selectedId;
+                const readiness = readinessForPerson(p);
                 return (
                   <li
                     key={p.id}
@@ -587,7 +651,7 @@ export default function AdminApp() {
                         {p.source === "student" && <span className="badge-student hidden shrink-0 lg:inline-flex">学生提交</span>}
                       </p>
                       <p className="truncate font-mono text-[11px] text-ink-3">
-                        /p/{p.slug}
+                        {p.cohort ? `${p.cohort} · ` : ""}/p/{p.slug}
                         <span className="lg:hidden"> · {p.sections.length} 部分</span>
                         <span> · {timeAgo(p.updatedAt)}</span>
                       </p>
@@ -595,12 +659,26 @@ export default function AdminApp() {
                     </div>
                     <span className="hidden text-[13px] text-ink-2 lg:block">{p.sections.length}</span>
                     <span className="hidden lg:block">{statusBadge(p)}</span>
-                    <span className={`hidden truncate text-[12px] lg:block ${jobs[p.id] ? "text-accent" : "text-ink-3"}`}>{jobs[p.id] || assetSummary(p).join(" · ")}</span>
+                    <div className="hidden min-w-0 lg:block" title={readiness.items.filter((item) => !item.ready).map((item) => item.label).join("、") || "全部就绪"}>
+                      {jobs[p.id] ? (
+                        <span className="truncate text-[12px] text-accent">{jobs[p.id]}</span>
+                      ) : (
+                        <>
+                          <div className="flex items-center justify-between gap-2 text-[11px]">
+                            <span className={readiness.ready ? "text-success" : readiness.publishable ? "text-warning-ink" : "text-danger"}>{readiness.ready ? "已就绪" : readiness.publishable ? "可备用发布" : "待补必需资料"}</span>
+                            <span className="font-mono text-ink-3">{readiness.done}/{readiness.total}</span>
+                          </div>
+                          <div className="mt-1 h-1 overflow-hidden rounded-full bg-surface-2">
+                            <div className={`h-full rounded-full ${readiness.ready ? "bg-success" : readiness.publishable ? "bg-warning" : "bg-danger"}`} style={{ width: `${readiness.percent}%` }} />
+                          </div>
+                        </>
+                      )}
+                    </div>
                     <div className="flex items-center justify-end gap-0.5" onClick={(e) => e.stopPropagation()}>
                       {p.status === "pending" && (
                         <button type="button" onClick={() => setStatus(p, "approved")} disabled={busyId === p.id} className="btn-primary mr-1 px-2.5 py-1.5 text-[12px]">通过</button>
                       )}
-                      <button type="button" onClick={() => openQrFor(p)} className="btn-icon hidden lg:inline-flex" title="二维码" aria-label="二维码"><IconQr size={16} /></button>
+                      <button type="button" onClick={() => openQrFor(p)} className="btn-icon hidden lg:inline-flex" title={p.status === "pending" ? "发布后才可发放二维码" : "二维码"} aria-label="二维码" disabled={p.status === "pending"}><IconQr size={16} /></button>
                       <button type="button" onClick={() => setView({ kind: "edit", person: p })} className="btn-icon" title="编辑" aria-label="编辑"><IconEdit size={16} /></button>
                       <button type="button" onClick={() => remove(p)} disabled={busyId === p.id} className="btn-icon hidden hover:!bg-danger-soft hover:!text-danger lg:inline-flex" title="删除" aria-label="删除"><IconTrash size={16} /></button>
                     </div>
@@ -634,6 +712,7 @@ export default function AdminApp() {
       )}
 
       {qr && <QrModal {...qr} onClose={() => setQr(null)} />}
+      {qrPackOpen && <QrBatchPanel people={people} base={base} onClose={() => setQrPackOpen(false)} />}
       {toast && (
         <div className="pointer-events-none fixed inset-x-0 bottom-6 z-50 flex justify-center px-4">
           <div className="card flex items-center gap-2 px-4 py-2.5 text-[13px] shadow-2 animate-rise">

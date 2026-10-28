@@ -218,6 +218,31 @@
   animation: draw 0.5s var(--ease) 0.3s forwards;
 }
 
+/* Batch visitor QR pack: the screen is an operational preview; print is a
+   clean A4 handout with eight stable cards per page. */
+@media print {
+  @page { size: A4 portrait; margin: 10mm; }
+  body { background: #fff !important; color: #15181c !important; }
+  body * { visibility: hidden !important; }
+  .qr-pack-print,
+  .qr-pack-print * { visibility: visible !important; }
+  .qr-pack-print { position: absolute; inset: 0; width: 100%; }
+  .qr-pack-heading { display: block !important; margin-bottom: 7mm; }
+  .qr-pack-heading h1 { font-size: 16pt; font-weight: 700; }
+  .qr-pack-heading p { margin-top: 1mm; color: #6a7280; font-size: 9pt; }
+  .qr-pack-grid { display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 5mm !important; }
+  .qr-pack-card {
+    min-height: 56mm;
+    break-inside: avoid;
+    border: 0.3mm solid #d7dbe0 !important;
+    border-radius: 3mm !important;
+    background: #fff !important;
+    box-shadow: none !important;
+  }
+  .qr-pack-card * { color: #15181c !important; }
+  .no-print { display: none !important; }
+}
+
 /* ─────────────────────────────────────────────────────────────────────
    Visitor page shell — one DOM, two layouts. Phone: one reading area,
    a compact player and a composer inside the actual visible viewport.

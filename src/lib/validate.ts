@@ -9,6 +9,7 @@ import type { AnswerLang, PersonInput, PersonLanguage, Section } from "./types";
 
 export const LIMITS = {
   name: 60,
+  cohort: 80,
   subtitle: 140,
   script: 40_000,
   sections: 12,
@@ -96,6 +97,11 @@ export function parsePersonInput(
     const subtitle = (str(b.subtitle) || "").trim();
     if (subtitle.length > LIMITS.subtitle) return { ok: false, error: "副标题过长 / Subtitle too long" };
     out.subtitle = subtitle || undefined;
+  }
+  if (b.cohort !== undefined) {
+    const cohort = (str(b.cohort) || "").trim();
+    if (cohort.length > LIMITS.cohort) return { ok: false, error: "班级 / 小组过长 · Class / group is too long" };
+    out.cohort = cohort || undefined;
   }
   if (b.gender !== undefined) {
     out.gender = b.gender === "male" || b.gender === "female" ? b.gender : undefined;

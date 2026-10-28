@@ -33,6 +33,9 @@ export interface Person {
   /** Short, URL-safe public slug used in the QR link (/p/<slug>). */
   slug: string;
   name: string;
+  /** Optional class, cohort or exhibition group used by teachers for sorting
+   *  and QR-code distribution. Never shown on the public visitor page. */
+  cohort?: string;
   /** Optional subtitle, e.g. "IBDP TOK Exhibition · Theme: Knowledge & Technology". */
   subtitle?: string;
   /** Stored photo URL (served from /api/photo/<id> or a blob URL). */
@@ -50,9 +53,8 @@ export interface Person {
   sections: Section[];
   /** Preferred default answer language: "auto" follows the visitor. */
   language: PersonLanguage;
-  /** Admin-created people are approved immediately; student self-submissions
-   *  start "pending" until an admin approves. Missing = approved (records that
-   *  predate this field). */
+  /** New records start pending until an admin verifies event readiness and
+   *  publishes them. Missing = approved (records that predate this field). */
   status?: PersonStatus;
   source?: PersonSource;
   /** Secret that lets the submitting student view/edit their own record and
@@ -67,7 +69,7 @@ export interface Person {
 /** The fields a client is allowed to set when creating / editing a person. */
 export type PersonInput = Pick<
   Person,
-  "name" | "subtitle" | "gender" | "script" | "sections" | "language"
+  "name" | "cohort" | "subtitle" | "gender" | "script" | "sections" | "language"
 >;
 
 /** Public-facing shape (never leaks the full script to the browser wholesale
