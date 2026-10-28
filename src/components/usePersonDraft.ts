@@ -272,6 +272,10 @@ export function usePersonDraft({
    *  null after setting `error`. */
   const save = useCallback(async (): Promise<Person | null> => {
     setError("");
+    if (!photoPreview) {
+      setError("请先上传一张清晰的正脸照片 · Photo is required");
+      return null;
+    }
     if (!name.trim()) {
       setError("请填写姓名 · Name is required");
       return null;
@@ -315,7 +319,7 @@ export function usePersonDraft({
     } finally {
       setSaving(false);
     }
-  }, [admin, api, cartoonUrl, cohort, existing, fail, gender, language, loopVideoUrl, name, onCreated, photoFile, script, sections, subtitle]);
+  }, [admin, api, cartoonUrl, cohort, existing, fail, gender, language, loopVideoUrl, name, onCreated, photoFile, photoPreview, script, sections, subtitle]);
 
   const draft = useMemo<Draft>(() => ({ name, subtitle, photo: photoPreview, sections }), [name, subtitle, photoPreview, sections]);
 

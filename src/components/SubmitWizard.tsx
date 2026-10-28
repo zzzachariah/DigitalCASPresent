@@ -157,9 +157,11 @@ export default function SubmitWizard({
           updatedAt: dr.at,
         });
       }
-      const st = Math.min(Math.max(0, dr.step || 0), LAST);
-      setStep(st);
-      setReached(Math.min(Math.max(st, dr.reached || 0), LAST));
+      // The browser cannot retain the photo file across a reload. Because a
+      // photo is required, always return a restored draft to step one instead
+      // of leaving it on a later page that it can no longer complete.
+      setStep(0);
+      setReached(Math.min(Math.max(0, dr.reached || 0), LAST));
       setRestored(true);
     }
     hydratedRef.current = true;
@@ -242,6 +244,7 @@ export default function SubmitWizard({
 
   /** Why page `i` can't be left yet, or null. */
   function blocker(i: number): string | null {
+    if (i === 0 && !d.photoPreview) return "请先上传一张清晰的正脸照片 · Photo is required";
     if (i === 1 && !d.name.trim()) return "请填写姓名 · Name is required";
     if (i === 2 && !d.script.trim()) return "请先粘贴或上传讲稿 · Add your script first";
     if (i === 2 && d.script.length > LIMITS.script) return `讲稿超过 ${LIMITS.script.toLocaleString()} 字，请精简 · Script is too long`;
@@ -284,6 +287,12 @@ export default function SubmitWizard({
   }
 
   async function submit() {
+    const photoWhy = blocker(0);
+    if (photoWhy) {
+      show(0, -1);
+      d.setError(photoWhy);
+      return;
+    }
     const saved = await d.save();
     if (saved) {
       if (!person) clearStoredDraft();
@@ -378,8 +387,11 @@ export default function SubmitWizard({
       <div key={step} className={dir === 1 ? "step-enter-fwd" : "step-enter-back"}>
         {step === 0 && (
           <section className="card p-5">
-            <h3 className="text-[17px] font-semibold">一张清晰的正脸照片</h3>
-            <p className="mt-1 text-[13px] text-ink-3">这张照片会变成你的数字人形象。JPG / PNG / WebP，≤8MB。</p>
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-[17px] font-semibold">一张清晰的正脸照片</h3>
+              <span className="rounded-full bg-danger-soft px-2 py-1 text-[11px] font-medium text-danger">必填 · Required</span>
+            </div>
+            <p className="mt-1 text-[13px] text-ink-3">完成照片上传后才能进入下一步。JPG / PNG / WebP，≤8MB。</p>
             <input
               ref={fileRef}
               type="file"
@@ -434,7 +446,7 @@ export default function SubmitWizard({
               )}
             </div>
             <p className="mt-3 text-[12px] leading-relaxed text-ink-3">
-              没有合适的照片也可以先跳过，之后用修改链接补上。{d.isEdit && "更换照片后，老师需要重新生成卡通形象。"}
+              请使用清晰、正面、光线充足的单人照片。{d.isEdit && "更换照片后，老师需要重新生成卡通形象。"}
             </p>
           </section>
         )}
@@ -620,7 +632,7 @@ export default function SubmitWizard({
               </div>
               {(
                 [
-                  ["照片 · Photo", d.photoPreview ? "已上传" : "未上传（可稍后补）", 0, !!d.photoPreview],
+                  ["照片 · Photo", d.photoPreview ? "已上传" : "必填，请返回上传", 0, !!d.photoPreview],
                   ["姓名 · Name", d.name.trim() || "—", 1, !!d.name.trim()],
                   ["班级 / 小组 · Class / group", d.cohort.trim() || "未填写", 1, true],
                   ["副标题 · Subtitle", d.subtitle.trim() || "未填写", 1, true],
@@ -681,9 +693,9 @@ export default function SubmitWizard({
             </button>
           )}
           {step < LAST ? (
-            <button type="button" className="btn-primary flex-1" onClick={() => go(step + 1)} disabled={d.sectioning || d.parsing}>
+            <button type="button" className="btn-primary flex-1" onClick={() => go(step + 1)} disabled={d.sectioning || d.parsing || (step === 0 && !d.photoPreview)}>
               {d.sectioning ? <Spinner light /> : null}
-              {d.sectioning ? "AI 分段中…" : step === 0 && !d.photoPreview ? "先跳过，下一步" : "下一步"}
+              {d.sectioning ? "AI 分段中…" : step === 0 && !d.photoPreview ? "请先上传照片" : "下一步"}
               {!d.sectioning && <IconArrowRight size={15} />}
             </button>
           ) : (
