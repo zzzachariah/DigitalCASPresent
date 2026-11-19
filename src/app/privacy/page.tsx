@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { PRIVACY_VERSION } from "@/lib/privacy";
 import { eventRetentionStatus } from "@/lib/event-retention";
-import { externalProcessingAllowed } from "@/lib/processing-policy";
+import { aiProcessingAllowed, externalProcessingAllowed } from "@/lib/processing-policy";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = {
@@ -13,12 +13,13 @@ export const metadata: Metadata = {
 export default function PrivacyPage() {
   const retention = eventRetentionStatus();
   const ends = retention.endsAt ? new Date(retention.endsAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) : null;
-  const external = externalProcessingAllowed();
+  const textAi = aiProcessingAllowed();
+  const media = externalProcessingAllowed();
   const terms = [
     {
       title: "1. 用途与保密 · Purpose and confidentiality",
-      zh: "本项目由活动组织者用于 TOK 展览准备和现场讲解。未评分讲稿及其分段按保密资料处理，不提供给其他学生浏览、下载或用于评分，不出售、不用于广告，也不授权将其用于模型训练。仅资料提交者、持有其私人修改链接的人及经授权的活动管理人员可访问原稿；请不要共享该链接。",
-      en: "The organizer uses this project to prepare and present the TOK exhibition. Ungraded manuscripts and their sections are confidential: they are not offered to other students for browsing, downloading or grading, sold, used for advertising, or authorized for model training. Original text is available only to the submitter, holders of their private edit link and authorized event administrators. Do not share that link.",
+      zh: "本项目由活动组织者用于 TOK 展览准备和现场讲解。未评分讲稿及其分段按保密资料处理，不提供给其他学生浏览、下载或用于评分，不出售、不用于广告，也不授权将其用于模型训练。本站的原稿访问限于资料提交者、持有其私人修改链接的人及经授权的活动管理人员；经同意的 Packy 及上游文字 AI 处理另见第 4 条。请不要共享私人链接。",
+      en: "The organizer uses this project to prepare and present the TOK exhibition. Ungraded manuscripts and their sections are confidential: they are not offered to other students for browsing, downloading or grading, sold, used for advertising, or authorized for model training. Access to original text within this app is limited to the submitter, holders of their private edit link and authorized event administrators. Agreed text AI processing by Packy and upstream providers is described in section 4. Do not share private links.",
     },
     {
       title: "2. 收集哪些资料 · What is collected",
@@ -32,13 +33,13 @@ export default function PrivacyPage() {
     },
     {
       title: "4. AI 与服务商 · AI and service providers",
-      zh: "本站使用托管及存储服务运行。外部 AI、语音及形象处理默认关闭；只有组织者审核服务商的数据保留、训练使用和删除条件并批准后才能启用。接受本协议不代替该审核，也不构成训练授权。启用后，准备讲解所必需的文字、生成语音所需的讲解或形象生成所需的照片可能传给相应服务商。本站无法独立保证所有服务商不留存数据，或替其完成删除；组织者必须在启用前确认这些安排。",
-      en: "Hosting and storage services operate this app. External AI, speech and avatar processing is disabled by default and requires the organizer to review and approve provider retention, training-use and deletion terms. Accepting this agreement does not replace that review or authorize training. When enabled, the necessary text, narration or photograph may be processed by the relevant provider. This app cannot independently guarantee that every provider retains no data or delete it on their behalf; the organizer must confirm those arrangements before enabling them.",
+      zh: "本站使用托管及存储服务运行。组织者已批准通过 Packy 及其上游服务商进行文字 AI 处理，并接受上游保留期限尚未公开确认的限制。你同意后，自动分段可发送讲稿全文；讲解、问答及回答审查可发送所选段落、必要的展示信息、提问和候选回答。Packy 的条款声明其自身不保留输入/输出正文、不将客户内容用于模型训练，但会保留用量等元数据；上游服务商依其自身条款处理和保留数据，不能据此承诺上游零留存。本站及组织者不能保证上游在活动结束日或本站清理日同步删除副本。本次同意仅涵盖上述文字处理，不授权模型训练，也不包含向 A2E、D-ID 发送照片、语音或形象资料；这些媒体服务保持关闭，另行启用需要另外告知和取得同意。AI 回答有内容限制与审查，无法确认时应礼貌表示“这个问题再想想”，但仍不能保证每次回答完全准确。",
+      en: "Hosting and storage services operate this app. The organizer has approved text AI processing through Packy and its upstream providers, accepting that upstream retention periods have not been publicly confirmed. With your agreement, automatic splitting may send the full manuscript; explanations, Q&A and answer review may send the selected section, necessary exhibition details, the question and a candidate answer. Packy states that it does not retain input/output content or train models on customer content, while retaining usage metadata. Upstream providers process and retain data under their own terms; this is not a promise of zero upstream retention. Neither this app nor the organizer can guarantee upstream copies are deleted on the event end date or this app’s cleanup date. This agreement covers only the text processing described here. It does not authorize model training or sending photos, speech or avatar material to A2E or D-ID. Those media services remain disabled; enabling them requires separate notice and agreement. AI answers are constrained and reviewed, with a polite response when an answer cannot be confirmed, but accuracy cannot be guaranteed for every reply.",
     },
     {
       title: "5. 活动结束后的销毁 · Deletion after the event",
-      zh: "组织者须设置活动结束时间并确认清理完成。到达该时间后，本项目关闭投稿、原稿读取、预览、公开展示及 AI 交互；接下来的定时清理会删除本站存储中的讲稿、分段、照片、音视频、修改令牌和同意记录，通常在下一次每日清理时完成。任务失败时须由管理人员重试并核查。销毁不等于撤回他人已保存的截图、导出文件、浏览器缓存或服务商副本；这些副本应由持有人或服务商按约定删除。",
-      en: "The organizer must set the event end time and verify cleanup. At that time, submission, original-text access, previews, public presentations and AI interactions close. The next scheduled cleanup removes manuscripts, sections, photos, audio/video, edit tokens and consent records from this app’s stores, normally at the next daily run. Administrators must retry and verify failed cleanup. Deletion does not recall screenshots, exports, browser caches or provider copies already held elsewhere; their holders or providers must delete them under the agreed arrangements.",
+      zh: "组织者须设置活动结束时间并确认清理完成。到达该时间后，本项目关闭投稿、原稿读取、预览、公开展示及 AI 交互；接下来的定时清理会删除本站存储中的讲稿、分段、照片、音视频、修改令牌和同意记录，通常在下一次每日清理时完成。任务失败时须由管理人员重试并核查。销毁不等于撤回他人已保存的截图、导出文件、浏览器缓存或服务商副本；这些副本应由持有人或服务商按其适用条款处理；特别是上游 AI 的保留和删除时间未公开确认，本站的销毁计划不代表其同步销毁承诺。",
+      en: "The organizer must set the event end time and verify cleanup. At that time, submission, original-text access, previews, public presentations and AI interactions close. The next scheduled cleanup removes manuscripts, sections, photos, audio/video, edit tokens and consent records from this app’s stores, normally at the next daily run. Administrators must retry and verify failed cleanup. Deletion does not recall screenshots, exports, browser caches or provider copies already held elsewhere; those copies remain subject to their holders’ or providers’ applicable terms. In particular, upstream AI retention and deletion timing have not been publicly confirmed; this app’s deletion schedule does not promise simultaneous upstream deletion.",
     },
     {
       title: "6. 你的设备与请求 · Your device and requests",
@@ -53,7 +54,8 @@ export default function PrivacyPage() {
       <p className="mt-2 text-sm text-ink-3">版本 / Version {PRIVACY_VERSION}</p>
       <aside className="my-6 space-y-2 rounded-lg bg-surface-2 p-5 text-sm leading-relaxed">
         <p><b>活动结束时间 / Event ends:</b> {ends ? `${ends}（北京时间 / Beijing time）` : "尚未配置有效时间，请向老师确认销毁安排。 / No valid time is configured; confirm deletion arrangements with your teacher."}</p>
-        <p><b>外部处理 / External processing:</b> {external ? "组织者已启用。 / Enabled by the organizer." : "关闭；自动分段在本站处理，不向 AI 服务商发送讲稿。 / Disabled; automatic splitting runs in this app without sending manuscripts to an AI provider."}</p>
+        <p><b>Packy 文字 AI / Packy text AI:</b> {textAi ? "已启用；接受新版协议后按第 4 条处理。 / Enabled; processing follows section 4 after acceptance of this agreement." : "当前关闭；自动分段在本站完成。 / Currently disabled; automatic splitting runs within this app."}</p>
+        <p><b>外部语音与形象 / External speech and avatars:</b> {media ? "当前已启用；不在本次文字 AI 同意范围内，须另行确认。 / Currently enabled; outside this text AI agreement and requires separate confirmation." : "关闭；A2E、D-ID 不在本次授权范围内。 / Disabled; A2E and D-ID are outside this approval."}</p>
       </aside>
       <div className="space-y-7">
         {terms.map((term) => (
@@ -61,6 +63,12 @@ export default function PrivacyPage() {
             <h2 className="text-lg font-semibold">{term.title}</h2>
             <p className="mt-2 text-[15px] leading-relaxed text-ink-2">{term.zh}</p>
             <p className="mt-2 text-sm leading-relaxed text-ink-3">{term.en}</p>
+            {term.title.startsWith("4.") && (
+              <p className="mt-3 text-sm text-accent">
+                服务商条款 / Provider terms: <a href="https://www.packyapi.ai/terms" target="_blank" rel="noreferrer" className="underline">Packy 服务条款</a>{" · "}
+                <a href="https://www.packyapi.ai/dpa" target="_blank" rel="noreferrer" className="underline">Packy 数据处理附录（DPA）</a>
+              </p>
+            )}
           </section>
         ))}
       </div>

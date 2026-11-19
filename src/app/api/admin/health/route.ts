@@ -1,4 +1,4 @@
-import { externalProcessingAllowed } from "@/lib/processing-policy";
+import { aiProcessingAllowed, externalProcessingAllowed } from "@/lib/processing-policy";
 import { NextResponse } from "next/server";
 import { adminConfigured, isAdmin } from "@/lib/auth";
 import { storageDriverName, storageWritable } from "@/lib/store";
@@ -35,10 +35,12 @@ export async function GET() {
     hasBlobStoreId: !!process.env.BLOB_STORE_ID,
     blobEnvKeys, // e.g. ["BLOB_READ_WRITE_TOKEN"] or a prefixed name
     externalProcessingApproved: externalProcessingAllowed(),
-    aiLiveModel: process.env.AI_MODEL_LIVE || process.env.AI_MODEL || "claude-opus-4-8",
+    aiProcessingApproved: aiProcessingAllowed(),
+    mediaProcessingApproved: externalProcessingAllowed(),
+    aiLiveModel: process.env.AI_MODEL_LIVE || process.env.AI_MODEL || "claude-sonnet-5",
     eventEndsAt: process.env.EVENT_ENDS_AT || null,
     aiKeySet: !!process.env.AI_API_KEY,
-    aiModel: process.env.AI_MODEL || "(default: claude-opus-4-8)",
+    aiModel: process.env.AI_MODEL || "(default: claude-sonnet-5)",
     avatarProvider: process.env.AVATAR_PROVIDER || "mock",
     a2eKeySet: !!process.env.A2E_API_KEY,
     didKeySet: !!process.env.DID_API_KEY,

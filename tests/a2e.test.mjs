@@ -105,8 +105,8 @@ test('Pure punctuation, whitespace and emoji never create TTS requests', async t
 });
 
 
-test('Unapproved provider cannot receive narration or uploaded images', async t => {
-  const { ai, restore } = await client({ EXTERNAL_AI_PROCESSING_APPROVED: '' });
+test('Text AI approval cannot enable A2E narration or uploaded images', async t => {
+  const { ai, restore } = await client({ AI_PROCESSING_APPROVED: 'true', EXTERNAL_AI_PROCESSING_APPROVED: 'false' });
   t.after(restore);
   t.mock.method(globalThis, 'fetch', async () => { throw new Error('Unexpected network request'); });
   await assert.rejects(ai.a2eTts('Confidential fixture'), /disabled pending/);

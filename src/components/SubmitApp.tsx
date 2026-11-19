@@ -165,14 +165,16 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
             <p className="mt-2 text-[13px] leading-relaxed text-ink-3">Your ungraded manuscript is confidential and used only to prepare this exhibition. After teacher approval, visitors may see exhibition details and hear reviewed explanations.</p>
           </div>
           <ul className="list-disc space-y-2 pl-5 text-[13px] leading-relaxed text-ink-2">
-            <li>外部 AI、语音或形象服务只有在组织者审核其隐私条件后才能启用；本次同意不代表同意将文章用于模型训练。<br />External AI, speech and avatar processing requires organizer approval of provider privacy terms. This agreement does not authorize model training.</li>
-            <li>活动结束后关闭访问并安排销毁本站保存的资料；具体时间与副本限制见隐私协议。<br />Access closes after the event, followed by deletion of the app’s stored data; see the agreement for the schedule and limits.</li>
+            <li>组织者已批准 Packy 及其上游的文字 AI 处理。自动分段可能发送全文；讲解和问答仅发送所需段落及相关问题。<br />The organizer has approved text AI processing by Packy and upstream providers. Splitting may send the full manuscript; explanations and Q&A use the necessary section and related questions.</li>
+            <li>Packy 声明自身不保存输入/输出正文、不用于模型训练；上游保留期限尚未公开确认，不能保证其与本站同时删除。<br />Packy states that it does not retain input/output content or use it for training. Upstream retention periods remain unconfirmed; simultaneous deletion with this app cannot be guaranteed.</li>
+            <li>活动结束后关闭访问并安排销毁本站资料。A2E、D-ID 等外部语音与形象服务不在本次同意范围内，保持关闭。<br />Access closes after the event, followed by deletion from this app. External speech and avatar services such as A2E and D-ID are outside this agreement and remain disabled.</li>
+            <li>AI 回答会受到限制与审查，但仍可能出错；无法确认时应礼貌表示“这个问题再想想”。<br />AI answers are constrained and reviewed but may still be wrong; uncertain questions receive a polite response.</li>
             <li>修改与预览链接均须保密。草稿仅在本浏览器会话保留，请用自己的设备。<br />Keep edit and preview links private. Drafts last for this browser session; use your own device.</li>
           </ul>
           <a href="/privacy" target="_blank" rel="noreferrer" className="inline-block text-sm text-accent underline">阅读完整隐私协议 · Read the full privacy agreement</a>
           <label className="flex items-start gap-3 rounded-lg bg-surface-2 p-4 text-sm leading-relaxed">
             <input type="checkbox" className="mt-1 h-4 w-4 shrink-0" checked={privacyChecked} onChange={(e) => setPrivacyChecked(e.target.checked)} />
-            <span>我已阅读并同意上述隐私协议，确认有权提交这些资料。<br />I have read and accept the privacy agreement, and I have permission to submit these materials.</span>
+            <span>我已阅读并同意隐私协议及其中的 Packy／上游文字 AI 处理安排，知悉上游保留与删除期限尚未确认，并确认有权提交这些资料。<br />I accept the privacy agreement and its Packy/upstream text AI processing arrangements, understand that upstream retention and deletion timing remain unconfirmed, and have permission to submit these materials.</span>
           </label>
           <button type="button" className="btn-primary w-full" disabled={!privacyChecked} onClick={() => {
             tokenBox.privacyVersion = PRIVACY_VERSION;

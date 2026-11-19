@@ -29,7 +29,7 @@ const server = load('src/lib/privacy-server.ts', {
 const accepted = () => new Headers({ [privacy.PRIVACY_CONSENT_HEADER]: privacy.PRIVACY_VERSION });
 
 test('missing, outdated and arbitrary consent values cannot authorize processing', () => {
-  for (const value of [undefined, '', 'true', '2020-01-01', `${privacy.PRIVACY_VERSION}, true`]) {
+  for (const value of [undefined, '', 'true', '2020-01-01', '2026-11-19', `${privacy.PRIVACY_VERSION}, true`]) {
     const headers = new Headers(value === undefined ? {} : { 'x-privacy-consent': value });
     assert.equal(privacy.acceptsCurrentPrivacy(headers), false);
     assert.equal(privacy.consentReceipt(headers), null);
@@ -68,7 +68,7 @@ test('new submission records current version and server time instead of client s
   let saved;
   const route = load('src/app/api/submit/route.ts', {
     'next/server': { NextResponse: Response },
-    '@/lib/privacy-server': server, '@/lib/privacy': privacy, '@/lib/media-access': media, '@/lib/media-access': media,
+    '@/lib/privacy-server': server, '@/lib/privacy': privacy, '@/lib/media-access': media,
     '@/lib/ratelimit': { limitRequest: () => null },
     '@/lib/store': {
       storageWritable: () => ({ ok: true }),
@@ -115,7 +115,7 @@ test('local split preserves all paragraphs even beyond the section cap', () => {
 test('confidential local split never calls the external AI', async () => {
   const handlers = load('src/lib/handlers.ts', {
     'next/server': { NextResponse: Response },
-    './processing-policy': { externalProcessingAllowed: () => false },
+    './processing-policy': { aiProcessingAllowed: () => false },
     './local-sections': local,
     './ai': { chat: () => { throw new Error('Unexpected provider request'); } },
     './prompts': {}, './parse': {}, './validate': validate,

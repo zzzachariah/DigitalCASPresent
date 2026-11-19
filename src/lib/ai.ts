@@ -1,5 +1,5 @@
 import type { ChatTurn } from "./types";
-import { externalProcessingAllowed } from "./processing-policy";
+import { aiProcessingAllowed } from "./processing-policy";
 
 // ─────────────────────────────────────────────────────────────────────
 // AI client — supports Anthropic Messages and OpenAI Chat Completions.
@@ -9,9 +9,9 @@ import { externalProcessingAllowed } from "./processing-policy";
 // ─────────────────────────────────────────────────────────────────────
 
 const API_KEY = process.env.AI_API_KEY?.trim() || "";
-const BASE_URL = (process.env.AI_BASE_URL || "https://www.packyapi.com/v1").replace(/\/$/, "");
+const BASE_URL = (process.env.AI_BASE_URL || "https://cf.api.fan/v1").replace(/\/$/, "");
 /** Model for offline work (auto-sectioning, pre-generation): quality first. */
-const MODEL = process.env.AI_MODEL || "claude-opus-4-8";
+const MODEL = process.env.AI_MODEL || "claude-sonnet-5";
 /** Model for live answers while a visitor waits: set AI_MODEL_LIVE to a
  *  faster model to cut first-token latency; defaults to AI_MODEL. */
 const MODEL_LIVE = process.env.AI_MODEL_LIVE?.trim() || MODEL;
@@ -132,7 +132,7 @@ function completionText(data: Completion, protocol: Protocol): string {
 
 export async function chat(opts: ChatOptions): Promise<string> {
   opts.signal?.throwIfAborted();
-  if (!externalProcessingAllowed()) throw new Error("External AI processing is disabled pending privacy approval.");
+  if (!aiProcessingAllowed()) throw new Error("External AI processing is disabled pending privacy approval.");
   if (aiIsMock()) return mockChat(opts);
   const req = request(opts, false);
   const signal = upstreamSignal(opts.signal, 90_000);
@@ -208,7 +208,7 @@ async function* sseData(body: ReadableStream<Uint8Array>, signal: AbortSignal): 
 /** Streaming variant: yields text deltas as the model produces them. */
 export async function* chatStream(opts: ChatOptions): AsyncGenerator<string> {
   opts.signal?.throwIfAborted();
-  if (!externalProcessingAllowed()) throw new Error("External AI processing is disabled pending privacy approval.");
+  if (!aiProcessingAllowed()) throw new Error("External AI processing is disabled pending privacy approval.");
   if (aiIsMock()) {
     // Simulate token streaming so the UI path is exercised without a key.
     const text = mockChat(opts);

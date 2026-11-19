@@ -4,7 +4,8 @@ import { getPerson } from "@/lib/store";
 import { aiIsMock, chat } from "@/lib/ai";
 import { explainSectionPrompt, followUpPrompt, systemPrompt } from "@/lib/prompts";
 import { blockedVisitorRequest, reviewExhibitionAnswer, safeFallback } from "@/lib/ai-safety";
-import { externalProcessingAllowed } from "@/lib/processing-policy";
+import { aiProcessingAllowed, externalProcessingAllowed } from "@/lib/processing-policy";
+import { PRIVACY_VERSION } from "@/lib/privacy";
 import { canView } from "@/lib/access";
 import { limitRequest } from "@/lib/ratelimit";
 import { a2eConfigured, a2eTts } from "@/lib/a2e";
@@ -113,7 +114,7 @@ export async function POST(req: NextRequest) {
   const candidateSuggestions = body.mode === "section" ? selected?.cachedSuggestions?.[language] ?? [] : [];
   const sectionTitle = body.mode === "section" ? selected?.title : undefined;
   // Use only the selected section as context, never the entire manuscript.
-  if (selected?.content.trim() && !blockedVisitorRequest(question) && externalProcessingAllowed() && !aiIsMock()) {
+  if (selected?.content.trim() && !blockedVisitorRequest(question) && aiProcessingAllowed() && person.privacyConsent?.version === PRIVACY_VERSION && !aiIsMock()) {
     const brake = limitRequest(req, "chatLive");
     if (brake) return brake;
     const signal = AbortSignal.any([req.signal, AbortSignal.timeout(43_000)]);

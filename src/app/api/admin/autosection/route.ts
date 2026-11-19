@@ -8,5 +8,6 @@ export const maxDuration = 60;
 // Ask the AI to split a script into logical parts the visitor can pick.
 export async function POST(req: NextRequest) {
   if (!isAdmin()) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  return handleAutosection(req);
+  // A pasted admin draft has no participant consent receipt attached.
+  return handleAutosection(req, { localOnly: true });
 }
