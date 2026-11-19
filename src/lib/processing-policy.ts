@@ -9,3 +9,12 @@ export function requireExternalProcessing(): void {
     throw new Error("External processing is disabled pending a privacy review.");
   }
 }
+
+
+/** Text-only AI approval is separate from photo/avatar/narration providers.
+ * An explicit value overrides the legacy global setting, including false.
+ * Existing deployments that have not set it retain the old approved behavior. */
+export function aiProcessingAllowed(): boolean {
+  const value = process.env.AI_PROCESSING_APPROVED;
+  return value === undefined ? externalProcessingAllowed() : value === "true";
+}

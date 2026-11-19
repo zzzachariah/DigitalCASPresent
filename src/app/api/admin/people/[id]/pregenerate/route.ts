@@ -1,4 +1,5 @@
-import { externalProcessingAllowed } from "@/lib/processing-policy";
+import { aiProcessingAllowed } from "@/lib/processing-policy";
+import { PRIVACY_VERSION } from "@/lib/privacy";
 import { reviewExhibitionAnswer } from "@/lib/ai-safety";
 import { NextRequest, NextResponse } from "next/server";
 import { isAdmin } from "@/lib/auth";
@@ -118,9 +119,10 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       (body.audioOnly === true && body.regenerateText === true)) {
     return NextResponse.json({ error: "invalid preparation options" }, { status: 400 });
   }
-  if (!externalProcessingAllowed()) return NextResponse.json({ error: "外部处理未获隐私批准 / External processing is disabled pending privacy review" }, { status: 503 });
+  if (!aiProcessingAllowed()) return NextResponse.json({ error: "外部处理未获隐私批准 / External processing is disabled pending privacy review" }, { status: 503 });
   const person = await getPerson(params.id);
   if (!person) return NextResponse.json({ error: "not found" }, { status: 404 });
+  if (person.privacyConsent?.version !== PRIVACY_VERSION) return NextResponse.json({ error: "请先由学生确认新版AI处理隐私协议 / The student must accept the current AI processing terms first" }, { status: 428 });
   if (body.audioOnly && !a2eConfigured()) return NextResponse.json({ error: "narration provider is not configured" }, { status: 503 });
   const targets = person.sections.map((section, index) => ({ section, index }))
     .filter(({ section }) => !body.sectionId || section.id === body.sectionId);

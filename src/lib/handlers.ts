@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { nanoid } from "nanoid";
-import { externalProcessingAllowed } from "./processing-policy";
+import { aiProcessingAllowed } from "./processing-policy";
 import { localSections } from "./local-sections";
 import { chat, extractJson } from "./ai";
 import { autoSectionPrompt } from "./prompts";
@@ -45,7 +45,7 @@ export async function handleParse(req: NextRequest): Promise<NextResponse> {
 }
 
 /** Ask the AI to split a script into logical parts the visitor can pick. */
-export async function handleAutosection(req: NextRequest): Promise<NextResponse> {
+export async function handleAutosection(req: NextRequest, options: { localOnly?: boolean } = {}): Promise<NextResponse> {
   const body = await req.json().catch(() => null);
   const script = body && typeof body.script === "string" ? body.script : "";
   if (!script.trim()) {
@@ -56,7 +56,7 @@ export async function handleAutosection(req: NextRequest): Promise<NextResponse>
   }
 
   // Confidential manuscripts stay within this app until provider terms are approved.
-  if (!externalProcessingAllowed()) {
+  if (options.localOnly || !aiProcessingAllowed()) {
     return NextResponse.json({ sections: localSections(script), method: "local" });
   }
 

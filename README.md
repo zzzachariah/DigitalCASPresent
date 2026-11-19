@@ -6,7 +6,7 @@ AI 依据讲稿自然作答，数字人开口讲解。
 
 同学可以**自己提交**照片和讲稿（`/submit`），老师在后台**审核通过**后页面上线；老师也可以直接在后台录入。
 
-> 保密模式（2026-11-19）：外部 AI、语音及形象处理默认关闭。学生须先同意 `/privacy`，仍可上传、保存和自动按段落分段；现场问答使用固定礼貌兜底，不把稿件发给服务商。启用外部处理之前须核实服务商的保密、训练、留存和删除条件。详见 [隐私与 AI 运行说明](docs/privacy-and-ai.md) 和 [资料清理流程](docs/retention.md)。
+> 隐私与 AI（2026-11-19）：组织者已接受 Packy 及上游文字 AI 处理，使用实测可用的 `claude-sonnet-5`。学生须同意新版 `/privacy`；旧记录在作者重新确认保存前不发送给 AI。A2E / D-ID 等外部语音、形象处理仍关闭。Packy 声明自身不保存正文、不训练；上游保留规则另行适用，不能承诺活动结束时删除供应商的所有副本。详见 [隐私与 AI 运行说明](docs/privacy-and-ai.md) 和 [资料清理流程](docs/retention.md)。
 > 活动结束时间：2026-12-13 北京时间 00:00；停止访问并由每日任务尝试物理清理，必须核验清理结果。
 
 ---
@@ -72,7 +72,8 @@ npm run dev                     # http://localhost:3000
 | `ADMIN_SESSION_SECRET` | 可选，签发后台登录 cookie 的密钥；不填则用密码派生。 |
 | `NEXT_PUBLIC_BASE_URL` | 二维码 / 学生链接用的公开网址（本地 `http://localhost:3000`，线上填 Vercel 域名）。 |
 | `AI_API_KEY` | packyapi 的 API key。**留空 = 演示模式**。 |
-| `AI_BASE_URL` / `AI_MODEL` | 默认 `https://www.packyapi.com/v1` 与 `claude-opus-4-8`。 |
+| `AI_BASE_URL` / `AI_MODEL` | 默认 `https://cf.api.fan/v1` 与 `claude-sonnet-5`。 |
+| `AI_PROCESSING_APPROVED` | 文字 AI 授权；默认关闭，开启后仍需学生新版同意。外部媒体由 `EXTERNAL_AI_PROCESSING_APPROVED` 单独控制。 |
 | `AI_API_PROTOCOL` | `auto`（默认）：Claude 使用 Anthropic Messages，其他模型使用 OpenAI Chat Completions；可显式设为 `anthropic` / `openai`。 |
 | `AI_MODEL_LIVE` | 可选但**建议设置**为一个更快的模型。现场实时回答（追问、未预生成的部分）用它；分段和预生成仍用 `AI_MODEL`。 |
 | `AVATAR_PROVIDER` | `mock`（默认）/ `a2e` / `did`。 |
@@ -89,7 +90,7 @@ npm run dev                     # http://localhost:3000
 ### 关于 packyapi
 
 packyapi（PackyCode）是国内可直连的 OpenAI/Anthropic 兼容中转，支持 Claude 等模型。
-在 <https://www.packyapi.com> 注册拿到 key，填到 `AI_API_KEY` 即可。Key 只存在服务器端环境变量，
+在 <https://www.packyapi.ai> 管理 key；生产调用使用控制台推荐的 `https://cf.api.fan/v1`。Key 只存在服务器端环境变量，
 不会写入代码、也不会发送到浏览器。
 
 ---
@@ -100,8 +101,8 @@ packyapi（PackyCode）是国内可直连的 OpenAI/Anthropic 兼容中转，支
 
 - 后台「生成卡通形象」：用本人照片生成轻卡通（还认得出是谁），用于访客端显示与说话。
 - 后台「生成动态视频」：从卡通（或照片）生成一段几秒的说话状态循环视频，只做一次。
-- 访客提问时：`/api/chat` **流式**返回文字，服务器每凑齐一句就调一次 A2E 合成语音并推给前端，第一句合成好就开始播，后面的句子排队接上；文字比语音先上屏。A2E 不可用时自动降级为浏览器语音朗读，流程不会卡住。
-- 后台「预生成讲解」会把每个部分的讲解文字、追问建议**和语音**一起提前生成并永久保存，访客选这个部分时零等待。
+- 访客提问时：`/api/chat` 先生成完整回答并完成保密与内容审核，通过后才展示文字或提供朗读。外部语音处理目前关闭。
+- 后台「预生成讲解」提前生成讲解文字与追问建议，并保存至活动资料清理期限；启用外部语音还需另外批准。
 - `A2E_MODE=precise`：每个回答单独做口型渲染（几十秒），需要 Vercel Pro 的函数时长。
 
 ---

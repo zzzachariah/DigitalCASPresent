@@ -11,6 +11,7 @@ async function compile(file) {
 async function load(file) { return import(`data:text/javascript;base64,${Buffer.from(await compile(file)).toString('base64')}`); }
 const safety = await load('../src/lib/ai-safety.ts');
 const sentences = await load('../src/lib/sentences.ts');
+const privacy = await load('../src/lib/privacy.ts');
 const yes = JSON.stringify({ safe: true, grounded: true, private: true, relevant: true, respectful: true });
 const source = 'A museum compass demonstrates how observation can help people make decisions. Its needle provides a shared point of reference that people can check for themselves.';
 const answer = 'This exhibit connects a compass with the value of checking observations.';
@@ -48,8 +49,8 @@ test('Suggestions and private identifiers receive the same release checks', asyn
 let state;
 function reset() {
   state = {
-    approved: true, closed: false, calls: [], tts: [],
-    person: { id: 'student-1', name: 'Synthetic student', slug: 'student-1', language: 'auto', status: 'approved', script: `${source}\nOTHER-SECTION-PRIVATE-CANARY`, sections: [{ id: 'part-1', title: 'Compass', content: source }] },
+    approved: true, mediaApproved: true, closed: false, calls: [], tts: [],
+    person: { id: 'student-1', name: 'Synthetic student', slug: 'student-1', language: 'auto', status: 'approved', privacyConsent: { version: privacy.PRIVACY_VERSION, acceptedAt: 1 }, script: `${source}\nOTHER-SECTION-PRIVATE-CANARY`, sections: [{ id: 'part-1', title: 'Compass', content: source }] },
     replies: [answer, yes],
   };
 }
@@ -63,7 +64,8 @@ globalThis.__safetyRouteBindings = {
   '@/lib/prompts': prompts,
   '@/lib/ai-safety': safety,
   '@/lib/event-retention': { eventDataClosed: () => state.closed },
-  '@/lib/processing-policy': { externalProcessingAllowed: () => state.approved },
+  '@/lib/processing-policy': { aiProcessingAllowed: () => state.approved, externalProcessingAllowed: () => state.mediaApproved },
+  '@/lib/privacy': privacy,
   '@/lib/access': { canView: person => person.status === 'approved' },
   '@/lib/ratelimit': { limitRequest: () => null },
   '@/lib/a2e': { a2eConfigured: () => true, a2eTts: async text => { state.tts.push(text); return 'https://synthetic.example/audio.wav'; } },
@@ -198,4 +200,28 @@ test('A review crossing the event deadline cannot release text or narration', as
   assert.equal(response.status, 410);
   assert.equal(state.tts.length, 0);
   assert.equal((await response.text()).includes(answer), false);
+});
+
+
+test('text-only approval releases reviewed text but never calls A2E or reuses media', async () => {
+  reset(); state.mediaApproved = false;
+  const beforeProvider = process.env.AVATAR_PROVIDER;
+  process.env.AVATAR_PROVIDER = 'a2e';
+  try {
+    const events = (await (await route.POST(request({ stream: true }))).text()).trim().split('\n').map(JSON.parse);
+    assert.equal(state.calls.length, 2);
+    assert.equal(state.tts.length, 0);
+    assert.equal(events.find(event => event.type === 'meta').avatar, 'tts');
+    assert.equal(events.find(event => event.type === 'done').text, answer);
+  } finally { if (beforeProvider === undefined) delete process.env.AVATAR_PROVIDER; else process.env.AVATAR_PROVIDER = beforeProvider; }
+});
+
+test('old records need the current participant terms even after the organizer enables AI', async () => {
+  for (const receipt of [undefined, { version: 'old-policy', acceptedAt: 1 }]) {
+    reset(); state.person.privacyConsent = receipt;
+    state.person.sections[0].cachedAnswers = { en: answer };
+    const body = await (await route.POST(request())).json();
+    assert.equal(body.withheld, true); assert.equal(body.text, safety.safeFallback('en'));
+    assert.equal(state.calls.length, 0); assert.equal(state.tts.length, 0);
+  }
 });
