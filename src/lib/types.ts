@@ -1,3 +1,5 @@
+import type { PrivacyConsent } from "./privacy";
+
 // ─── Core data model ────────────────────────────────────────────────
 
 export type AnswerLang = "en" | "zh" | "bilingual";
@@ -62,6 +64,8 @@ export interface Person {
   editToken?: string;
   /** When the student last submitted or re-submitted. */
   submittedAt?: number;
+  /** Explicit acceptance of the collection terms, timestamped by the server. */
+  privacyConsent?: PrivacyConsent;
   createdAt: number;
   updatedAt: number;
 }

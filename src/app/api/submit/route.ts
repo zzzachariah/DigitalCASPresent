@@ -1,3 +1,6 @@
+import { withPreviewMedia } from "@/lib/media-access";
+import { consentReceipt } from "@/lib/privacy";
+import { requirePrivacyConsent } from "@/lib/privacy-server";
 import { NextRequest, NextResponse } from "next/server";
 import { createPerson, storageWritable, toOwner } from "@/lib/store";
 import { newEditToken } from "@/lib/store-shared";
@@ -17,6 +20,9 @@ export const dynamic = "force-dynamic";
 // ─────────────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
+  const consentRequired = requirePrivacyConsent(req);
+  if (consentRequired) return consentRequired;
+
   const limited = limitRequest(req, "submitWrite");
   if (limited) return limited;
 
@@ -34,8 +40,9 @@ export async function POST(req: NextRequest) {
       source: "student",
       status: "pending",
       editToken,
+      privacyConsent: consentReceipt(req.headers)!,
     });
-    return NextResponse.json({ person: toOwner(person), editToken, previewToken: previewTokenFor(person) });
+    return NextResponse.json({ person: withPreviewMedia(toOwner(person), previewTokenFor(person)), editToken, previewToken: previewTokenFor(person) });
   } catch (err) {
     console.error("[submit:create] failed:", err);
     return NextResponse.json(

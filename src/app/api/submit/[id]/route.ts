@@ -1,3 +1,6 @@
+import { withPreviewMedia } from "@/lib/media-access";
+import { consentReceipt } from "@/lib/privacy";
+import { requirePrivacyConsent } from "@/lib/privacy-server";
 import { NextRequest, NextResponse } from "next/server";
 import { getPerson, storageWritable, toOwner, updatePerson } from "@/lib/store";
 import { ownerTokenValid, previewTokenFor } from "@/lib/access";
@@ -25,9 +28,12 @@ async function loadOwned(req: NextRequest, id: string, allowQuery: boolean): Pro
 const NOT_FOUND = { error: "链接无效或已失效 / This link is invalid or has expired" };
 
 export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
+  const consentRequired = requirePrivacyConsent(req);
+  if (consentRequired) return consentRequired;
+
   const person = await loadOwned(req, params.id, true);
   if (!person) return NextResponse.json(NOT_FOUND, { status: 404 });
-  return NextResponse.json({ person: toOwner(person), previewToken: previewTokenFor(person) });
+  return NextResponse.json({ person: withPreviewMedia(toOwner(person), previewTokenFor(person)), previewToken: previewTokenFor(person) });
 }
 
 /** Keep an admin's pre-generated answers for sections the student didn't touch. */
@@ -41,6 +47,9 @@ function carryCachedAnswers(next: Section[], prev: Section[]): Section[] {
 }
 
 export async function PUT(req: NextRequest, { params }: { params: { id: string } }) {
+  const consentRequired = requirePrivacyConsent(req);
+  if (consentRequired) return consentRequired;
+
   const limited = limitRequest(req, "submitWrite");
   if (limited) return limited;
 
@@ -59,6 +68,7 @@ export async function PUT(req: NextRequest, { params }: { params: { id: string }
     // Any student edit goes back through review.
     status: "pending",
     submittedAt: Date.now(),
+    privacyConsent: consentReceipt(req.headers)!,
   };
   if (parsed.value.sections) {
     patch.sections = carryCachedAnswers(parsed.value.sections, person.sections);
@@ -67,7 +77,7 @@ export async function PUT(req: NextRequest, { params }: { params: { id: string }
   try {
     const updated = await updatePerson(person.id, patch);
     if (!updated) return NextResponse.json(NOT_FOUND, { status: 404 });
-    return NextResponse.json({ person: toOwner(updated) });
+    return NextResponse.json({ person: withPreviewMedia(toOwner(updated), previewTokenFor(updated)) });
   } catch (err) {
     console.error("[submit:update] failed:", err);
     return NextResponse.json(

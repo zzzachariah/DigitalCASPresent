@@ -1,13 +1,15 @@
-import { put, get, list, del, head, BlobNotFoundError } from "@vercel/blob";
+import { put as blobPut, get, list, del, head, BlobNotFoundError } from "@vercel/blob";
+import { createHash } from "node:crypto";
 import type { Person } from "./types";
+import { assertEventPurgeAllowed, assertEventOpen, eventDataClosed, type PurgeResult } from "./event-retention";
 import {
   buildPerson, safeId, uniqueSlug, mediaBlobAuth, mediaBlobConfigured,
   recordsBlobAuth, recordsBlobConfigured, type CreatePersonInput,
 } from "./store-shared";
 
-// Two stores, explicitly routed: private records and public media. Legacy
-// public records are READ ONLY. Ordinary reads never migrate, write or delete.
-// Explicit migration copies records and verifies them, retaining every source.
+// All new records and media are private. The old public store is read only
+// except for explicit verified migration/cleanup. Ordinary reads never write.
+// Legacy URL normalization is pure, so migration cannot overwrite a student edit.
 const PERSON_PREFIX = "people/";
 const SLUG_PREFIX = "slugs/";
 const DELETED_PREFIX = "deleted/";
@@ -18,6 +20,17 @@ const tombstonePath = (id: string) => `${DELETED_PREFIX}${id}.json`;
 type Store = "records" | "media";
 type BlobEntry = { pathname: string; url: string };
 const auth = (store: Store) => store === "records" ? recordsBlobAuth() : mediaBlobAuth();
+
+/** A request begun before expiry must not recreate data after purge. */
+const put: typeof blobPut = async (pathname, body, options) => {
+  assertEventOpen();
+  const result = await blobPut(pathname, body, options);
+  if (eventDataClosed()) {
+    await del(result.pathname, options);
+    throw new Error("Event closed during storage write");
+  }
+  return result;
+};
 
 async function listAll(prefix: string, store: Store): Promise<BlobEntry[]> {
   const out: BlobEntry[] = [];
@@ -249,7 +262,7 @@ export async function listPeople(): Promise<Person[]> {
       if (!byId.has(p.id) && !deleted.has(p.id)) byId.set(p.id, p);
     }
   }
-  return Array.from(byId.values()).sort((a, b) => a.createdAt - b.createdAt);
+  return Array.from(byId.values()).map(privateMediaView).sort((a, b) => a.createdAt - b.createdAt);
 }
 
 export async function getPerson(idOrSlug: string): Promise<Person | null> {
@@ -257,9 +270,10 @@ export async function getPerson(idOrSlug: string): Promise<Person | null> {
   if (!safeId(idOrSlug)) return null;
   if (await isDeleted(idOrSlug)) return null;
   const direct = await readById(idOrSlug);
-  if (direct) return direct;
+  if (direct) return privateMediaView(direct);
   const id = await privateSlugId(idOrSlug) ?? await legacySlugId(idOrSlug);
-  return id ? readById(id) : null;
+  const person = id ? await readById(id) : null;
+  return person ? privateMediaView(person) : null;
 }
 
 export async function createPerson(input: CreatePersonInput): Promise<Person> {
@@ -283,7 +297,7 @@ export async function updatePerson(
   const next = { ...current, ...patch, id: current.id, slug: current.slug, createdAt: current.createdAt, updatedAt: Date.now() };
   await writeSlug(next.slug, id);
   await writePerson(next);
-  return next;
+  return privateMediaView(next);
 }
 
 /** A durable private tombstone hides all versions and legacy fallback copies.
@@ -351,43 +365,285 @@ export async function migrateLegacyRecords(options: { dryRun: boolean; ids?: str
 }
 
 const cleanExt = (ext: string, fallback: string) => ext.replace(/[^a-z0-9]/gi, "").toLowerCase() || fallback;
-async function putMedia(pathname: string, buffer: Buffer): Promise<string> {
-  const { url } = await put(pathname, buffer, {
-    access: "public", addRandomSuffix: true, cacheControlMaxAge: 31536000, ...mediaBlobAuth(),
-  });
-  return url;
+const MEDIA_PREFIX = "private-media/";
+const assetIdPattern = /^[A-Za-z0-9_-]{1,40}(\.(cartoon|loop|audio\.[A-Za-z0-9_-]{1,80}))?$/;
+const versionPattern = /^[a-f0-9]{64}\.[a-z0-9]{1,8}$/;
+const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+function contentType(pathname: string): string {
+  const ext = pathname.split(".").at(-1)?.toLowerCase() || "";
+  return ({ jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif", mp4: "video/mp4", webm: "video/webm", mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", m4a: "audio/mp4" } as Record<string, string>)[ext] || "application/octet-stream";
+}
+function assetUrl(id: string, version: string): string { return `/api/photo/${id}?asset=${version}`; }
+function canonicalUrl(url: string): string { const value = new URL(url); value.search = ""; value.hash = ""; return value.toString(); }
+function legacyVersion(url: string): string {
+  const canonical = canonicalUrl(url);
+  const ext = new URL(canonical).pathname.split(".").at(-1) || "bin";
+  return `${hash(canonical)}.${cleanExt(ext, "bin").slice(0, 8)}`;
+}
+function privateMediaView(person: Person): Person {
+  const convert = (url: string | undefined, assetId: string) => {
+    if (!url || url.startsWith("/api/photo/")) return url;
+    try { return assetUrl(assetId, legacyVersion(url)); } catch { return undefined; }
+  };
+  return { ...person,
+    photoUrl: convert(person.photoUrl, person.id),
+    cartoonUrl: convert(person.cartoonUrl, `${person.id}.cartoon`),
+    loopVideoUrl: convert(person.loopVideoUrl, `${person.id}.loop`),
+    sections: person.sections.map((section) => ({ ...section, ...(section.cachedAudio ? {
+      cachedAudio: Object.fromEntries(Object.entries(section.cachedAudio).map(([lang, url]) => [lang, convert(url, `${person.id}.audio.${section.id}-${lang}`)])),
+    } : {}) })),
+  };
+}
+async function readPrivateBytes(pathname: string): Promise<Buffer | null> {
+  const response = await get(pathname, { access: "private", useCache: false, ...recordsBlobAuth() });
+  if (!response) return null;
+  if (response.statusCode !== 200 || !response.stream) throw new Error("Private media could not be read");
+  return boundedBytes(new Response(response.stream));
+}
+async function boundedBytes(response: Response): Promise<Buffer> {
+  const max = 64 * 1024 * 1024;
+  if (!response.body || Number(response.headers.get("content-length")) > max) throw new Error("Media exceeds supported size");
+  const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let size = 0;
+  try {
+    while (true) {
+      const next = await reader.read(); if (next.done) break;
+      size += next.value.length; if (size > max) throw new Error("Media exceeds supported size");
+      chunks.push(next.value);
+    }
+  } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+  return Buffer.concat(chunks);
+}
+async function copyPrivateBytes(pathname: string, bytes: Buffer): Promise<void> {
+  const existing = await readPrivateBytes(pathname);
+  if (existing !== null) {
+    if (!existing.equals(bytes)) throw new Error("Private media archive differs from source");
+    return;
+  }
+  try {
+    await put(pathname, bytes, { access: "private", addRandomSuffix: false, allowOverwrite: false, contentType: contentType(pathname), ...recordsBlobAuth() });
+  } catch (error) {
+    const current = await readPrivateBytes(pathname);
+    if (!current?.equals(bytes)) throw error;
+    return;
+  }
+  for (const delay of [0, 100, 300]) {
+    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+    const saved = await readPrivateBytes(pathname);
+    if (saved?.equals(bytes)) return;
+    if (saved !== null) throw new Error("Private media verification failed");
+  }
+  throw new Error("Private media verification failed");
+}
+async function putMedia(assetId: string, buffer: Buffer, ext: string): Promise<string> {
+  if (!assetIdPattern.test(assetId)) throw new Error("Invalid media id");
+  const version = `${hash(buffer)}.${cleanExt(ext, "bin").slice(0, 8)}`;
+  await copyPrivateBytes(`${MEDIA_PREFIX}${assetId}/${version}`, buffer);
+  return assetUrl(assetId, version);
 }
 
-/** Only explicit cleanup calls remove media. Replacing a portrait must not
- *  destroy the original files retained for recovery. */
-export async function deleteMediaUrl(url: string): Promise<void> {
-  if (url.startsWith("http")) await del(url, mediaBlobAuth());
-}
+/** New versions remain available for authorized recovery until event cleanup.
+ * Historical public files are removed only by verified privatization. */
+export async function deleteMediaUrl(_url: string): Promise<void> {}
 
 export async function savePhoto(id: string, buffer: Buffer, ext: string): Promise<string> {
   recordsBlobAuth();
   if (!(await getPerson(id))) throw new Error("person not found");
-  const url = await putMedia(`photos/${id}.${cleanExt(ext, "jpg")}`, buffer);
+  const url = await putMedia(id, buffer, cleanExt(ext, "jpg"));
   if (!(await updatePerson(id, { photoUrl: url }))) throw new Error("person not found");
   return url;
 }
 export async function saveCartoon(id: string, buffer: Buffer, ext: string): Promise<string> {
   recordsBlobAuth();
   if (!(await getPerson(id))) throw new Error("person not found");
-  const url = await putMedia(`cartoons/${id}.${cleanExt(ext, "png")}`, buffer);
+  const url = await putMedia(`${id}.cartoon`, buffer, cleanExt(ext, "png"));
   if (!(await updatePerson(id, { cartoonUrl: url }))) throw new Error("person not found");
   return url;
 }
 export async function saveLoopVideo(id: string, buffer: Buffer, ext: string): Promise<string> {
   recordsBlobAuth();
   if (!(await getPerson(id))) throw new Error("person not found");
-  const url = await putMedia(`loops/${id}.${cleanExt(ext, "mp4")}`, buffer);
+  const url = await putMedia(`${id}.loop`, buffer, cleanExt(ext, "mp4"));
   if (!(await updatePerson(id, { loopVideoUrl: url }))) throw new Error("person not found");
   return url;
 }
 export async function saveAudio(id: string, key: string, buffer: Buffer, ext: string): Promise<string> {
-  return putMedia(`audio/${id}-${key.replace(/[^A-Za-z0-9_-]/g, "")}.${cleanExt(ext, "mp3")}`, buffer);
+  if (!(await getPerson(id))) throw new Error("person not found");
+  return putMedia(`${id}.audio.${key.replace(/[^A-Za-z0-9_-]/g, "")}`, buffer, cleanExt(ext, "mp3"));
 }
-export async function readPhoto(_id: string): Promise<{ buffer: Buffer; contentType: string } | null> {
-  return null;
+
+/** Raw reference lookup is internal only; public/owner records use proxies. */
+function storedAsset(person: Person, assetId: string): string | undefined {
+  if (assetId === person.id) return person.photoUrl;
+  if (assetId === `${person.id}.cartoon`) return person.cartoonUrl;
+  if (assetId === `${person.id}.loop`) return person.loopVideoUrl;
+  for (const section of person.sections) {
+    for (const [lang, url] of Object.entries(section.cachedAudio ?? {})) {
+      if (assetId === `${person.id}.audio.${section.id}-${lang}` || url?.startsWith(`/api/photo/${assetId}?`)) return url;
+    }
+  }
+  return undefined;
+}
+async function readPublicBytes(blob: BlobEntry): Promise<Buffer> {
+  const response = await fetch(`${blob.url}${blob.url.includes("?") ? "&" : "?"}v=${Date.now()}`, { cache: "no-store", signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new Error(`Legacy media could not be read (HTTP ${response.status})`);
+  return boundedBytes(response);
+}
+export async function readPhoto(assetId: string, version?: string): Promise<{ buffer: Buffer; contentType: string } | null> {
+  if (!assetIdPattern.test(assetId) || (version !== undefined && !versionPattern.test(version))) return null;
+  recordsBlobAuth();
+  const personId = assetId.split(".")[0];
+  if (await isDeleted(personId)) return null;
+  const person = await readById(personId); if (!person) return null;
+  const original = storedAsset(person, assetId);
+  if (!version && original?.startsWith("/api/photo/")) version = new URL(original, "https://local.invalid").searchParams.get("asset") ?? undefined;
+  if (version) {
+    const bytes = await readPrivateBytes(`${MEDIA_PREFIX}${assetId}/${version}`);
+    if (bytes) return { buffer: bytes, contentType: contentType(version) };
+  }
+  if (!original || original.startsWith("/api/photo/")) return null;
+  let url: URL;
+  try { url = new URL(original); } catch { return null; }
+  if (url.protocol !== "https:" || (version && legacyVersion(original) !== version)) return null;
+  const pathname = url.pathname.replace(/^\//, "");
+  const prefix = assetId.includes(".audio.") ? "audio" : assetId.endsWith(".cartoon") ? "cartoons" : assetId.endsWith(".loop") ? "loops" : "photos";
+  if (!pathname.startsWith(`${prefix}/${personId}.`) && !pathname.startsWith(`${prefix}/${personId}-`)) return null;
+  const archived = await readPrivateBytes(`legacy-archive/media/${pathname}`);
+  if (archived) return { buffer: archived, contentType: contentType(pathname) };
+  // Transition-only fallback: fetch only an exact entry in OUR legacy store.
+  // Never redirect a client to an old public URL or fetch arbitrary input URLs.
+  if (!mediaBlobConfigured()) return null;
+  const legacy = await findBlob(pathname, "media");
+  if (!legacy || canonicalUrl(legacy.url) !== canonicalUrl(original)) return null;
+  return { buffer: await readPublicBytes(legacy), contentType: contentType(pathname) };
+}
+
+
+/** Enumerate every version/orphan in application-owned namespaces, rather
+ *  than only live people (tombstones hide the records needing deletion too). */
+async function eventBlobs(): Promise<{ store: Store; blob: BlobEntry }[]> {
+  // Missing one credential must not be reported as complete erasure.
+  recordsBlobAuth(); mediaBlobAuth();
+  const out: { store: Store; blob: BlobEntry }[] = [];
+  for (const store of ["records", "media"] as const) {
+    const prefixes = store === "records"
+      ? ["people/", "slugs/", "deleted/", "legacy-archive/", "private-media/"]
+      : ["people/", "slugs/", "photos/", "cartoons/", "loops/", "audio/"];
+    for (const prefix of prefixes) {
+      for (const blob of await listAll(prefix, store)) out.push({ store, blob });
+    }
+    const single = await findBlob(LEGACY_SINGLE, store);
+    if (single) out.push({ store, blob: single });
+  }
+  return out;
+}
+
+/** Irreversible removal of event-owned data, possible only after event end.
+ *  Repeat safely after timeout/partial failure; errors never imply success. */
+export async function purgeEventData({ dryRun }: { dryRun: boolean }): Promise<PurgeResult> {
+  if (!dryRun) assertEventPurgeAllowed();
+  const entries = await eventBlobs();
+  if (dryRun) return { dryRun: true, candidates: entries.length, deleted: 0, remaining: entries.length };
+  await mapLimit(entries, async ({ store, blob }) => { await del(blob.pathname, auth(store)); });
+  const remaining = (await eventBlobs()).length;
+  return { dryRun: false, candidates: entries.length, deleted: entries.length, remaining };
+}
+
+/** Populate exact owner-scoped private aliases for every historical record.
+ * URL normalization can then be saved by an editor without losing the origin
+ * lookup. No Person is rewritten, so concurrent manuscript edits cannot lose. */
+async function createLegacyMediaAliases(media: BlobEntry[], sources: BlobEntry[]): Promise<void> {
+  const originals = new Map(media.map((blob) => [canonicalUrl(blob.url), blob]));
+  const versions = new Map(media.map((blob) => [legacyVersion(blob.url), blob]));
+  const people: Person[] = [];
+  for (const blob of await listAll(PERSON_PREFIX, "records")) {
+    if (!/^people\/[A-Za-z0-9_-]+\/[^/]+\.json$/.test(blob.pathname)) continue;
+    const raw = await readPrivateText(blob.pathname);
+    if (raw === null) throw new Error("Private history is missing during media migration");
+    people.push(parsePerson(raw));
+  }
+  for (const blob of sources) {
+    const raw = await readPublicText(blob);
+    if (blob.pathname === LEGACY_SINGLE) {
+      const rows: unknown = JSON.parse(raw); if (!Array.isArray(rows)) throw new Error("Invalid legacy list");
+      people.push(...rows.map((row) => parsePerson(JSON.stringify(row))));
+    } else people.push(parsePerson(raw));
+  }
+  const copiedAliases = new Set<string>();
+  for (const person of people) {
+    const refs: [string, string | undefined, string][] = [
+      [person.id, person.photoUrl, "photos"], [`${person.id}.cartoon`, person.cartoonUrl, "cartoons"], [`${person.id}.loop`, person.loopVideoUrl, "loops"],
+    ];
+    for (const section of person.sections) for (const [lang, url] of Object.entries(section.cachedAudio ?? {})) refs.push([`${person.id}.audio.${section.id}-${lang}`, url, "audio"]);
+    for (const [defaultId, url, prefix] of refs) {
+      if (!url) continue;
+      let blob: BlobEntry | undefined; let assetId = defaultId;
+      if (url.startsWith("/api/photo/")) {
+        const proxy = new URL(url, "https://local.invalid");
+        assetId = proxy.pathname.slice("/api/photo/".length);
+        blob = versions.get(proxy.searchParams.get("asset") || "");
+      } else {
+        try { blob = originals.get(canonicalUrl(url)); } catch { continue; }
+      }
+      if (!blob) continue;
+      if (!assetIdPattern.test(assetId) || assetId.split(".")[0] !== person.id ||
+          (!blob.pathname.startsWith(`${prefix}/${person.id}.`) && !blob.pathname.startsWith(`${prefix}/${person.id}-`))) throw new Error("Legacy media ownership mismatch");
+      const aliasPath = `${MEDIA_PREFIX}${assetId}/${legacyVersion(blob.url)}`;
+      if (copiedAliases.has(aliasPath)) continue;
+      const bytes = await readPrivateBytes(`legacy-archive/media/${blob.pathname}`);
+      if (!bytes) throw new Error("Verified media archive is missing");
+      await copyPrivateBytes(aliasPath, bytes);
+      copiedAliases.add(aliasPath);
+    }
+  }
+}
+
+/** Move plaintext legacy sources into private archives after exact readback,
+ *  while preserving the authoritative current record and stable QR mapping.
+ *  This is a separate explicit maintenance action, never a read-side effect. */
+export async function privatizeLegacyRecords({ dryRun }: { dryRun: boolean }) {
+  recordsBlobAuth(); mediaBlobAuth();
+  const sources = (await listAll(PERSON_PREFIX, "media")).filter((b) => /^people\/[A-Za-z0-9_-]+\.json$/.test(b.pathname));
+  const single = await findBlob(LEGACY_SINGLE, "media");
+  if (single) sources.push(single);
+  const media: BlobEntry[] = [];
+  for (const prefix of ["photos/", "cartoons/", "loops/", "audio/"]) media.push(...await listAll(prefix, "media"));
+  let mediaMoved = 0;
+  if (!dryRun) {
+    // Copy every version/orphan first. A failure retains all public media.
+    for (const blob of media) {
+      const bytes = await readPublicBytes(blob);
+      await copyPrivateBytes(`legacy-archive/media/${blob.pathname}`, bytes);
+    }
+    await createLegacyMediaAliases(media, sources);
+  }
+  let moved = 0;
+  for (const source of sources) {
+    const raw = await readPublicText(source);
+    const people = source.pathname === LEGACY_SINGLE
+      ? (() => { const rows: unknown = JSON.parse(raw); if (!Array.isArray(rows)) throw new Error("Invalid legacy list"); return rows.map((p) => parsePerson(JSON.stringify(p))); })()
+      : [parsePerson(raw)];
+    if (dryRun) continue;
+    // Archive all historical bytes even if a newer private edit exists.
+    const archivePath = `legacy-archive/${source.pathname}`;
+    const existing = await readPrivateText(archivePath);
+    if (existing === null) {
+      await put(archivePath, raw, { access: "private", addRandomSuffix: false, allowOverwrite: false, contentType: "application/json", ...recordsBlobAuth() });
+    }
+    await verifyPrivateWrite(archivePath, raw, "Private archive verification failed");
+    for (const person of people) {
+      if (await isDeleted(person.id)) continue;
+      if (!(await readPrivatePerson(person.id))) await copyLegacyPerson(person);
+      await writeSlug(person.slug, person.id);
+    }
+    await del(source.pathname, mediaBlobAuth());
+    moved++;
+  }
+  if (!dryRun) {
+    // Pure read-time URL normalization keeps current concurrent edits intact.
+    // New uploads are private, so no new public assets can race this inventory.
+    for (const blob of media) { await del(blob.pathname, mediaBlobAuth()); mediaMoved++; }
+  }
+  let remainingPublicMedia = 0;
+  for (const prefix of ["photos/", "cartoons/", "loops/", "audio/"]) remainingPublicMedia += (await listAll(prefix, "media")).length;
+  return { dryRun, candidates: sources.length, moved, mediaCandidates: media.length, mediaMoved, remainingPublicMedia };
 }

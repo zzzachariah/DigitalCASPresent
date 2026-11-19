@@ -1,19 +1,24 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import ts from 'typescript';
 
 // Compile only this dependency-free module: no real key, model, or network.
 const source = await readFile(new URL('../src/lib/ai.ts', import.meta.url), 'utf8');
+const policy = ts.transpileModule(await readFile(new URL('../src/lib/processing-policy.ts', import.meta.url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
+const policyUrl = `data:text/javascript;base64,${Buffer.from(policy).toString('base64')}`;
 const compiled = ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
-}).outputText;
+}).outputText.replace('"./processing-policy"', JSON.stringify(policyUrl));
+const beforeApproval = process.env.EXTERNAL_AI_PROCESSING_APPROVED;
+process.env.EXTERNAL_AI_PROCESSING_APPROVED = 'true';
+after(() => { if (beforeApproval === undefined) delete process.env.EXTERNAL_AI_PROCESSING_APPROVED; else process.env.EXTERNAL_AI_PROCESSING_APPROVED = beforeApproval; });
 let moduleId = 0;
 const fakeKey = 'test-only-not-a-real-key';
 const opts = { system: 'Use only the supplied exhibit.', messages: [{ role: 'user', content: 'Explain it.' }] };
 
 async function client(overrides = {}) {
-  const config = { AI_API_KEY: fakeKey, AI_BASE_URL: 'https://relay.example/v1/', AI_MODEL: 'claude-opus-test', AI_MODEL_LIVE: '', AI_API_PROTOCOL: 'auto', ...overrides };
+  const config = { AI_API_KEY: fakeKey, AI_BASE_URL: 'https://relay.example/v1/', AI_MODEL: 'claude-opus-test', AI_MODEL_LIVE: '', AI_API_PROTOCOL: 'auto', EXTERNAL_AI_PROCESSING_APPROVED: 'true', ...overrides };
   const before = Object.fromEntries(Object.keys(config).map((key) => [key, process.env[key]]));
   try {
     Object.assign(process.env, config);
@@ -220,4 +225,24 @@ test('Mock mode still works without calling any service', async (t) => {
   t.mock.method(globalThis, 'fetch', async () => assert.fail('Unexpected fetch'));
   assert.equal(ai.aiIsMock(), true);
   assert.match(await ai.chat(opts), /Demo mode/);
+});
+
+
+test('Privacy gate blocks real and mock calls, including streaming, before fetch', async (t) => {
+  const real = await client();
+  const mock = await client({ AI_API_KEY: '' });
+  t.mock.method(globalThis, 'fetch', async () => assert.fail('Privacy gate must prevent fetch'));
+  process.env.EXTERNAL_AI_PROCESSING_APPROVED = 'false';
+  try {
+    await assert.rejects(real.chat(opts), /privacy approval/);
+    await assert.rejects(mock.chat(opts), /privacy approval/);
+    await assert.rejects(collect(real.chatStream(opts)), /privacy approval/);
+    await assert.rejects(collect(mock.chatStream(opts)), /privacy approval/);
+  } finally { process.env.EXTERNAL_AI_PROCESSING_APPROVED = 'true'; }
+});
+
+test('Provider error fields cannot echo confidential manuscript text into logs', async (t) => {
+  const ai = await client();
+  t.mock.method(globalThis, 'fetch', async () => json({ error: { code: 'private-manuscript', message: 'CONFIDENTIAL source text' } }, 500));
+  await assert.rejects(ai.chat(opts), { message: 'AI request failed (500).' });
 });

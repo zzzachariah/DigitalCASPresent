@@ -1,6 +1,8 @@
+import { previewMediaUrl } from "@/lib/media-access";
+import { requirePrivacyConsent } from "@/lib/privacy-server";
 import { NextRequest, NextResponse } from "next/server";
 import { deleteMediaUrl, getPerson, savePhoto, storageWritable, updatePerson } from "@/lib/store";
-import { ownerTokenValid } from "@/lib/access";
+import { ownerTokenValid, previewTokenFor } from "@/lib/access";
 import { readUploadedImage } from "@/lib/image";
 import { limitRequest } from "@/lib/ratelimit";
 
@@ -9,6 +11,9 @@ export const runtime = "nodejs";
 const NOT_FOUND = { error: "链接无效或已失效 / This link is invalid or has expired" };
 
 export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+  const consentRequired = requirePrivacyConsent(req);
+  if (consentRequired) return consentRequired;
+
   const limited = limitRequest(req, "submitWrite");
   if (limited) return limited;
 
@@ -37,7 +42,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       submittedAt: Date.now(),
     });
     for (const u of [person.cartoonUrl, person.loopVideoUrl]) if (u) await deleteMediaUrl(u).catch(() => {});
-    return NextResponse.json({ photoUrl });
+    return NextResponse.json({ photoUrl: previewMediaUrl(photoUrl, previewTokenFor(person)) });
   } catch (err) {
     console.error("[submit:photo] failed:", err);
     return NextResponse.json(

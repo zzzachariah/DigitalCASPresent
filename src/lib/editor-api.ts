@@ -1,3 +1,4 @@
+import { PRIVACY_CONSENT_HEADER } from "./privacy";
 import type { Person, Section } from "./types";
 import { readJson } from "./http";
 
@@ -142,20 +143,24 @@ export interface StudentTokens {
   current: string | null;
   /** View-only token for the preview link. */
   preview: string | null;
+  privacyVersion?: string;
 }
 
 /** Student self-submission endpoints. */
 export function studentApi(token: StudentTokens): EditorApi {
-  const auth = (): Record<string, string> => (token.current ? { "x-edit-token": token.current } : {});
+  const auth = (): Record<string, string> => ({
+    ...(token.current ? { "x-edit-token": token.current } : {}),
+    ...(token.privacyVersion ? { [PRIVACY_CONSENT_HEADER]: token.privacyVersion } : {}),
+  });
   return {
     async parse(file) {
-      return (await call("/api/submit/parse", { method: "POST", body: fileForm("file", file) }, "解析失败")).text;
+      return (await call("/api/submit/parse", { method: "POST", headers: auth(), body: fileForm("file", file) }, "解析失败")).text;
     },
     async autosection(script) {
-      return (await call("/api/submit/autosection", jsonInit("POST", { script }), "分段失败")).sections;
+      return (await call("/api/submit/autosection", jsonInit("POST", { script }, auth()), "分段失败")).sections;
     },
     async create(payload) {
-      const data = await call("/api/submit", jsonInit("POST", payload), "提交失败");
+      const data = await call("/api/submit", jsonInit("POST", payload, auth()), "提交失败");
       token.current = data.editToken;
       token.preview = data.previewToken ?? null;
       return data.person;

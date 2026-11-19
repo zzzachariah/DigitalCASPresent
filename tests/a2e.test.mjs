@@ -4,13 +4,16 @@ import { readFile } from 'node:fs/promises';
 import ts from 'typescript';
 
 const source = await readFile(new URL('../src/lib/a2e.ts', import.meta.url), 'utf8');
-const compiled = ts.transpileModule(source, {
+const policy = await readFile(new URL('../src/lib/processing-policy.ts', import.meta.url), 'utf8');
+const bundledSource = source.replace(/import \{ externalProcessingAllowed, requireExternalProcessing \} from \".\/processing-policy\";/, '') + '\n' + policy;
+const compiled = ts.transpileModule(bundledSource, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
 }).outputText;
 let moduleId = 0;
 
 async function client(overrides = {}) {
   const config = {
+    EXTERNAL_AI_PROCESSING_APPROVED: 'true',
     A2E_BASE_URL: 'https://tts.example', A2E_API_KEY: 'test-only-fake-key',
     A2E_TTS_ID_MALE: 'test-male', A2E_TTS_ID_FEMALE: 'test-female', A2E_TTS_ID: 'test-neutral',
     ...overrides,
@@ -99,4 +102,13 @@ test('Pure punctuation, whitespace and emoji never create TTS requests', async t
   for (const text of ['**', '  \n ', '。！？”', '🎉']) {
     await assert.rejects(ai.a2eTts(text), /requires speakable text/);
   }
+});
+
+
+test('Unapproved provider cannot receive narration or uploaded images', async t => {
+  const { ai, restore } = await client({ EXTERNAL_AI_PROCESSING_APPROVED: '' });
+  t.after(restore);
+  t.mock.method(globalThis, 'fetch', async () => { throw new Error('Unexpected network request'); });
+  await assert.rejects(ai.a2eTts('Confidential fixture'), /disabled pending/);
+  await assert.rejects(ai.a2eUploadImage('https://example.test/private-photo'), /disabled pending/);
 });

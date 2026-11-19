@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { nanoid } from "nanoid";
+import { externalProcessingAllowed } from "./processing-policy";
+import { localSections } from "./local-sections";
 import { chat, extractJson } from "./ai";
 import { autoSectionPrompt } from "./prompts";
 import { extractText } from "./parse";
@@ -44,12 +46,18 @@ export async function handleParse(req: NextRequest): Promise<NextResponse> {
 
 /** Ask the AI to split a script into logical parts the visitor can pick. */
 export async function handleAutosection(req: NextRequest): Promise<NextResponse> {
-  const { script } = (await req.json().catch(() => ({}))) as { script?: string };
-  if (!script?.trim()) {
+  const body = await req.json().catch(() => null);
+  const script = body && typeof body.script === "string" ? body.script : "";
+  if (!script.trim()) {
     return NextResponse.json({ error: "请先提供讲稿 / Provide a script first" }, { status: 400 });
   }
   if (script.length > LIMITS.script) {
     return NextResponse.json({ error: `讲稿过长（≤${LIMITS.script} 字）/ Script too long` }, { status: 400 });
+  }
+
+  // Confidential manuscripts stay within this app until provider terms are approved.
+  if (!externalProcessingAllowed()) {
+    return NextResponse.json({ sections: localSections(script), method: "local" });
   }
 
   try {
@@ -78,7 +86,7 @@ export async function handleAutosection(req: NextRequest): Promise<NextResponse>
 
     return NextResponse.json({ sections });
   } catch (err) {
-    console.error("[autosection] failed:", err);
+    console.error("[autosection] failed; no manuscript content logged");
     return NextResponse.json(
       { error: "AI 分段暂时不可用，请稍后再试或手动添加部分 / AI split is unavailable right now — try again or add parts by hand" },
       { status: 502 }

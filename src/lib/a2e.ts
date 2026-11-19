@@ -1,3 +1,4 @@
+import { externalProcessingAllowed, requireExternalProcessing } from "./processing-policy";
 // ─────────────────────────────────────────────────────────────────────
 // A2E (video.a2e.com.cn) — domestic talking-photo / lip-sync provider.
 // Responses are wrapped as { code: 0, data: {...} }. Auth: Bearer sk_...
@@ -12,7 +13,7 @@ function key(): string {
 }
 
 export function a2eConfigured(): boolean {
-  return (process.env.AVATAR_PROVIDER || "mock").toLowerCase() === "a2e" && !!key();
+  return externalProcessingAllowed() && (process.env.AVATAR_PROVIDER || "mock").toLowerCase() === "a2e" && !!key();
 }
 
 export interface A2eResult {
@@ -22,6 +23,7 @@ export interface A2eResult {
 }
 
 export async function a2e(path: string, method = "POST", body?: unknown, signal?: AbortSignal): Promise<A2eResult> {
+  requireExternalProcessing();
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: { Authorization: `Bearer ${key()}`, "Content-Type": "application/json" },
@@ -256,6 +258,7 @@ export async function a2eLoopVideoPoll(
 
 /** Upload an image (from any public URL) into A2E's storage; returns cdnUrl. */
 export async function a2eUploadImage(srcUrl: string): Promise<string> {
+  requireExternalProcessing();
   const img = await fetch(srcUrl);
   if (!img.ok) throw new Error(`fetch source image failed: ${img.status}`);
   const buf = Buffer.from(await img.arrayBuffer());

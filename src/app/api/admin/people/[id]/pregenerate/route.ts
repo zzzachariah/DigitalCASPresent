@@ -1,3 +1,5 @@
+import { externalProcessingAllowed } from "@/lib/processing-policy";
+import { reviewExhibitionAnswer } from "@/lib/ai-safety";
 import { NextRequest, NextResponse } from "next/server";
 import { isAdmin } from "@/lib/auth";
 import { getPerson, readPhoto, saveAudio, updatePerson, storageWritable } from "@/lib/store";
@@ -22,7 +24,8 @@ async function readAudio(url: string): Promise<AudioAsset> {
   if (url.startsWith("/api/photo/")) {
     const id = url.slice("/api/photo/".length).split("?")[0];
     if (!/^[A-Za-z0-9_-]{1,40}\.audio\.[A-Za-z0-9_-]{1,80}$/.test(id)) throw new AudioReadError("unavailable");
-    const asset = await readPhoto(id);
+    const assetVersion = new URL(url, "https://local.invalid").searchParams.get("asset") || undefined;
+    const asset = await readPhoto(id, assetVersion);
     if (!asset) throw new AudioReadError("missing");
     return asset;
   }
@@ -69,9 +72,11 @@ async function generateVariant(person: Person, section: Section, index: number, 
     let prompt = explainSectionPrompt(section, index, person.sections.length);
     if (language !== "bilingual") prompt += `\n\nSpeak in ${language === "zh" ? "Simplified Chinese (简体中文)" : "English"}.`;
     const { answer, suggestions } = splitAnswer(await chat({
-      system: systemPrompt(person), messages: [{ role: "user", content: prompt }], temperature: 0.6, maxTokens: 600,
+      system: systemPrompt({ ...person, script: section.content, sections: [section] }), messages: [{ role: "user", content: prompt }], temperature: 0.6, maxTokens: 600,
     }));
     if (!answer.trim()) return result("failed", "empty_answer");
+    const approved = await reviewExhibitionAnswer({ source: section.content, question: `Explain this selected exhibition section briefly: ${section.title}`, answer, suggestions }, (opts) => chat(opts));
+    if (!approved) return result("failed", "answer_not_approved");
     const audio = a2eConfigured() ? await createPermanentNarration(person, section.id, language, answer, dependencies) : undefined;
     const fresh = await getPerson(person.id);
     const current = fresh?.sections.find((s) => s.id === section.id);
@@ -113,6 +118,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       (body.audioOnly === true && body.regenerateText === true)) {
     return NextResponse.json({ error: "invalid preparation options" }, { status: 400 });
   }
+  if (!externalProcessingAllowed()) return NextResponse.json({ error: "外部处理未获隐私批准 / External processing is disabled pending privacy review" }, { status: 503 });
   const person = await getPerson(params.id);
   if (!person) return NextResponse.json({ error: "not found" }, { status: 404 });
   if (body.audioOnly && !a2eConfigured()) return NextResponse.json({ error: "narration provider is not configured" }, { status: 503 });
@@ -137,6 +143,16 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
           continue;
         }
         if (body.audioOnly || (body.regenerateText !== true && section.cachedAnswers?.[language]?.trim())) {
+          const approved = await reviewExhibitionAnswer({
+            source: section.content,
+            question: `Explain this selected exhibition section briefly: ${section.title}`,
+            answer: section.cachedAnswers?.[language] || "",
+            suggestions: section.cachedSuggestions?.[language] || [],
+          }, (opts) => chat({ ...opts, signal: AbortSignal.timeout(25_000) }));
+          if (!approved) {
+            results.push({ sectionId: section.id, language, status: "failed", reason: "answer_not_approved", elapsedMs: 0 });
+            continue;
+          }
           results.push(a2eConfigured()
             ? await prepareExistingNarration(person.id, section.id, language, dependencies)
             : { sectionId: section.id, language, status: "skipped", reason: "text_already_cached", elapsedMs: 0 });
