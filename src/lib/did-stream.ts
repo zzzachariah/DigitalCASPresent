@@ -1,3 +1,4 @@
+import { externalProcessingAllowed, requireExternalProcessing } from "./processing-policy";
 // ─────────────────────────────────────────────────────────────────────
 // D-ID real-time streaming (WebRTC) helpers — server side.
 //
@@ -15,6 +16,7 @@ function auth(): string {
 
 export function didStreamEnabled(): boolean {
   return (
+    externalProcessingAllowed() &&
     (process.env.AVATAR_PROVIDER || "mock").toLowerCase() === "did" &&
     !!process.env.DID_API_KEY?.trim()
   );
@@ -26,6 +28,7 @@ export function didVoiceFor(lang: "en" | "zh"): string {
 }
 
 async function didFetch(path: string, method: string, body?: unknown) {
+  requireExternalProcessing();
   const res = await fetch(`${DID_API_URL}${path}`, {
     method,
     headers: { Authorization: auth(), "Content-Type": "application/json" },
@@ -39,7 +42,7 @@ async function didFetch(path: string, method: string, body?: unknown) {
     json = { raw: text };
   }
   if (!res.ok) {
-    const err = new Error(`D-ID ${method} ${path} -> ${res.status}: ${text.slice(0, 300)}`);
+    const err = new Error(`D-ID request failed (${res.status}).`);
     (err as any).status = res.status;
     throw err;
   }

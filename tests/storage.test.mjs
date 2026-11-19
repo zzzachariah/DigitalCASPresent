@@ -81,11 +81,12 @@ function setup(extraEnv = {}) {
       if (onPut) await onPut(pathname, options);
       const finalPath = options.addRandomSuffix ? pathname.replace(/(\.[^.]+)$/, `-random${++serial}$1`) : pathname;
       if (stores[store].has(finalPath) && !options.allowOverwrite) throw new Error('Already exists');
-      stores[store].set(finalPath, typeof value === 'string' ? value : Buffer.from(value).toString());
+      stores[store].set(finalPath, typeof value === 'string' ? value : Buffer.from(value));
       return entry(store, finalPath);
     },
     async del(pathname, options) {
       const store = storeFor(options); calls.push({ op: 'del', store, path: pathname });
+      if (failures.get('del') === store) throw new Error('Simulated delete failure');
       stores[store].delete(pathname);
     },
   };
@@ -97,7 +98,8 @@ function setup(extraEnv = {}) {
     const raw = stores.media.get(pathname);
     return new Response(raw ?? 'not found', { status: raw === undefined ? 404 : 200 });
   }
-  const driver = loadTs('src/lib/store-blob.ts', { '@vercel/blob': api, './store-shared': shared, fetch: publicFetch }, env);
+  const retention = loadTs('src/lib/event-retention.ts', {}, env);
+  const driver = loadTs('src/lib/store-blob.ts', { '@vercel/blob': api, './store-shared': shared, './event-retention': retention, fetch: publicFetch }, env);
   function seedLegacy(p = person) {
     stores.media.set(`people/${p.id}.json`, JSON.stringify(p));
     stores.media.set(`slugs/${p.slug}.txt`, p.id);
@@ -231,15 +233,17 @@ test('tombstone prevents deleted legacy students reappearing via list, QR, id or
   assert.equal(s.stores.media.size, 2); assert.equal(s.calls.some((c) => c.op === 'del'), false);
 });
 
-test('new saves are private and photo uploads stay in the original public media store', async () => {
+test('new records and all photo uploads stay private behind immutable proxies', async () => {
   const s = setup();
   const created = await s.driver.createPerson({ name: 'New student', script: 'New text', sections: [], language: 'auto' });
   assert.equal(s.stores.media.size, 0);
   assert.ok(writes(s).every((c) => c.store === 'records' && c.access === 'private'));
   const url = await s.driver.savePhoto(created.id, Buffer.from('photo'), 'png');
-  assert.match(url, /^https:\/\/media\.invalid\/photos\//);
+  assert.match(url, /^\/api\/photo\/new-id-\d+\?asset=[a-f0-9]{64}\.png$/);
   assert.equal((await s.driver.getPerson(created.slug)).photoUrl, url);
-  assert.ok(writes(s).some((c) => c.store === 'media' && c.access === 'public'));
+  assert.ok(writes(s).every((c) => c.store === 'records' && c.access === 'private'));
+  const version = new URL(url, 'https://local.invalid').searchParams.get('asset');
+  assert.ok((await s.driver.readPhoto(created.id, version)).buffer.equals(Buffer.from('photo')));
   await s.driver.updatePerson(created.id, { name: 'Changed name', slug: 'must-not-change' });
   assert.equal((await s.driver.getPerson(created.id)).slug, created.slug);
 });
@@ -284,7 +288,7 @@ test('filesystem reads keep legacy source in place and deletion masks it', async
     fs.mkdirSync(path.join(cwd, 'data'));
     fs.writeFileSync(path.join(cwd, 'data/people.json'), JSON.stringify([person]));
     const s = setup();
-    const driver = loadTs('src/lib/store-fs.ts', { './store-shared': s.shared }, {}, cwd);
+    const driver = loadTs('src/lib/store-fs.ts', { './store-shared': s.shared, './event-retention': loadTs('src/lib/event-retention.ts', {}, {}) }, {}, cwd);
     assert.equal((await driver.listPeople()).length, 1);
     assert.deepEqual(fs.readdirSync(path.join(cwd, 'data')), ['people.json']);
     assert.equal(await driver.deletePerson(person.id), true);
@@ -311,4 +315,178 @@ test('migration endpoint rejects unauthenticated requests and writes only when d
   assert.equal((await route.POST(req({ ids: ['../bad'] }))).status, 400);
   await route.POST(req({ dryRun: false, ids: [person.id] }));
   assert.equal(calls[1].dryRun, false);
+});
+
+
+test('event purge includes hidden versions, archived legacy data and orphan media, but no unrelated data', async () => {
+  const s = setup({ EVENT_ENDS_AT: '2000-01-01T18:00:00+08:00' });
+  s.seedLegacy(); s.seedPrivate();
+  s.stores.records.set(`people/${person.id}/01600000000000-old.json`, JSON.stringify(person));
+  s.stores.records.set('deleted/removed.json', '{}');
+  s.stores.records.set('legacy-archive/data/people.json', JSON.stringify([person]));
+  s.stores.records.set('unrelated/file.json', 'KEEP');
+  for (const p of ['photos/orphan.jpg', 'cartoons/orphan.png', 'loops/orphan.mp4', 'audio/orphan.mp3', 'data/people.json']) s.stores.media.set(p, 'synthetic');
+  s.stores.media.set('unrelated/file.json', 'KEEP');
+  const dry = await s.driver.purgeEventData({ dryRun: true });
+  assert.equal(dry.candidates, 12); assert.equal(dry.deleted, 0); assert.deepEqual(writes(s), []);
+  const result = await s.driver.purgeEventData({ dryRun: false });
+  assert.equal(result.deleted, 12); assert.equal(result.remaining, 0);
+  assert.deepEqual([...s.stores.records.keys()], ['unrelated/file.json']);
+  assert.deepEqual([...s.stores.media.keys()], ['unrelated/file.json']);
+  assert.equal((await s.driver.purgeEventData({ dryRun: false })).deleted, 0);
+});
+
+test('physical purge refuses absent/future/malformed event end and cannot succeed with a missing store', async () => {
+  for (const end of ['', '2100-01-01T00:00:00Z', 'not-a-date']) {
+    const s = setup({ EVENT_ENDS_AT: end }); s.seedLegacy();
+    await assert.rejects(s.driver.purgeEventData({ dryRun: false }), /valid EVENT_ENDS_AT/);
+    assert.deepEqual(writes(s), []);
+  }
+  const s = setup({ EVENT_ENDS_AT: '2000-01-01T00:00:00Z', BLOB_RECORDS_READ_WRITE_TOKEN: '' }); s.seedLegacy();
+  await assert.rejects(s.driver.purgeEventData({ dryRun: false }), /Private records/);
+  assert.deepEqual(writes(s), []);
+});
+
+test('physical purge failure is retryable and is not reported as completed', async () => {
+  const s = setup({ EVENT_ENDS_AT: '2000-01-01T00:00:00Z' }); s.seedLegacy(); s.seedPrivate();
+  s.failures.set('del', 'media');
+  await assert.rejects(s.driver.purgeEventData({ dryRun: false }), /delete failure/);
+  assert.equal(s.stores.media.size, 2);
+  s.failures.delete('del');
+  assert.equal((await s.driver.purgeEventData({ dryRun: false })).remaining, 0);
+});
+
+test('privatizing legacy manuscripts preserves exact historical bytes and newer canonical edits', async () => {
+  const s = setup(); s.seedLegacy();
+  const current = { ...person, script: 'New private content' }; s.seedPrivate(current);
+  const second = { ...person, id: 'second', slug: 'second' };
+  const legacyBytes = JSON.stringify([person, second], null, 2);
+  s.stores.media.set('data/people.json', legacyBytes);
+  const dry = await s.driver.privatizeLegacyRecords({ dryRun: true });
+  assert.equal(dry.candidates, 2); assert.equal(dry.moved, 0); assert.deepEqual(writes(s), []);
+  const result = await s.driver.privatizeLegacyRecords({ dryRun: false });
+  assert.equal(result.moved, 2);
+  assert.equal(s.stores.media.has('data/people.json'), false);
+  assert.equal(s.stores.media.has(`people/${person.id}.json`), false);
+  assert.equal(s.stores.records.get('legacy-archive/data/people.json'), legacyBytes);
+  assert.equal((await s.driver.getPerson(person.slug)).script, current.script);
+  assert.equal((await s.driver.getPerson(second.slug)).id, second.id);
+  assert.equal((await s.driver.privatizeLegacyRecords({ dryRun: false })).moved, 0);
+});
+
+test('privatizing never removes an unverified source or a legacy list with an invalid entry', async () => {
+  for (const failure of ['put', 'mismatched-read', 'invalid-list']) {
+    const s = setup(); s.seedLegacy();
+    if (failure === 'put') s.failures.set('put', 'records');
+    if (failure === 'mismatched-read') s.setOnPut((pathname) => s.failures.set(pathname, 'mismatched-read'));
+    if (failure === 'invalid-list') { s.stores.media.clear(); s.stores.media.set('data/people.json', JSON.stringify([person, { id: '../bad' }])); }
+    await assert.rejects(s.driver.privatizeLegacyRecords({ dryRun: false }));
+    assert.equal(s.calls.some((c) => c.op === 'del'), false);
+  }
+});
+
+test('filesystem physical purge removes current, hidden, legacy and media files, not external symlink targets', async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cas-retention-test-'));
+  try {
+    for (const dir of ['people', 'uploads', 'deleted']) fs.mkdirSync(path.join(cwd, 'data', dir), { recursive: true });
+    for (const file of ['people/a.json', 'uploads/a.audio.mp3', 'deleted/a.json', 'people.json']) fs.writeFileSync(path.join(cwd, 'data', file), 'synthetic');
+    fs.writeFileSync(path.join(cwd, 'keep.txt'), 'KEEP');
+    fs.symlinkSync(path.join(cwd, 'keep.txt'), path.join(cwd, 'data/uploads/link'));
+    const env = { EVENT_ENDS_AT: '2000-01-01T00:00:00Z' };
+    const s = setup();
+    const driver = loadTs('src/lib/store-fs.ts', { './store-shared': s.shared, './event-retention': loadTs('src/lib/event-retention.ts', {}, env) }, env, cwd);
+    assert.equal((await driver.purgeEventData({ dryRun: true })).candidates, 5);
+    const result = await driver.purgeEventData({ dryRun: false });
+    assert.equal(result.deleted, 5); assert.equal(result.remaining, 0);
+    assert.equal(fs.readFileSync(path.join(cwd, 'keep.txt'), 'utf8'), 'KEEP');
+  } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+});
+
+
+test('private photo versions preserve binary bytes and never fetch arbitrary public URLs', async () => {
+  const s = setup(); s.seedPrivate();
+  const bytes = Buffer.from([0, 255, 128, 1, 2, 0]);
+  const first = await s.driver.savePhoto(person.id, bytes, 'png');
+  const second = await s.driver.savePhoto(person.id, Buffer.from('replacement'), 'png');
+  const version = new URL(first, 'https://local.invalid').searchParams.get('asset');
+  assert.ok((await s.driver.readPhoto(person.id, version)).buffer.equals(bytes));
+  assert.equal((await s.driver.readPhoto(person.id)).buffer.toString(), 'replacement');
+  assert.notEqual(first, second);
+  assert.equal(s.calls.some(c => c.op === 'fetch'), false);
+  assert.equal(s.stores.media.size, 0);
+  assert.equal(await s.driver.readPhoto('another-person', version), null);
+  assert.equal(await s.driver.readPhoto(person.id, '../bad'), null);
+});
+
+test('media privatization copies current, historical and orphan bytes before removing every public origin', async () => {
+  const s = setup();
+  const photoPath = `photos/${person.id}-old.png`;
+  const audioPath = `audio/${person.id}-part1-en-old.mp3`;
+  const orphanPath = 'audio/deleted-student-orphan.mp3';
+  const photo = Buffer.from([0, 255, 128, 2]);
+  const audio = Buffer.from('old manuscript-derived narration');
+  const current = { ...person, photoUrl: `https://media.invalid/${photoPath}`, sections: [{ ...person.sections[0], cachedAudio: { en: `https://media.invalid/${audioPath}` } }] };
+  s.seedLegacy(current); s.seedPrivate(current);
+  s.stores.media.set(photoPath, photo); s.stores.media.set(audioPath, audio); s.stores.media.set(orphanPath, Buffer.from('orphan'));
+  const exposedBefore = await s.driver.getPerson(person.id);
+  assert.match(exposedBefore.photoUrl, /^\/api\/photo\//);
+  assert.ok(!JSON.stringify(exposedBefore).includes('https://media.invalid'));
+  assert.ok((await s.driver.readPhoto(person.id)).buffer.equals(photo));
+  const dry = await s.driver.privatizeLegacyRecords({ dryRun: true });
+  assert.equal(dry.mediaCandidates, 3); assert.equal(dry.mediaMoved, 0);
+  assert.equal(writes(s).length, 0);
+  const migrated = await s.driver.privatizeLegacyRecords({ dryRun: false });
+  assert.equal(migrated.mediaMoved, 3); assert.equal(migrated.remainingPublicMedia, 0);
+  assert.ok(s.stores.records.get(`legacy-archive/media/${photoPath}`).equals(photo));
+  assert.ok(s.stores.records.get(`legacy-archive/media/${audioPath}`).equals(audio));
+  assert.equal(s.stores.records.get(`legacy-archive/media/${orphanPath}`).toString(), 'orphan');
+  assert.ok((await s.driver.readPhoto(person.id)).buffer.equals(photo));
+  assert.ok((await s.driver.readPhoto(`${person.id}.audio.part1-en`)).buffer.equals(audio));
+  // Saving normalized API output later cannot break media resolution.
+  await s.driver.updatePerson(person.id, { photoUrl: exposedBefore.photoUrl, sections: exposedBefore.sections });
+  assert.ok((await s.driver.readPhoto(person.id)).buffer.equals(photo));
+  assert.ok((await s.driver.readPhoto(`${person.id}.audio.part1-en`)).buffer.equals(audio));
+  assert.equal((await s.driver.privatizeLegacyRecords({ dryRun: false })).mediaMoved, 0);
+});
+
+test('media migration preserves edits made during archival and stops on a failed binary verification', async () => {
+  const s = setup(); s.seedPrivate({ ...person, photoUrl: `https://media.invalid/photos/${person.id}-old.png` });
+  s.stores.media.set(`photos/${person.id}-old.png`, Buffer.from('original-photo'));
+  let edited = false;
+  s.setOnPut(pathname => {
+    if (!edited && pathname.startsWith('legacy-archive/media/')) {
+      edited = true;
+      s.seedPrivate({ ...person, script: 'CONCURRENT PRIVATE EDIT', photoUrl: `https://media.invalid/photos/${person.id}-old.png` }, '09999999999999-edit.json');
+    }
+  });
+  await s.driver.privatizeLegacyRecords({ dryRun: false });
+  assert.equal((await s.driver.getPerson(person.id)).script, 'CONCURRENT PRIVATE EDIT');
+  const broken = setup(); broken.seedPrivate();
+  broken.stores.media.set(`photos/${person.id}-old.png`, Buffer.from([0, 255, 128]));
+  broken.setOnPut(pathname => { if (pathname.startsWith('legacy-archive/media/')) broken.failures.set(pathname, 'mismatched-read'); });
+  await assert.rejects(broken.driver.privatizeLegacyRecords({ dryRun: false }), /verification/);
+  assert.equal(broken.calls.some(c => c.op === 'del'), false);
+  assert.equal(broken.stores.media.size, 1);
+});
+
+test('a private Blob write crossing event expiry removes its newly written bytes', async () => {
+  const s = setup({ EVENT_ENDS_AT: '2999-01-01T00:00:00Z' }); s.seedPrivate();
+  s.setOnPut(pathname => { if (pathname.startsWith('private-media/')) s.env.EVENT_ENDS_AT = '2000-01-01T00:00:00Z'; });
+  await assert.rejects(s.driver.savePhoto(person.id, Buffer.from('late-photo'), 'png'), /closed/);
+  assert.equal([...s.stores.records.keys()].some(key => key.startsWith('private-media/')), false);
+  assert.equal(s.calls.some(c => c.op === 'del' && c.path.startsWith('private-media/')), true);
+});
+
+
+test('record updates never return legacy public URLs and history aliases are deduplicated', async () => {
+  const s = setup();
+  const p = { ...person, photoUrl: `https://media.invalid/photos/${person.id}-old.png` };
+  for (let i = 0; i < 30; i++) s.seedPrivate(p, `0170000000${String(i).padStart(4, '0')}-history.json`);
+  s.stores.media.set(`photos/${person.id}-old.png`, Buffer.from('photo'));
+  const updated = await s.driver.updatePerson(person.id, { name: 'New name' });
+  assert.match(updated.photoUrl, /^\/api\/photo\//);
+  const before = s.calls.length;
+  await s.driver.privatizeLegacyRecords({ dryRun: false });
+  const reads = s.calls.slice(before).filter(c => c.op === 'get' && c.path.startsWith('private-media/'));
+  assert.equal(reads.length, 2); // absence check + post-write verification once
 });

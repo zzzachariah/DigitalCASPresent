@@ -37,7 +37,7 @@ const STEPS = [
 ] as const;
 const LAST = STEPS.length - 1;
 
-/** Unsubmitted drafts survive a reload or the phone backgrounding the tab.
+/** Unsubmitted drafts survive a reload within this browser session.
  *  (The photo itself can't be persisted — only its fields and text.) */
 export const DRAFT_KEY = "dcp_submit_draft";
 interface StoredDraft {
@@ -59,7 +59,11 @@ interface StoredDraft {
 }
 export function readStoredDraft(): StoredDraft | null {
   try {
-    const raw = localStorage.getItem(DRAFT_KEY);
+    // Move a legacy persistent draft without losing the student's unfinished work.
+    const legacy = localStorage.getItem(DRAFT_KEY);
+    if (!sessionStorage.getItem(DRAFT_KEY) && legacy) sessionStorage.setItem(DRAFT_KEY, legacy);
+    localStorage.removeItem(DRAFT_KEY);
+    const raw = sessionStorage.getItem(DRAFT_KEY);
     if (!raw) return null;
     const d = JSON.parse(raw) as StoredDraft;
     if (!d || typeof d !== "object") return null;
@@ -72,6 +76,7 @@ export function readStoredDraft(): StoredDraft | null {
 export function clearStoredDraft() {
   try {
     localStorage.removeItem(DRAFT_KEY);
+    sessionStorage.removeItem(DRAFT_KEY);
   } catch {
     /* ignore */
   }
@@ -190,7 +195,7 @@ export default function SubmitWizard({
           editToken: d.existing && tokens?.current ? tokens.current : undefined,
           previewToken: d.existing && tokens?.preview ? tokens.preview : undefined,
         };
-        localStorage.setItem(DRAFT_KEY, JSON.stringify(stored));
+        sessionStorage.setItem(DRAFT_KEY, JSON.stringify(stored));
       } catch {
         /* storage full / private mode */
       }
@@ -213,7 +218,7 @@ export default function SubmitWizard({
   function cancel() {
     if (person) {
       if (d.dirty && !confirm("放弃这次的修改？\nDiscard your changes?")) return;
-    } else if (hasContent && !confirm("放弃已填写的内容？（草稿仍会保留在这台设备上）\nDiscard what you've entered?")) {
+    } else if (hasContent && !confirm("放弃已填写的内容？（草稿会保留到本次浏览器会话结束）\nDiscard what you've entered?")) {
       return;
     }
     onCancel();
@@ -516,7 +521,7 @@ export default function SubmitWizard({
             <div className="flex flex-wrap items-end justify-between gap-2">
               <div>
                 <h3 className="text-[17px] font-semibold">你的讲稿</h3>
-                <p className="mt-1 text-[13px] text-ink-3">粘贴全文，或上传文件自动提取。下一步会由 AI 自动分段。</p>
+                <p className="mt-1 text-[13px] text-ink-3">粘贴全文，或上传文件自动提取。下一步会自动分段；外部处理未启用时按段落切分。</p>
               </div>
               <label className="btn-secondary cursor-pointer py-2 text-[13px]">
                 <IconUpload size={15} /> {d.parsing ? "解析中…" : "上传 PDF / Word / txt"}
@@ -554,12 +559,12 @@ export default function SubmitWizard({
               <div>
                 <h3 className="text-[17px] font-semibold">分成几个部分</h3>
                 <p className="mt-1 text-[13px] text-ink-3">
-                  {d.sectioning ? "AI 正在按引入、每个物品、结论切分…" : `共 ${d.sections.length} 个部分。访客会从这里选择想先听哪一段，标题和内容都可以改。`}
+                  {d.sectioning ? "正在切分讲稿…" : `共 ${d.sections.length} 个部分。访客会从这里选择想先听哪一段，标题和内容都可以改。`}
                 </p>
               </div>
               <div className="flex items-center gap-1">
                 <button type="button" className="btn-ghost px-2.5 py-2 text-[13px]" onClick={resplit} disabled={d.sectioning}>
-                  <IconSparkle size={15} /> {d.sections.length ? "重新分段" : "AI 分段"}
+                  <IconSparkle size={15} /> {d.sections.length ? "重新分段" : "自动分段"}
                 </button>
                 <button
                   type="button"
@@ -596,7 +601,7 @@ export default function SubmitWizard({
                 {d.sections.length === 0 && (
                   <div className="card px-5 py-8 text-center">
                     <p className="text-[14px] text-ink-2">还没有分段</p>
-                    <p className="mt-1 text-[12px] text-ink-3">点「AI 分段」让 AI 来切，或手动添加。</p>
+                    <p className="mt-1 text-[12px] text-ink-3">点「自动分段」切分讲稿，或手动添加。</p>
                   </div>
                 )}
                 <SectionList
@@ -695,7 +700,7 @@ export default function SubmitWizard({
           {step < LAST ? (
             <button type="button" className="btn-primary flex-1" onClick={() => go(step + 1)} disabled={d.sectioning || d.parsing || (step === 0 && !d.photoPreview)}>
               {d.sectioning ? <Spinner light /> : null}
-              {d.sectioning ? "AI 分段中…" : step === 0 && !d.photoPreview ? "请先上传照片" : "下一步"}
+              {d.sectioning ? "自动分段中…" : step === 0 && !d.photoPreview ? "请先上传照片" : "下一步"}
               {!d.sectioning && <IconArrowRight size={15} />}
             </button>
           ) : (

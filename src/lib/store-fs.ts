@@ -1,6 +1,7 @@
 import { promises as fs } from "fs";
 import path from "path";
 import type { Person } from "./types";
+import { assertEventOpen, assertEventPurgeAllowed, eventDataClosed, type PurgeResult } from "./event-retention";
 import {
   buildPerson,
   contentTypeForExt,
@@ -40,13 +41,33 @@ async function readPersonFile(file: string): Promise<Person | null> {
   }
 }
 
+/** A request may cross the deadline while an asynchronous write is in flight.
+ *  Recheck on completion and remove its result, so a finished purge cannot be
+ *  silently followed by newly recreated event data. */
+async function writeEventFile(file: string, data: string | Buffer): Promise<void> {
+  assertEventOpen();
+  try {
+    await fs.writeFile(file, data);
+  } finally {
+    if (eventDataClosed()) await fs.rm(file, { force: true });
+  }
+  assertEventOpen();
+}
+
 /** Atomic write: temp file + rename, so a crash never leaves a half-written record. */
 async function writePerson(p: Person): Promise<void> {
   await ensureDirs();
   const file = personFile(p.id);
   const tmp = `${file}.${newId()}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(p, null, 2), "utf8");
-  await fs.rename(tmp, file);
+  try {
+    await writeEventFile(tmp, JSON.stringify(p, null, 2));
+    assertEventOpen();
+    await fs.rename(tmp, file);
+    assertEventOpen();
+  } finally {
+    await fs.rm(tmp, { force: true });
+    if (eventDataClosed()) await fs.rm(file, { force: true });
+  }
 }
 
 async function readLegacy(): Promise<Person[]> {
@@ -131,7 +152,7 @@ export async function deletePerson(id: string): Promise<boolean> {
   const person = await getPerson(id);
   if (!person) return false;
   await fs.mkdir(DELETED_DIR, { recursive: true });
-  await fs.writeFile(path.join(DELETED_DIR, `${id}.json`), JSON.stringify({ id, slug: person.slug, deletedAt: Date.now() }), "utf8");
+  await writeEventFile(path.join(DELETED_DIR, `${id}.json`), JSON.stringify({ id, slug: person.slug, deletedAt: Date.now() }));
   return true;
 }
 
@@ -164,7 +185,7 @@ export async function savePhoto(id: string, buffer: Buffer, ext: string): Promis
   } catch {
     /* ignore */
   }
-  await fs.writeFile(path.join(UPLOAD_DIR, `${id}.${safeExt}`), buffer);
+  await writeEventFile(path.join(UPLOAD_DIR, `${id}.${safeExt}`), buffer);
   // Version the URL so browsers/CDNs don't keep showing the replaced photo.
   const photoUrl = `/api/photo/${id}?v=${Date.now()}`;
   await updatePerson(id, { photoUrl });
@@ -175,7 +196,7 @@ export async function saveCartoon(id: string, buffer: Buffer, ext: string): Prom
   await ensureDirs();
   const safeExt = cleanExt(ext, "png");
   await unlinkMatching(`${id}.cartoon.`);
-  await fs.writeFile(path.join(UPLOAD_DIR, `${id}.cartoon.${safeExt}`), buffer);
+  await writeEventFile(path.join(UPLOAD_DIR, `${id}.cartoon.${safeExt}`), buffer);
   const cartoonUrl = `/api/photo/${id}.cartoon?v=${Date.now()}`;
   await updatePerson(id, { cartoonUrl });
   return cartoonUrl;
@@ -185,7 +206,7 @@ export async function saveLoopVideo(id: string, buffer: Buffer, ext: string): Pr
   await ensureDirs();
   const safeExt = cleanExt(ext, "mp4");
   await unlinkMatching(`${id}.loop.`);
-  await fs.writeFile(path.join(UPLOAD_DIR, `${id}.loop.${safeExt}`), buffer);
+  await writeEventFile(path.join(UPLOAD_DIR, `${id}.loop.${safeExt}`), buffer);
   const loopVideoUrl = `/api/photo/${id}.loop?v=${Date.now()}`;
   await updatePerson(id, { loopVideoUrl });
   return loopVideoUrl;
@@ -198,7 +219,7 @@ export async function saveAudio(id: string, key: string, buffer: Buffer, ext: st
   const safeKey = key.replace(/[^A-Za-z0-9_-]/g, "");
   const safeExt = cleanExt(ext, "mp3");
   await unlinkMatching(`${id}.audio.${safeKey}.`);
-  await fs.writeFile(path.join(UPLOAD_DIR, `${id}.audio.${safeKey}.${safeExt}`), buffer);
+  await writeEventFile(path.join(UPLOAD_DIR, `${id}.audio.${safeKey}.${safeExt}`), buffer);
   return `/api/photo/${id}.audio.${safeKey}?v=${Date.now()}`;
 }
 
@@ -206,7 +227,7 @@ export async function saveAudio(id: string, key: string, buffer: Buffer, ext: st
 export async function deleteMediaUrl(_url: string): Promise<void> {}
 
 export async function readPhoto(
-  id: string
+  id: string, _version?: string
 ): Promise<{ buffer: Buffer; contentType: string } | null> {
   if (!/^[A-Za-z0-9_-]{1,40}(\.(cartoon|loop|audio\.[A-Za-z0-9_-]{1,80}))?$/.test(id)) return null;
   try {
@@ -229,4 +250,34 @@ export async function readPhoto(
   } catch {
     return null;
   }
+}
+
+
+async function eventFiles(): Promise<string[]> {
+  const found: string[] = [];
+  async function walk(dir: string) {
+    let entries;
+    try { entries = await fs.readdir(dir, { withFileTypes: true }); }
+    catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") return; throw err; }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else found.push(full); // unlink symlinks, never follow them outside data
+    }
+  }
+  for (const dir of [PEOPLE_DIR, UPLOAD_DIR, DELETED_DIR]) await walk(dir);
+  try { await fs.lstat(LEGACY_DB); found.push(LEGACY_DB); }
+  catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
+  return found;
+}
+
+export async function purgeEventData({ dryRun }: { dryRun: boolean }): Promise<PurgeResult> {
+  if (!dryRun) assertEventPurgeAllowed();
+  const files = await eventFiles();
+  if (dryRun) return { dryRun: true, candidates: files.length, deleted: 0, remaining: files.length };
+  for (const file of files) {
+    try { await fs.unlink(file); }
+    catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
+  }
+  return { dryRun: false, candidates: files.length, deleted: files.length, remaining: (await eventFiles()).length };
 }

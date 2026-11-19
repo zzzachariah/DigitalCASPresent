@@ -1,3 +1,4 @@
+import { externalProcessingAllowed } from "./processing-policy";
 import type { AvatarCreateResult, AvatarPollResult } from "./types";
 import { a2eConfigured, a2eCreateTalkingPhoto, a2ePollTalkingPhoto, a2eTts } from "./a2e";
 
@@ -69,6 +70,7 @@ function isPublicUrl(url: string): boolean {
 const A2E_MODE = (process.env.A2E_MODE || "fast").toLowerCase();
 
 export async function createAvatar(req: AvatarRequest): Promise<AvatarCreateResult> {
+  if (!externalProcessingAllowed()) return { kind: "tts", text: req.text, lang: langTag(req.lang) };
   if (PROVIDER === "a2e" && a2eConfigured()) {
     if (A2E_MODE === "precise" && req.photoPublicUrl) {
       try {
@@ -115,7 +117,7 @@ export async function createAvatar(req: AvatarRequest): Promise<AvatarCreateResu
       }),
     });
     if (!res.ok) {
-      throw new Error(`D-ID create failed (${res.status}): ${await res.text()}`);
+      throw new Error(`D-ID create failed (${res.status}).`);
     }
     const { id } = (await res.json()) as { id: string };
     return { kind: "video-pending", id, text: req.text };
@@ -126,6 +128,7 @@ export async function createAvatar(req: AvatarRequest): Promise<AvatarCreateResu
 }
 
 export async function pollAvatar(id: string): Promise<AvatarPollResult> {
+  if (!externalProcessingAllowed()) return { status: "error" };
   if (PROVIDER === "a2e") {
     return a2ePollTalkingPhoto(id);
   }

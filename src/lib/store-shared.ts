@@ -56,6 +56,7 @@ export interface CreatePersonInput extends PersonInput {
   source?: PersonSource;
   status?: PersonStatus;
   editToken?: string;
+  privacyConsent?: Person["privacyConsent"];
 }
 
 /** Assemble a fresh Person record (drivers only decide where to put it). */
@@ -75,6 +76,7 @@ export function buildPerson(input: CreatePersonInput, slug: string): Person {
     status: input.status ?? (source === "student" ? "pending" : "approved"),
     source,
     editToken: input.editToken,
+    privacyConsent: input.privacyConsent,
     createdAt: now,
     updatedAt: now,
   };

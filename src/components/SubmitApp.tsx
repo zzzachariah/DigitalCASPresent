@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { PRIVACY_CONSENT_HEADER, PRIVACY_VERSION } from "@/lib/privacy";
 import type { Person } from "@/lib/types";
 import { readJson } from "@/lib/http";
 import { studentApi, type StudentTokens } from "@/lib/editor-api";
@@ -34,7 +35,10 @@ interface Remembered {
 
 function remembered(): Remembered[] {
   try {
-    const list = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+    const legacy = localStorage.getItem(STORAGE_KEY);
+    if (!sessionStorage.getItem(STORAGE_KEY) && legacy) sessionStorage.setItem(STORAGE_KEY, legacy);
+    localStorage.removeItem(STORAGE_KEY);
+    const list = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "[]");
     return Array.isArray(list) ? list : [];
   } catch {
     return [];
@@ -43,7 +47,7 @@ function remembered(): Remembered[] {
 function remember(entry: Remembered) {
   try {
     const list = remembered().filter((r) => r.id !== entry.id);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify([entry, ...list].slice(0, 5)));
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify([entry, ...list].slice(0, 5)));
   } catch {
     /* private mode etc. — the links are still shown on screen */
   }
@@ -60,7 +64,7 @@ const STEPS: [string, string, string][] = [
   ["01", "上传照片", "一张清晰的正脸照片，JPG 或 PNG。"],
   ["02", "填写信息", "姓名、班级或小组、声音和回答语言。"],
   ["03", "放入讲稿", "粘贴文字，或上传 PDF / Word / txt 自动提取。"],
-  ["04", "AI 分段", "自动分成引入、每个物品、结论几个部分，可以手动调整。"],
+  ["04", "自动分段", "分成几个部分，可以手动调整；未批准外部处理时按段落切分。"],
   ["05", "提交审核", "保存好专属修改链接；二维码由老师审核后统一发放。"],
 ];
 
@@ -68,6 +72,8 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
   const tokenBox = useRef<StudentTokens>({ current: token ?? null, preview: null }).current;
   const api = useMemo(() => studentApi(tokenBox), [tokenBox]);
 
+  const [privacyChecked, setPrivacyChecked] = useState(false);
+  const [privacyAccepted, setPrivacyAccepted] = useState(false);
   const [stage, setStage] = useState<Stage>(id ? { kind: "loading" } : { kind: "intro" });
   const [mine, setMine] = useState<Remembered[]>([]);
   const [draftName, setDraftName] = useState<string | null>(null);
@@ -76,19 +82,19 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
 
   // Intro: refresh what this device remembers whenever we come back to it.
   useEffect(() => {
-    if (stage.kind !== "intro") return;
+    if (!privacyAccepted || stage.kind !== "intro") return;
     setMine(remembered());
     const dr = readStoredDraft();
     setDraftName(dr ? dr.name.trim() || "未命名" : null);
-  }, [stage.kind]);
+  }, [stage.kind, privacyAccepted]);
 
   useEffect(() => {
-    if (!id) return;
+    if (!id || !privacyAccepted) return;
     if (!token) {
       setStage({ kind: "invalid" });
       return;
     }
-    fetch(`/api/submit/${id}`, { headers: { "x-edit-token": token }, cache: "no-store" })
+    fetch(`/api/submit/${id}`, { headers: { "x-edit-token": token, [PRIVACY_CONSENT_HEADER]: PRIVACY_VERSION }, cache: "no-store" })
       .then(async (res) => {
         const data = await readJson(res);
         if (!res.ok) throw new Error(data.error);
@@ -103,7 +109,7 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
         setStage({ kind: "edit", person: data.person });
       })
       .catch(() => setStage({ kind: "invalid" }));
-  }, [id, token, tokenBox]);
+  }, [id, token, tokenBox, privacyAccepted]);
 
   // The record exists on the server from this moment: remember its link even
   // if the photo upload that follows fails.
@@ -143,9 +149,39 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
   const topbar = (
     <header className="flex items-center justify-between">
       <span className="eyebrow">IBDP · TOK Exhibition</span>
-      <a href="/submit" className="text-[13px] text-ink-3 transition-colors hover:text-ink">提交讲稿 · Submit</a>
+      <a href="/privacy" target="_blank" rel="noreferrer" className="text-[13px] text-ink-3 transition-colors hover:text-ink">隐私协议 · Privacy</a>
     </header>
   );
+
+  if (!privacyAccepted) {
+    return (
+      <main className="mx-auto flex min-h-dvh max-w-2xl flex-col px-5 py-8">
+        {topbar}
+        <section className="card my-auto space-y-5 p-6">
+          <div>
+            <p className="eyebrow">Before you begin · 提交前</p>
+            <h1 className="mt-2 text-2xl font-semibold">保护你的未评分讲稿</h1>
+            <p className="mt-3 text-[15px] leading-relaxed text-ink-2">讲稿按保密资料处理，仅用于本次展览准备。老师审核发布后，访客可以看到展示信息并听到经审核的讲解；请勿上传不适合展示的个人信息。</p>
+            <p className="mt-2 text-[13px] leading-relaxed text-ink-3">Your ungraded manuscript is confidential and used only to prepare this exhibition. After teacher approval, visitors may see exhibition details and hear reviewed explanations.</p>
+          </div>
+          <ul className="list-disc space-y-2 pl-5 text-[13px] leading-relaxed text-ink-2">
+            <li>外部 AI、语音或形象服务只有在组织者审核其隐私条件后才能启用；本次同意不代表同意将文章用于模型训练。<br />External AI, speech and avatar processing requires organizer approval of provider privacy terms. This agreement does not authorize model training.</li>
+            <li>活动结束后关闭访问并安排销毁本站保存的资料；具体时间与副本限制见隐私协议。<br />Access closes after the event, followed by deletion of the app’s stored data; see the agreement for the schedule and limits.</li>
+            <li>修改与预览链接均须保密。草稿仅在本浏览器会话保留，请用自己的设备。<br />Keep edit and preview links private. Drafts last for this browser session; use your own device.</li>
+          </ul>
+          <a href="/privacy" target="_blank" rel="noreferrer" className="inline-block text-sm text-accent underline">阅读完整隐私协议 · Read the full privacy agreement</a>
+          <label className="flex items-start gap-3 rounded-lg bg-surface-2 p-4 text-sm leading-relaxed">
+            <input type="checkbox" className="mt-1 h-4 w-4 shrink-0" checked={privacyChecked} onChange={(e) => setPrivacyChecked(e.target.checked)} />
+            <span>我已阅读并同意上述隐私协议，确认有权提交这些资料。<br />I have read and accept the privacy agreement, and I have permission to submit these materials.</span>
+          </label>
+          <button type="button" className="btn-primary w-full" disabled={!privacyChecked} onClick={() => {
+            tokenBox.privacyVersion = PRIVACY_VERSION;
+            setPrivacyAccepted(true);
+          }}>同意并继续 · Agree and continue <IconArrowRight size={16} /></button>
+        </section>
+      </main>
+    );
+  }
 
   if (stage.kind === "loading") {
     return (
@@ -281,7 +317,7 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
           <div className="card p-5" style={{ ["--i" as string]: 3 }}>
             <p className="text-[15px] font-semibold">{approved ? "我的数字人页面 · My page" : "预览我的数字人 · Preview"}</p>
             <p className="mt-1 text-[13px] leading-relaxed text-ink-3">
-              {approved ? "这就是访客扫码看到的页面。" : "这个链接只能看、不能改，可以发给同学帮你看看；老师审核通过后，访客扫码才能看到。"}
+              {approved ? "这就是访客扫码看到的页面。" : "这个链接可以查看未发布的展示，请仅自己或授权老师使用，不要转发；老师审核通过后，访客扫码才能看到。"}
             </p>
             {approved ? (
               <a href={visitorLink} target="_blank" rel="noreferrer" className="btn-primary mt-3 w-full">
@@ -328,7 +364,7 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
           </div>
           {mine.length > 0 && (
             <div className="mt-8 rounded-lg border border-line bg-surface-2/60 p-4" style={{ ["--i" as string]: 5 }}>
-              <p className="eyebrow">这台设备上之前的提交</p>
+              <p className="eyebrow">本次浏览器会话中的提交</p>
               <ul className="mt-2 space-y-1.5">
                 {mine.map((m) => (
                   <li key={m.id}>

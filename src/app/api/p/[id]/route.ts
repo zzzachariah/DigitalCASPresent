@@ -1,3 +1,4 @@
+import { withPreviewMedia } from "@/lib/media-access";
 import { NextRequest, NextResponse } from "next/server";
 import { getPerson, toPublic } from "@/lib/store";
 import { canView } from "@/lib/access";
@@ -15,5 +16,5 @@ export async function GET(
   if (!person || !canView(person, req.nextUrl.searchParams.get("preview"))) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
-  return NextResponse.json({ person: toPublic(person) });
+  return NextResponse.json({ person: withPreviewMedia(toPublic(person), req.nextUrl.searchParams.get("preview")) });
 }

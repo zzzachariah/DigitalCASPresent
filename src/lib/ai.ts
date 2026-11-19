@@ -1,4 +1,5 @@
 import type { ChatTurn } from "./types";
+import { externalProcessingAllowed } from "./processing-policy";
 
 // ─────────────────────────────────────────────────────────────────────
 // AI client — supports Anthropic Messages and OpenAI Chat Completions.
@@ -73,6 +74,7 @@ function request(opts: ChatOptions, stream: boolean) {
       messages: turns,
     } : {
       ...common,
+      store: false,
       messages: [
         { role: "system", content: opts.system },
         ...turns,
@@ -93,14 +95,11 @@ type Completion = {
 /** Only structured error details reach server logs; never an arbitrary
  *  upstream HTML/body that could echo request headers or the full script. */
 function upstreamError(status: number, data?: Completion): Error {
-  const error = data?.error;
-  let code = String(error?.code || error?.type || "");
-  if (API_KEY) code = code.split(API_KEY).join("redacted");
-  code = code.replace(/[^\w-]/g, "").slice(0, 80);
-  let detail = typeof error?.message === "string" ? error.message : "";
-  if (API_KEY) detail = detail.split(API_KEY).join("[redacted]");
-  detail = detail.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").replace(/sk-[\w-]+/g, "[redacted]").slice(0, 240);
-  return new Error(`AI request failed (${status}${code ? `; ${code}` : ""})${detail ? `: ${detail}` : "."}`);
+  // A provider can echo a manuscript in any error field. Retain only a
+  // known machine code and HTTP status, never its free-form message.
+  const code = data?.error?.code || data?.error?.type || "";
+  const known = new Set(["protocol_not_supported", "overloaded_error", "rate_limit_error", "authentication_error", "invalid_request_error", "permission_error", "not_found_error", "api_error", "insufficient_quota"]);
+  return new Error(`AI request failed (${status}${known.has(code) ? `; ${code}` : ""}).`);
 }
 
 async function checkResponse(res: Response): Promise<void> {
@@ -133,6 +132,7 @@ function completionText(data: Completion, protocol: Protocol): string {
 
 export async function chat(opts: ChatOptions): Promise<string> {
   opts.signal?.throwIfAborted();
+  if (!externalProcessingAllowed()) throw new Error("External AI processing is disabled pending privacy approval.");
   if (aiIsMock()) return mockChat(opts);
   const req = request(opts, false);
   const signal = upstreamSignal(opts.signal, 90_000);
@@ -208,6 +208,7 @@ async function* sseData(body: ReadableStream<Uint8Array>, signal: AbortSignal): 
 /** Streaming variant: yields text deltas as the model produces them. */
 export async function* chatStream(opts: ChatOptions): AsyncGenerator<string> {
   opts.signal?.throwIfAborted();
+  if (!externalProcessingAllowed()) throw new Error("External AI processing is disabled pending privacy approval.");
   if (aiIsMock()) {
     // Simulate token streaming so the UI path is exercised without a key.
     const text = mockChat(opts);
