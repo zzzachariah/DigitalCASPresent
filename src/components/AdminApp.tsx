@@ -4,8 +4,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import type { Person } from "@/lib/types";
-import { readinessForPerson } from "@/lib/readiness";
-import { adminMediaStatus, MEDIA_LOADING, MEDIA_UNAVAILABLE, photoStatusForPerson, preparationSteps, preparationSummary, type AdminMediaHealth } from "@/lib/admin-media";
+import { adminReadinessForPerson as readinessForPerson, prepareNarrationVariants, type NarrationRun } from "@/lib/admin-narration";
+import { adminMediaStatus, MEDIA_LOADING, MEDIA_UNAVAILABLE, photoStatusForPerson, speechStatusForPerson, preparationSteps, preparationSummary, type AdminMediaHealth } from "@/lib/admin-media";
 import { readJson } from "@/lib/http";
 import { generateAsset } from "@/lib/editor-api";
 import { pad2, timeAgo } from "@/lib/format";
@@ -211,13 +211,35 @@ export default function AdminApp() {
     }
   }
 
+  function failureDetails(run: NarrationRun): string {
+    if (!run.failures.length) return "";
+    const labels = { zh: "中文", en: "English", bilingual: "中英双语" };
+    return `已确认完成 ${run.completed}/${run.total} 项讲解。` + run.failures.slice(0, 3)
+      .map((item) => `${item.title}（${labels[item.language]}）：${item.reason}`).join("；") + (run.failures.length > 3 ? `；另有 ${run.failures.length - 3} 项未完成` : "");
+  }
+
+  async function runNarration(p: Person, textOnly: boolean, audioOnly = false) {
+    return prepareNarrationVariants(p, { textOnly, audioOnly }, {
+      request: async (body) => {
+        const res = await fetch(`/api/admin/people/${p.id}/pregenerate`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        return { ok: res.ok, status: res.status, data: await readJson(res) };
+      },
+      onProgress: ({ current, total, variant, retry }) => setJob(p.id,
+        `${current}/${total} · ${variant.title} · ${variant.language === "zh" ? "中文" : variant.language === "en" ? "English" : "双语"}${retry ? " · 补做" : ""}`),
+      onUpdate: (updated) => setPeople((list) => list.map((x) => x.id === p.id ? { ...x, sections: updated.sections } : x)),
+    });
+  }
+
   /** Prepare permitted assets; unavailable media never blocks text preparation. */
   async function prepareAll(p: Person) {
     setError("");
     const steps = preparationSteps(p, photoStatusForPerson(media, p.id).ready);
     let current = p;
-    let textOnly = !media.speech.ready;
+    const textOnly = !speechStatusForPerson(media, p.id).ready;
     let failed = 0;
+    let narrationDetails = "";
     let mediaError = "";
     try {
       for (let i = 0; i < steps.length; i++) {
@@ -233,25 +255,17 @@ export default function AdminApp() {
           } catch (e) {
             // Approval/configuration can change after health was loaded.
             mediaError = e instanceof Error ? e.message : "媒体生成失败";
-            textOnly = true;
           }
         } else {
-          setJob(p.id, prefix + (textOnly ? "文字讲解预生成中…" : "讲解与语音预生成中…"));
-          const res = await fetch(`/api/admin/people/${p.id}/pregenerate`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ textOnly }),
-          });
-          const data = await readJson(res);
-          if (!res.ok) throw new Error(data.error || "预生成失败");
-          if (!Array.isArray(data.sections)) throw new Error("未收到讲解结果，请刷新后重试");
-          current = { ...current, sections: data.sections };
-          failed = typeof data.failed === "number" ? data.failed : 0;
-          setPeople((list) => list.map((x) => (x.id === p.id ? current : x)));
+          const run = await runNarration(current, textOnly);
+          current = run.person;
+          failed = run.failures.length;
+          narrationDetails = failureDetails(run);
         }
       }
       notify(preparationSummary(current, failed, textOnly));
-      if (mediaError) setError(`${p.name}：媒体准备未完成（${mediaError}）；已继续处理文字讲解。`);
+      const issues = [mediaError ? `形象准备未完成（${mediaError}）；已继续处理讲解。` : "", narrationDetails].filter(Boolean);
+      if (issues.length) setError(`${p.name}：${issues.join(" ")}`);
     } catch (e) {
       setError(`${p.name}：${e instanceof Error ? e.message : "准备素材失败"}`);
     } finally {
@@ -261,26 +275,23 @@ export default function AdminApp() {
 
   /** Pre-generate every part's explanation (+ audio when A2E is configured)
    *  without opening the editor. */
-  async function pregenerateAll(p: Person) {
-    const textOnly = !media.speech.ready;
+  async function pregenerateAll(p: Person, mode: "auto" | "audio" | "text" = "auto") {
+    const audioOnly = mode === "audio";
+    const speech = speechStatusForPerson(media, p.id);
+    if (audioOnly && !speech.ready) { setError(speech.message); return; }
+    const textOnly = mode === "text" || !speech.ready;
     setPregenId(p.id);
     setError("");
     try {
-      const res = await fetch(`/api/admin/people/${p.id}/pregenerate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ textOnly }),
-      });
-      const data = await readJson(res);
-      if (!res.ok) throw new Error(data.error || "预生成失败");
-      if (!Array.isArray(data.sections)) throw new Error("未收到讲解结果，请刷新后重试");
-      const updated = { ...p, sections: data.sections };
-      setPeople((list) => list.map((x) => (x.id === p.id ? updated : x)));
-      notify(preparationSummary(updated, typeof data.failed === "number" ? data.failed : 0, textOnly));
+      const run = await runNarration(p, textOnly, audioOnly);
+      notify(preparationSummary(run.person, run.failures.length, textOnly));
+      const details = failureDetails(run);
+      if (details) setError(`${p.name}：${details}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "预生成失败");
     } finally {
       setPregenId(null);
+      setJob(p.id, null);
     }
   }
 
@@ -332,6 +343,7 @@ export default function AdminApp() {
   const selected = people.find((p) => p.id === selectedId) || null;
   const selectedReadiness = selected ? readinessForPerson(selected) : null;
   const selectedPhoto = photoStatusForPerson(media, selected?.id);
+  const selectedSpeech = speechStatusForPerson(media, selected?.id);
 
   function editLink(p: Person): string | null {
     return p.editToken ? `${base}/submit/${p.id}?token=${encodeURIComponent(p.editToken)}` : null;
@@ -496,12 +508,12 @@ export default function AdminApp() {
           className="btn-primary mt-2 w-full"
           onClick={() => prepareAll(selected)}
           disabled={!!jobs[selected.id] || pregenId === selected.id || selected.sections.length === 0}
-          title={selectedPhoto.ready ? (media.speech.ready ? "准备获准的形象、讲解及语音，已有的会跳过" : "仅生成获准的卡通、视频和文字讲解；不生成外部语音") : "照片处理未获准；可先准备文字讲解"}
+          title={selectedPhoto.ready ? (selectedSpeech.ready ? "准备获准的形象、讲解及语音，已有的会跳过" : "仅生成获准的卡通、视频和文字讲解；不生成外部语音") : (selectedSpeech.ready ? "照片处理未获准；可准备讲解和获准的配音" : "照片处理未获准；可先准备文字讲解")}
         >
-          <IconSparkle size={15} /> {selectedPhoto.ready ? "一键准备素材" : "一键准备文字"}
+          <IconSparkle size={15} /> {selectedPhoto.ready || selectedSpeech.ready ? "一键准备素材" : "一键准备文字"}
         </button>
         {!selectedPhoto.ready && <p role="status" className="mt-2 text-[12px] leading-relaxed text-ink-3">{selectedPhoto.message}</p>}
-        {!media.speech.ready && <p className="mt-2 text-[12px] leading-relaxed text-ink-3">外部配音未启用；讲解步骤只生成文字。{selectedPhoto.ready ? "这位同学已获准生成卡通和视频。" : ""}</p>}
+        {!selectedSpeech.ready && <p className="mt-2 text-[12px] leading-relaxed text-ink-3">{selectedSpeech.message}</p>}
         <div className="mt-2 grid grid-cols-3 gap-2">
           <button type="button" className="btn-secondary px-2 text-[12px]" onClick={() => generate(selected, "cartoon")} disabled={!selectedPhoto.ready || !!jobs[selected.id] || pregenId === selected.id || !selected.photoUrl} title={!selectedPhoto.ready ? selectedPhoto.message : undefined}>
             {selected.cartoonUrl ? "重做卡通" : "生成卡通"}
@@ -514,12 +526,22 @@ export default function AdminApp() {
             className="btn-secondary px-2 text-[12px]"
             onClick={() => pregenerateAll(selected)}
             disabled={!!jobs[selected.id] || pregenId === selected.id || selected.sections.length === 0}
-            title={media.speech.ready ? "提前生成每个部分的讲解文字和语音" : "仅生成讲解文字，不发送到外部语音服务"}
+            title={selectedSpeech.ready ? "提前生成每个部分的讲解文字和语音" : "仅生成讲解文字，不发送到外部语音服务"}
           >
             {pregenId === selected.id ? <Spinner /> : <IconBolt size={14} />}
-            {pregenId === selected.id ? "生成中…" : media.speech.ready ? "讲解与语音" : "文字讲解"}
+            {pregenId === selected.id ? "生成中…" : selectedSpeech.ready ? "讲解与语音" : "文字讲解"}
           </button>
         </div>
+        {selectedSpeech.ready && (
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <button type="button" className="btn-ghost text-[12px]" onClick={() => pregenerateAll(selected, "audio")} disabled={!!jobs[selected.id] || pregenId === selected.id || selected.sections.length === 0} title="仅为已有讲解补齐语音，不重新生成文字">
+              仅补语音 · 不改文字
+            </button>
+            <button type="button" className="btn-ghost text-[12px]" onClick={() => pregenerateAll(selected, "text")} disabled={!!jobs[selected.id] || pregenId === selected.id || selected.sections.length === 0} title="仅准备讲解文字，不调用外部配音">
+              仅准备文字
+            </button>
+          </div>
+        )}
         {!selected.photoUrl && <p className="mt-2 text-[12px] text-ink-3">这位同学还没有照片，先补照片再生成卡通和视频。</p>}
       </div>
 
@@ -534,11 +556,27 @@ export default function AdminApp() {
         </div>
         <ol className="mt-2 space-y-1.5">
           {selected.sections.map((s, i) => (
-            <li key={s.id} className="flex items-center gap-2.5 text-[13px]">
-              <span className="w-5 font-mono text-[11px] text-ink-4">{pad2(i)}</span>
-              <span className="truncate text-ink-2">{s.title}</span>
-              {s.cachedAnswers && Object.keys(s.cachedAnswers).length > 0 && (
-                <span className="dot bg-success" title={s.cachedAudio && Object.keys(s.cachedAudio).length ? "已预生成 · 含语音" : "已预生成（无语音）"} />
+            <li key={s.id} className="text-[13px]">
+              <div className="flex items-center gap-2.5">
+                <span className="w-5 font-mono text-[11px] text-ink-4">{pad2(i)}</span>
+                <span className="truncate text-ink-2">{s.title}</span>
+                {s.cachedAnswers && Object.keys(s.cachedAnswers).length > 0 && (
+                  <span className="dot bg-success" title={s.cachedAudio && Object.keys(s.cachedAudio).length ? "已保存讲解与音频，可展开试听" : "已预生成（无语音）"} />
+                )}
+              </div>
+              {Object.values(s.cachedAudio ?? {}).some((url) => url?.startsWith("/api/photo/")) && (
+                <details className="ml-7 mt-1 rounded-lg bg-surface-2 px-3 py-2">
+                  <summary className="cursor-pointer text-[12px] text-accent">试听已保存配音</summary>
+                  {(["zh", "en", "bilingual"] as const).map((lang) => {
+                    const url = s.cachedAudio?.[lang];
+                    if (!url?.startsWith("/api/photo/")) return null;
+                    const label = lang === "zh" ? "中文" : lang === "en" ? "English" : "中英双语";
+                    return <div key={`${lang}-${url}`} className="mt-3">
+                      <p className="text-[12px] text-ink-3">{label}</p>
+                      <audio controls preload="none" src={url} aria-label={`${s.title} ${label}配音`} className="mt-1 h-9 w-full" />
+                    </div>;
+                  })}
+                </details>
               )}
             </li>
           ))}

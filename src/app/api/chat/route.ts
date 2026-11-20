@@ -4,11 +4,11 @@ import { getPerson } from "@/lib/store";
 import { aiIsMock, chat } from "@/lib/ai";
 import { explainSectionPrompt, followUpPrompt, systemPrompt } from "@/lib/prompts";
 import { blockedVisitorRequest, reviewExhibitionAnswer, safeFallback } from "@/lib/ai-safety";
-import { aiProcessingAllowed, externalProcessingAllowed } from "@/lib/processing-policy";
+import { aiProcessingAllowed } from "@/lib/processing-policy";
 import { PRIVACY_VERSION } from "@/lib/privacy";
 import { canView } from "@/lib/access";
 import { limitRequest } from "@/lib/ratelimit";
-import { a2eConfigured, a2eTts } from "@/lib/a2e";
+import { a2eSpeechReadiness, a2eTts } from "@/lib/a2e";
 import { splitAnswer, takeSentences } from "@/lib/sentences";
 import type { AnswerLang, Person, Section } from "@/lib/types";
 
@@ -22,10 +22,10 @@ function resolveAnswerLangKey(person: Person, uiLang?: "en" | "zh"): AnswerLang 
 }
 
 type AvatarMode = "audio" | "video" | "tts";
-function avatarMode(): AvatarMode {
-  if (!externalProcessingAllowed()) return "tts";
+function avatarMode(personId: string): AvatarMode {
+  if (!a2eSpeechReadiness(personId).ready) return "tts";
   const provider = (process.env.AVATAR_PROVIDER || "mock").toLowerCase();
-  if (provider === "a2e" && a2eConfigured()) {
+  if (provider === "a2e") {
     // Public arbitrary-text video endpoints are disabled. Only reviewed text
     // from this route may reach an external narration service.
     return (process.env.A2E_MODE || "fast").toLowerCase() === "precise" ? "tts" : "audio";
@@ -35,14 +35,14 @@ function avatarMode(): AvatarMode {
 
 let ttsInFlight = 0;
 const ttsWaiters: (() => void)[] = [];
-async function synth(text: string, gender: Person["gender"], signal: AbortSignal): Promise<string> {
+async function synth(text: string, person: Person, signal: AbortSignal): Promise<string> {
   if (ttsInFlight >= 6) await new Promise<void>((resolve) => ttsWaiters.push(resolve));
   ttsInFlight++;
   try {
     signal.throwIfAborted();
     if (eventDataClosed()) throw new Error("Event closed");
     // No in-process cache of student-derived narration text.
-    return await a2eTts(text, gender, AbortSignal.any([signal, AbortSignal.timeout(12_000)]));
+    return await a2eTts(text, person.gender, AbortSignal.any([signal, AbortSignal.timeout(12_000)]), person.id);
   } finally {
     ttsInFlight--;
     ttsWaiters.shift()?.();
@@ -153,7 +153,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ text: answer, lang, sectionTitle, cached, suggestions, withheld: !released }, { headers: PRIVATE_HEADERS });
   }
 
-  const mode = released ? avatarMode() : "tts";
+  const mode = released ? avatarMode(person.id) : "tts";
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -170,7 +170,7 @@ export async function POST(req: NextRequest) {
         if (mode === "audio") {
           for (const text of takeSentences(answer, true).chunks) {
             const seq = count++;
-            jobs.push(synth(text, person.gender, req.signal)
+            jobs.push(synth(text, person, req.signal)
               .then((url) => send({ type: "audio", seq, url, text }))
               .catch(() => send({ type: "audio", seq, url: null, text })));
           }

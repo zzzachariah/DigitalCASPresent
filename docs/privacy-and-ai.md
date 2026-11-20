@@ -1,5 +1,11 @@
 # Privacy and AI operating state
 
+## November 21, 2026 narration repair
+
+The organizer subsequently requested narration repair and live verification for the same participant. Production `A2E_SPEECH_APPROVED_PERSON_IDS` separately identifies this approved record. This does not expand the photo list or authorize other participants. Only reviewed exhibition explanations reach A2E TTS; raw manuscripts and source sections are not TTS input. Ordinary provider voices are used, not voice cloning. Global external processing and D-ID remain closed.
+
+Admin preparation processes each section/language variant sequentially, verifies persisted audio and provides an authenticated preview. The underlying storage uses immutable audio keys and reads the private copy back before recording completion. Historical audio remains inaccessible to ordinary visitors; live narration is generated only after the answer passes review.
+
 ## November 21, 2026 photo-processing scope
 
 The organizer separately authorized one identified participant's photo for A2E cartoon and ambient-video generation. Production `A2E_PHOTO_APPROVED_PERSON_IDS` identifies that record; do not add other records without specific authorization. `EXTERNAL_AI_PROCESSING_APPROVED=false` continues to block external narration and D-ID. The existing text-AI consent does not grant photo-processing permission.

@@ -151,3 +151,28 @@ test('photo authorization and event expiry are rechecked after presign before up
   await assert.rejects(ai.a2eCartoonPoll('task-fixture', 'anna-fixture'), /closed/);
   assert.equal(calls, 1);
 });
+
+test('person-scoped narration sends only TTS and cannot unlock photo, another person or global processing', async t => {
+  const { ai, restore } = await client({ EXTERNAL_AI_PROCESSING_APPROVED: 'false', AVATAR_PROVIDER: 'a2e', A2E_SPEECH_APPROVED_PERSON_IDS: 'anna-fixture,anna-fixture,*,../bad', A2E_PHOTO_APPROVED_PERSON_IDS: '', EVENT_ENDS_AT: '2999-01-01T00:00:00Z' });
+  t.after(restore); let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    calls++; assert.equal(url, 'https://tts.example/api/v1/video/send_tts');
+    assert.equal(JSON.parse(init.body).msg, 'Reviewed synthetic narration.');
+    return Response.json({ code: 0, data: 'https://audio.example/result.mp3' });
+  });
+  assert.deepEqual(ai.a2eSpeechApprovedPersonIds(), ['anna-fixture']);
+  assert.equal(ai.a2eSpeechReadiness().ready, false);
+  assert.equal(ai.a2eSpeechReadiness('anna-fixture').ready, true);
+  assert.equal(ai.a2ePhotoReadiness('anna-fixture').ready, false);
+  assert.equal(await ai.a2eTts('Reviewed synthetic narration.', 'female', undefined, 'anna-fixture'), 'https://audio.example/result.mp3');
+  await assert.rejects(ai.a2eTts('Reviewed synthetic narration.', 'female', undefined, 'other-student'), /separate approval/);
+  await assert.rejects(ai.a2eTts('Reviewed synthetic narration.'), /disabled pending/);
+  for (const [path, method] of [['/api/v1/userNanoBanana/start', 'POST'], ['/api/v1/video/send_tts', 'GET'], ['/api/v1/video/send_tts/extra', 'POST']]) {
+    await assert.rejects(ai.a2e(path, method, {}, undefined, { speechPersonId: 'anna-fixture' }), /outside speech-only/);
+  }
+  await assert.rejects(ai.a2eUploadImageBytes(Buffer.from('synthetic'), 'image/png', 'anna-fixture'), /separate approval/);
+  assert.equal(calls, 1);
+  process.env.EVENT_ENDS_AT = '2000-01-01T00:00:00Z';
+  await assert.rejects(ai.a2eTts('Reviewed synthetic narration.', 'female', undefined, 'anna-fixture'), /closed/);
+  assert.equal(calls, 1);
+});

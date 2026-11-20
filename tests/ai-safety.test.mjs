@@ -49,7 +49,7 @@ test('Suggestions and private identifiers receive the same release checks', asyn
 let state;
 function reset() {
   state = {
-    approved: true, mediaApproved: true, closed: false, calls: [], tts: [],
+    approved: true, mediaApproved: true, closed: false, calls: [], tts: [], ttsPersonIds: [], speechPersonIds: ['student-1'],
     person: { id: 'student-1', name: 'Synthetic student', slug: 'student-1', language: 'auto', status: 'approved', privacyConsent: { version: privacy.PRIVACY_VERSION, acceptedAt: 1 }, script: `${source}\nOTHER-SECTION-PRIVATE-CANARY`, sections: [{ id: 'part-1', title: 'Compass', content: source }] },
     replies: [answer, yes],
   };
@@ -68,7 +68,7 @@ globalThis.__safetyRouteBindings = {
   '@/lib/privacy': privacy,
   '@/lib/access': { canView: person => person.status === 'approved' },
   '@/lib/ratelimit': { limitRequest: () => null },
-  '@/lib/a2e': { a2eConfigured: () => true, a2eTts: async text => { state.tts.push(text); return 'https://synthetic.example/audio.wav'; } },
+  '@/lib/a2e': { a2eSpeechReadiness: personId => ({ ready: state.mediaApproved && state.speechPersonIds.includes(personId) }), a2eTts: async (text, _gender, _signal, personId) => { state.tts.push(text); state.ttsPersonIds.push(personId); return 'https://synthetic.example/audio.wav'; } },
   '@/lib/sentences': sentences,
 };
 const routeCode = (await compile('../src/app/api/chat/route.ts')).replace(/import\s+\{([^}]+)\}\s+from\s+"([^"]+)";/g, (_, fields, path) => `const {${fields}} = globalThis.__safetyRouteBindings[${JSON.stringify(path)}];`);
@@ -151,6 +151,7 @@ test('Old audio is never released even when its paired cached text passes review
     assert.ok(!wire.includes('UNREVIEWED-OLD-AUDIO'));
     assert.ok(wire.includes('https://synthetic.example/audio.wav'));
     assert.deepEqual(state.tts, [answer]);
+    assert.deepEqual(state.ttsPersonIds, ['student-1']);
   } finally {
     if (beforeProvider === undefined) delete process.env.AVATAR_PROVIDER; else process.env.AVATAR_PROVIDER = beforeProvider;
     if (beforeMode === undefined) delete process.env.A2E_MODE; else process.env.A2E_MODE = beforeMode;
@@ -224,4 +225,12 @@ test('old records need the current participant terms even after the organizer en
     assert.equal(body.withheld, true); assert.equal(body.text, safety.safeFallback('en'));
     assert.equal(state.calls.length, 0); assert.equal(state.tts.length, 0);
   }
+});
+
+test('another person cannot use an approved person narration permission', async () => {
+  reset(); state.speechPersonIds = ['another-person'];
+  const wire = await (await route.POST(request({ stream: true }))).text();
+  assert.ok(wire.includes(answer)); assert.equal(state.calls.length, 2);
+  assert.equal(state.tts.length, 0);
+  assert.equal(wire.trim().split('\n').map(JSON.parse)[0].avatar, 'tts');
 });
