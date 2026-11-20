@@ -20,7 +20,7 @@ function loadTs(file, mocks, env, cwd = repo) {
     module: mod, exports: mod.exports,
     require: (name) => Object.hasOwn(mocks, name) ? mocks[name] : require(name),
     process: { env, cwd: () => cwd }, Response, Buffer, AbortSignal, URL,
-    Date, Math, Map, Set, Promise, setTimeout, clearTimeout,
+    Date, Math, Map, Set, Promise, TypeError, setTimeout, clearTimeout,
     fetch: mocks.fetch,
     console: { error() {}, log() {} },
   }, { filename: file });
@@ -43,6 +43,7 @@ function setup(extraEnv = {}) {
   const calls = [];
   const failures = new Map();
   let onPut = null;
+  class BlobError extends Error { constructor(message) { super(`Vercel Blob: ${message}`); } }
   class BlobNotFoundError extends Error {}
   function storeFor(options) {
     if (options.token === 'public-token' || options.storeId === 'store_public') return 'media';
@@ -51,7 +52,7 @@ function setup(extraEnv = {}) {
   }
   function entry(store, pathname) { return { pathname, url: `https://${store}.invalid/${pathname}` }; }
   const api = {
-    BlobNotFoundError,
+    BlobError, BlobNotFoundError,
     async list(options) {
       const store = storeFor(options); calls.push({ op: 'list', store, path: options.prefix });
       return { blobs: [...stores[store].keys()].filter((p) => p.startsWith(options.prefix)).map((p) => entry(store, p)), hasMore: false };
@@ -65,6 +66,8 @@ function setup(extraEnv = {}) {
       const store = storeFor(options); calls.push({ op: 'get', store, path: pathname });
       assert.equal(options.access, 'private'); assert.equal(store, 'records');
       assert.equal(options.useCache, false);
+      const errors = failures.get(pathname);
+      if (Array.isArray(errors) && errors.length) throw errors.shift();
       if (failures.get(pathname) === 'private-read') throw new Error('Temporary private read failure');
       const misses = failures.get(pathname);
       if (typeof misses === 'number' && misses > 0) { failures.set(pathname, misses - 1); return null; }
@@ -108,7 +111,7 @@ function setup(extraEnv = {}) {
     stores.records.set(`people/${p.id}/${version}`, JSON.stringify(p));
     stores.records.set(`slugs/${p.slug}`, p.id);
   }
-  return { env, shared, stores, calls, failures, driver, seedLegacy, seedPrivate, setOnPut(fn) { onPut = fn; }, setOidcToken(token) { requestOidcToken = token; } };
+  return { env, shared, stores, calls, failures, driver, seedLegacy, seedPrivate, BlobError, setOnPut(fn) { onPut = fn; }, setOidcToken(token) { requestOidcToken = token; } };
 }
 
 const plain = (value) => JSON.parse(JSON.stringify(value));
@@ -416,6 +419,56 @@ test('private photo versions preserve binary bytes and never fetch arbitrary pub
   assert.equal(s.stores.media.size, 0);
   assert.equal(await s.driver.readPhoto('another-person', version), null);
   assert.equal(await s.driver.readPhoto(person.id, '../bad'), null);
+});
+
+test('private audio transient preflight and verification reads recover without repeating the write', async () => {
+  const s = setup(); s.seedPrivate();
+  const bytes = Buffer.from('synthetic audio bytes');
+  const version = require('node:crypto').createHash('sha256').update(bytes).digest('hex') + '.wav';
+  const pathname = `private-media/${person.id}.audio.part1-zh-fixed/${version}`;
+  s.failures.set(pathname, [new s.BlobError('Failed to fetch blob: 503 Service Unavailable'), new TypeError('fetch failed')]);
+  s.setOnPut(path => { if (path === pathname) s.failures.set(path, [new s.BlobError('Failed to fetch blob: 500 Internal Server Error'), new s.BlobError('Failed to fetch blob: 429 Too Many Requests')]); });
+  const url = await s.driver.saveAudio(person.id, 'part1-zh-fixed', bytes, 'wav');
+  assert.equal(url, `/api/photo/${person.id}.audio.part1-zh-fixed?asset=${version}`);
+  assert.equal(s.calls.filter(c => c.op === 'get' && c.path === pathname).length, 6);
+  assert.equal(s.calls.filter(c => c.op === 'put' && c.path === pathname).length, 1);
+  assert.ok(s.stores.records.get(pathname).equals(bytes));
+  assert.equal(s.calls.some(c => c.op === 'put' && c.path.startsWith('people/')), false);
+});
+
+test('private audio transient read retries are bounded and never cause a second write', async () => {
+  for (const failure of ['http', 'network']) {
+    const s = setup(); s.seedPrivate();
+    let pathname;
+    s.setOnPut(path => {
+      if (!path.startsWith('private-media/')) return;
+      pathname = path;
+      s.failures.set(path, Array.from({ length: 8 }, () => failure === 'http' ? new s.BlobError('Failed to fetch blob: 502 Bad Gateway') : new TypeError('fetch failed')));
+    });
+    await assert.rejects(s.driver.saveAudio(person.id, 'part1-en-fixed', Buffer.from('fixture audio'), 'wav'));
+    const put = s.calls.find(c => c.op === 'put' && c.path === pathname);
+    assert.equal(s.calls.slice(s.calls.indexOf(put) + 1).filter(c => c.op === 'get' && c.path === pathname).length, 3);
+    assert.equal(s.calls.filter(c => c.op === 'put' && c.path === pathname).length, 1);
+  }
+});
+
+test('private audio authorization, invalid reads and mismatched bytes fail immediately without retrying or rewriting', async () => {
+  for (const failure of ['auth401', 'auth403', 'invalid', 'mismatch', 'local-type-error']) {
+    const s = setup(); s.seedPrivate();
+    let pathname;
+    s.setOnPut(path => {
+      if (!path.startsWith('private-media/')) return;
+      pathname = path;
+      if (failure === 'mismatch') s.failures.set(path, 'mismatched-read');
+      else s.failures.set(path, [failure === 'auth401' ? new s.BlobError('Failed to fetch blob: 401 Unauthorized')
+        : failure === 'auth403' ? new s.BlobError('Failed to fetch blob: 403 Forbidden')
+        : failure === 'local-type-error' ? new TypeError('Invalid internal argument') : new s.BlobError('Response body is null')]);
+    });
+    await assert.rejects(s.driver.saveAudio(person.id, 'part1-en-fixed', Buffer.from('fixture audio'), 'wav'));
+    const put = s.calls.find(c => c.op === 'put' && c.path === pathname);
+    assert.equal(s.calls.slice(s.calls.indexOf(put) + 1).filter(c => c.op === 'get' && c.path === pathname).length, 1, failure);
+    assert.equal(s.calls.filter(c => c.op === 'put' && c.path === pathname).length, 1, failure);
+  }
 });
 
 test('media privatization copies current, historical and orphan bytes before removing every public origin', async () => {
