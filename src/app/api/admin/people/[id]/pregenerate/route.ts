@@ -1,6 +1,6 @@
 import { aiProcessingAllowed } from "@/lib/processing-policy";
 import { PRIVACY_VERSION } from "@/lib/privacy";
-import { reviewExhibitionAnswer } from "@/lib/ai-safety";
+import { reviewExhibitionAnswer, type SafetyReviewDiagnostic } from "@/lib/ai-safety";
 import { NextRequest, NextResponse } from "next/server";
 import { isAdmin } from "@/lib/auth";
 import { getPerson, readPhoto, saveAudio, updatePerson, storageWritable } from "@/lib/store";
@@ -8,8 +8,8 @@ import { chat } from "@/lib/ai";
 import { explainSectionPrompt, systemPrompt } from "@/lib/prompts";
 import { a2eSpeechReadiness, a2eTts } from "@/lib/a2e";
 import { splitAnswer } from "@/lib/sentences";
-import { AudioReadError, beginPreparation, createPermanentNarration, prepareExistingNarration } from "@/lib/prepared-narration";
-import type { AudioAsset, PreparationResult } from "@/lib/prepared-narration";
+import { AudioReadError, AudioPreparationError, beginPreparation, createPermanentNarration, prepareExistingNarration } from "@/lib/prepared-narration";
+import type { AudioAsset, PreparationPhase, PreparationResult } from "@/lib/prepared-narration";
 import type { AnswerLang, Person, Section } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -83,8 +83,9 @@ function narrationDependencies(person: Person, section: Section, reviewedAnswer:
  *  Commit a new text/audio pair together, after the audio is permanent. */
 async function generateVariant(person: Person, section: Section, index: number, language: AnswerLang, signal: AbortSignal, includeAudio = true): Promise<PreparationResult> {
   const start = Date.now();
+  let phase: PreparationPhase = "generation";
   const result = (status: PreparationResult["status"], reason: string, extra: Partial<PreparationResult> = {}): PreparationResult =>
-    ({ sectionId: section.id, language, status, reason, elapsedMs: Date.now() - start, ...extra });
+    ({ sectionId: section.id, language, status, reason, elapsedMs: Date.now() - start, ...(status === "failed" ? { phase } : {}), ...extra });
   try {
     let prompt = explainSectionPrompt(section, index, person.sections.length);
     if (language !== "bilingual") prompt += `\n\nSpeak in ${language === "zh" ? "Simplified Chinese (简体中文)" : "English"}.`;
@@ -92,11 +93,15 @@ async function generateVariant(person: Person, section: Section, index: number, 
       system: systemPrompt({ ...person, script: section.content, sections: [section] }), messages: [{ role: "user", content: prompt }], temperature: 0.6, maxTokens: 600, signal,
     }));
     if (!answer.trim()) return result("failed", "empty_answer");
-    const approved = await reviewExhibitionAnswer({ source: section.content, question: `Explain this selected exhibition section briefly: ${section.title}`, answer, suggestions }, (opts) => chat({ ...opts, signal }));
+    phase = "review";
+    let diagnostic: SafetyReviewDiagnostic | undefined;
+    const approved = await reviewExhibitionAnswer({ source: section.content, question: `Explain this selected exhibition section briefly: ${section.title}`, answer, suggestions }, (opts) => chat({ ...opts, signal }), (value) => { diagnostic = value; });
     signal.throwIfAborted();
-    if (!approved) return result("failed", "answer_not_approved");
+    if (!approved) return result("failed", "answer_not_approved", { reviewReason: diagnostic?.reason, rejectedCriteria: diagnostic?.rejectedCriteria });
+    phase = "tts";
     const audio = includeAudio && a2eSpeechReadiness(person.id).ready
       ? await createPermanentNarration(person, section.id, language, answer, narrationDependencies(person, section, answer, signal)) : undefined;
+    phase = "source_recheck";
     const fresh = await getPerson(person.id);
     const current = fresh?.sections.find((s) => s.id === section.id);
     if (!fresh || !current) return result("failed", "person_or_section_missing");
@@ -110,14 +115,20 @@ async function generateVariant(person: Person, section: Section, index: number, 
       ...s, cachedAnswers: { ...s.cachedAnswers, [language]: answer },
       cachedSuggestions: { ...s.cachedSuggestions, [language]: suggestions }, cachedAudio,
     } : s);
+    phase = "persist";
     if (!(await updatePerson(person.id, { sections }))) return result("failed", "person_missing");
+    phase = "persist_verification";
     const verified = (await getPerson(person.id))?.sections.find((s) => s.id === section.id);
     if (verified?.cachedAnswers?.[language] !== answer || verified.cachedAudio?.[language] !== audio?.url) {
       return result("failed", "persist_unverified");
     }
     return result("prepared", audio ? "text_and_audio_saved" : "text_saved", audio ? { audioUrl: audio.url, bytes: audio.bytes } : {});
-  } catch {
-    return result("failed", signal.aborted ? "request_time_budget" : "generation_failed");
+  } catch (error) {
+    // Only our typed failure carries diagnostics across the audio pipeline.
+    // Never return or log arbitrary exception/provider text.
+    if (error instanceof AudioPreparationError) phase = error.phase;
+    const providerCode = error instanceof AudioPreparationError ? error.providerCode : undefined;
+    return result("failed", signal.aborted ? "request_time_budget" : `${phase}_failed`, providerCode ? { providerCode } : {});
   }
 }
 
@@ -146,7 +157,9 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   const writable = storageWritable();
   if (!writable.ok) return NextResponse.json({ error: writable.reason }, { status: 503 });
   if (!aiProcessingAllowed()) return NextResponse.json({ error: "外部处理未获隐私批准 / External processing is disabled pending privacy review" }, { status: 503 });
-  const person = await getPerson(params.id);
+  let person: Person | null;
+  try { person = await getPerson(params.id); }
+  catch { return NextResponse.json({ error: "read_failed", code: "read_failed" }, { status: 503 }); }
   if (!person) return NextResponse.json({ error: "not found" }, { status: 404 });
   if (person.privacyConsent?.version !== PRIVACY_VERSION) return NextResponse.json({ error: "请先由学生确认新版AI处理隐私协议 / The student must accept the current AI processing terms first" }, { status: 428 });
   const targets = person.sections.map((section, index) => ({ section, index }))
@@ -174,14 +187,16 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
           continue;
         }
         if (body.audioOnly || (body.regenerateText !== true && section.cachedAnswers?.[language]?.trim())) {
+          const reviewStarted = Date.now();
+          let diagnostic: SafetyReviewDiagnostic | undefined;
           const approved = await reviewExhibitionAnswer({
             source: section.content,
             question: `Explain this selected exhibition section briefly: ${section.title}`,
             answer: section.cachedAnswers?.[language] || "",
             suggestions: section.cachedSuggestions?.[language] || [],
-          }, (opts) => chat({ ...opts, signal: AbortSignal.any([signal, AbortSignal.timeout(25_000)]) }));
+          }, (opts) => chat({ ...opts, signal: AbortSignal.any([signal, AbortSignal.timeout(25_000)]) }), (value) => { diagnostic = value; });
           if (!approved) {
-            results.push({ sectionId: section.id, language, status: "failed", reason: signal.aborted ? "request_time_budget" : "answer_not_approved", elapsedMs: 0 });
+            results.push({ sectionId: section.id, language, status: "failed", phase: "review", reason: signal.aborted ? "request_time_budget" : "answer_not_approved", reviewReason: diagnostic?.reason, rejectedCriteria: diagnostic?.rejectedCriteria, elapsedMs: Date.now() - reviewStarted });
             continue;
           }
           results.push(!body.textOnly && a2eSpeechReadiness(person.id).ready
@@ -192,7 +207,13 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
         }
       }
     }
-    const final = await getPerson(person.id);
+    let final: Person | null;
+    try { final = await getPerson(person.id); }
+    catch {
+      // Work may already be saved. Report the failed readback without
+      // automatically repeating generation or exposing storage diagnostics.
+      return NextResponse.json({ error: "read_failed", code: "read_failed", results }, { status: 503 });
+    }
     const failed = results.filter((r) => r.status === "failed").length;
     return NextResponse.json({
       mode: body.textOnly ? "text-only" : body.audioOnly ? "audio-only" : body.regenerateText ? "regenerate-text" : "reuse-existing-text",

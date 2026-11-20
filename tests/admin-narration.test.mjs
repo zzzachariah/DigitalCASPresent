@@ -114,3 +114,107 @@ test('auto readiness requires saved text and audio in both requested languages',
   p.sections[0].cachedAudio.en = '/api/photo/synthetic.audio.en';
   assert.equal(adminReadinessForPerson(p).ready, true);
 });
+
+test('known preparation failures retain specific fixed Chinese explanations without provider text', async () => {
+  const cases = [
+    ['answer_not_approved', '内容审核'], ['generation_failed', '文字讲解生成未完成'],
+    ['tts_failed', '配音合成失败'], ['download_failed', '音频下载失败'],
+    ['audio_save_failed', '音频保存失败'], ['audio_verification_failed', '音频校验未通过'],
+    ['source_recheck_failed', '复核讲解内容'], ['persist_failed', '记录保存失败'],
+  ];
+  for (const [reason, expected] of cases) {
+    const p = source(1, { language: 'zh' }); let calls = 0;
+    const result = await prepareNarrationVariants(p, { textOnly: false }, { request: async (body) => {
+      calls++;
+      return { ok: false, status: 502, data: {
+        error: 'PRIVATE-UPSTREAM-MESSAGE sk-sensitive-token', sections: p.sections,
+        results: [{ ...body, status: 'failed', reason, message: 'PRIVATE-ESSAY-CONTENT' }],
+      } };
+    } });
+    assert.equal(calls, 1); assert.equal(result.completed, 0); assert.equal(result.failures.length, 1);
+    assert.ok(result.failures[0].reason.includes(expected), reason);
+    assert.doesNotMatch(result.failures[0].reason, /PRIVATE|sk-sensitive|UPSTREAM/);
+    assert.equal(result.failures[0].sectionId, 's0');
+  }
+});
+
+test('safe review diagnostics render only known phases, review outcomes and criteria', async () => {
+  const p = source(1, { language: 'zh' });
+  const result = await prepareNarrationVariants(p, { textOnly: false }, { request: async (body) => ({
+    ok: false, status: 502, data: { error: 'SECRET-RAW-ERROR', sections: p.sections, results: [{
+      ...body, status: 'failed', reason: 'answer_not_approved', phase: 'review', reviewReason: 'model_rejection',
+      rejectedCriteria: ['grounded', 'private', 'SECRET-MANUSCRIPT', 'grounded', '__proto__'],
+      diagnostic: { message: 'SECRET-PROVIDER-RESPONSE', url: 'https://secret.invalid' },
+    }] },
+  }) });
+  const text = result.failures[0].reason;
+  assert.match(text, /环节：内容审核/);
+  assert.match(text, /审核模型未批准/);
+  assert.match(text, /依据充分性、保密要求/);
+  assert.doesNotMatch(text, /SECRET|https|__proto__|grounded/);
+});
+
+test('review timeout and malformed review output remain distinguishable without raw messages', async () => {
+  for (const [reviewReason, expected] of [['review_timeout', '内容审核超时'], ['review_format', '审核结果格式'], ['review_upstream_error', '审核服务暂不可用'], ['local_rejection', '本地内容检查']]) {
+    const p = source(1, { language: 'zh' });
+    const result = await prepareNarrationVariants(p, { textOnly: false }, { request: async (body) => ({
+      ok: false, status: 502, data: { sections: p.sections, results: [{ ...body, status: 'failed', reason: 'answer_not_approved', phase: 'review', reviewReason }] },
+    }) });
+    assert.ok(result.failures[0].reason.includes(expected));
+  }
+});
+
+test('unknown diagnostics and raw top-level errors never appear in failure messages', async () => {
+  const p = source(1, { language: 'zh' });
+  const result = await prepareNarrationVariants(p, { textOnly: false }, { request: async (body) => ({
+    ok: false, status: 502, data: { error: 'PRIVATE-TOPLEVEL', code: 'PRIVATE-CODE', sections: p.sections, results: [{
+      ...body, status: 'failed', reason: 'PRIVATE-REASON', phase: 'PRIVATE-PHASE', reviewReason: '__proto__', rejectedCriteria: ['PRIVATE-CRITERION'],
+    }] },
+  }) });
+  assert.equal(result.failures[0].reason, '此项未完成或保存结果尚未确认');
+});
+
+test('known permission/configuration codes use safe local text instead of server error.message', async () => {
+  const result = await prepareNarrationVariants(source(1, { language: 'zh' }), { textOnly: false }, { request: async () => ({
+    ok: false, status: 503, data: { code: 'a2e_key_missing', error: 'PRIVATE-ERROR-MESSAGE' },
+  }) });
+  assert.equal(result.failures[0].reason, '配音服务密钥尚未配置');
+});
+
+test('Blob read failures remain specific while healthy English audio is reused without regeneration', async () => {
+  const p = source(4);
+  for (const section of p.sections) section.cachedAudio = { en: `/api/photo/synthetic.audio.${section.id}-en-existing` };
+  const originalEnglish = p.sections.map((section) => section.cachedAudio.en);
+  const calls = [];
+  const result = await prepareNarrationVariants(p, { textOnly: false }, { request: async (body) => {
+    calls.push(body);
+    return {
+      ok: body.language === 'en', status: body.language === 'en' ? 200 : 500,
+      data: { sections: structuredClone(p.sections), error: 'PRIVATE-BLOB-UPSTREAM-ERROR', results: [{
+        ...body, status: body.language === 'en' ? 'skipped' : 'failed',
+        reason: body.language === 'en' ? 'healthy_audio' : 'read_failed',
+        ...(body.language === 'zh' ? { phase: 'read' } : {}),
+      }] },
+    };
+  } });
+  assert.equal(result.completed, 4); assert.equal(result.failures.length, 4); assert.equal(calls.length, 8);
+  assert.ok(result.failures.every((failure) => failure.language === 'zh' && failure.reason.includes('读取资料失败')));
+  assert.ok(calls.every((body) => body.audioOnly === true && body.regenerateText === undefined));
+  assert.deepEqual(result.person.sections.map((section) => section.cachedAudio.en), originalEnglish);
+});
+
+test('initial and final record read errors remain safe and do not replay a possibly saved request', async () => {
+  for (const includePreparedResult of [false, true]) {
+    const p = source(1, { language: 'zh' }); let calls = 0;
+    const result = await prepareNarrationVariants(p, { textOnly: false }, { request: async (body) => {
+      calls++;
+      return { ok: false, status: 503, data: {
+        code: 'read_failed', error: 'PRIVATE-STORAGE-ERROR',
+        ...(includePreparedResult ? { results: [{ ...body, status: 'prepared', reason: 'audio_saved' }] } : {}),
+      } };
+    } });
+    assert.equal(calls, 1); assert.equal(result.completed, 0); assert.equal(result.failures.length, 1);
+    assert.equal(result.failures[0].reason, '资料暂时读取失败，请刷新核对已保存结果后重试');
+    assert.deepEqual(result.person.sections, p.sections);
+  }
+});
