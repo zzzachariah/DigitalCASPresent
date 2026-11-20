@@ -1,5 +1,7 @@
 import type { ChatTurn } from "./types";
 import { aiProcessingAllowed } from "./processing-policy";
+import { AiRequestError, aiHttpError, aiTransportError } from "./ai-errors";
+export { AiRequestError, safeAiFailure } from "./ai-errors";
 
 // ─────────────────────────────────────────────────────────────────────
 // AI client — supports Anthropic Messages and OpenAI Chat Completions.
@@ -84,6 +86,7 @@ function request(opts: ChatOptions, stream: boolean) {
 }
 
 type Completion = {
+  stop_reason?: string | null;
   content?: { type?: string; text?: string }[];
   choices?: { message?: { content?: string }; delta?: { content?: string }; finish_reason?: string | null }[];
   type?: string;
@@ -95,11 +98,7 @@ type Completion = {
 /** Only structured error details reach server logs; never an arbitrary
  *  upstream HTML/body that could echo request headers or the full script. */
 function upstreamError(status: number, data?: Completion): Error {
-  // A provider can echo a manuscript in any error field. Retain only a
-  // known machine code and HTTP status, never its free-form message.
-  const code = data?.error?.code || data?.error?.type || "";
-  const known = new Set(["protocol_not_supported", "overloaded_error", "rate_limit_error", "authentication_error", "invalid_request_error", "permission_error", "not_found_error", "api_error", "insufficient_quota"]);
-  return new Error(`AI request failed (${status}${known.has(code) ? `; ${code}` : ""}).`);
+  return aiHttpError(status, data);
 }
 
 async function checkResponse(res: Response): Promise<void> {
@@ -113,38 +112,40 @@ async function readCompletion(res: Response, signal: AbortSignal): Promise<Compl
     const data = await res.json() as Completion;
     signal.throwIfAborted();
     return data;
-  } catch {
-    signal.throwIfAborted();
+  } catch (error) {
+    if (signal.aborted) throw aiTransportError(error, signal);
     // JSON parser errors can include fragments of the upstream body.
-    throw new Error("AI returned an invalid JSON response.");
+    if (error instanceof SyntaxError) throw new AiRequestError({ kind: "invalid_response", httpStatus: res.status });
+    throw aiTransportError(error, signal);
   }
 }
 
-function completionText(data: Completion, protocol: Protocol): string {
-  if (!data || typeof data !== "object") throw new Error("AI returned an invalid response.");
-  if (data.error) throw upstreamError(200, data);
+function completionText(data: Completion, protocol: Protocol, httpStatus = 200): string {
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new AiRequestError({ kind: "invalid_response", httpStatus });
+  if (data.error) throw upstreamError(httpStatus, data);
+  if (protocol === "anthropic" ? data.stop_reason === "max_tokens" : data.choices?.[0]?.finish_reason === "length") {
+    throw new AiRequestError({ kind: "truncated_response", httpStatus });
+  }
   const text = protocol === "anthropic"
-    ? (Array.isArray(data.content) ? data.content.filter((b) => b.type === "text" && typeof b.text === "string").map((b) => b.text).join("") : "")
+    ? (Array.isArray(data.content) ? data.content.filter((b) => b?.type === "text" && typeof b.text === "string").map((b) => b.text).join("") : "")
     : data.choices?.[0]?.message?.content;
-  if (typeof text !== "string" || !text.trim()) throw new Error("AI returned an empty response.");
+  if (typeof text !== "string" || !text.trim()) throw new AiRequestError({ kind: "empty_response", httpStatus });
   return text.trim();
 }
 
 export async function chat(opts: ChatOptions): Promise<string> {
-  opts.signal?.throwIfAborted();
+  if (opts.signal?.aborted) throw aiTransportError(undefined, opts.signal);
   if (!aiProcessingAllowed()) throw new Error("External AI processing is disabled pending privacy approval.");
   if (aiIsMock()) return mockChat(opts);
   const req = request(opts, false);
   const signal = upstreamSignal(opts.signal, 90_000);
-  const res = await fetch(req.url, {
-    method: "POST",
-    headers: req.headers,
-    body: req.body,
-    signal,
-  });
+  let res: Response;
+  try {
+    res = await fetch(req.url, { method: "POST", headers: req.headers, body: req.body, signal });
+  } catch (error) { throw aiTransportError(error, signal); }
   await checkResponse(res);
   const data = await readCompletion(res, signal);
-  return completionText(data, req.protocol);
+  return completionText(data, req.protocol, res.status);
 }
 
 /** SSE records can span transport chunks and use LF, CRLF, or CR lines.

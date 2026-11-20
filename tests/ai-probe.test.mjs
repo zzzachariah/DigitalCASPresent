@@ -10,7 +10,7 @@ const fakeKey = 'synthetic-test-only-key';
 function load(file, mocks, env, fetch) {
   const code = ts.transpileModule(fs.readFileSync(new URL(file, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const module = { exports: {} };
-  vm.runInNewContext(code, { module, exports: module.exports, require: name => { if (!(name in mocks)) throw new Error(`Unexpected import ${name}`); return mocks[name]; }, process: { env }, Response, Buffer, AbortSignal, URL, Date, Set, Promise, fetch }, { filename: file });
+  vm.runInNewContext(code, { module, exports: module.exports, require: name => { if (!(name in mocks)) throw new Error(`Unexpected import ${name}`); return mocks[name]; }, process: { env }, Response, Buffer, AbortSignal, URL, Date, Set, Promise, fetch, Error, TypeError, SyntaxError, DOMException }, { filename: file });
   return module.exports;
 }
 function json(text, status = 200) { return new Response(JSON.stringify({ content: [{ type: 'text', text }] }), { status, headers: { 'Content-Type': 'application/json' } }); }
@@ -18,8 +18,9 @@ function setup() {
   const env = { AI_API_KEY: fakeKey, AI_PROBE_SECRET: 'synthetic-probe-secret', AI_PROBE_EXPIRES_AT: new Date(Date.now() + 30 * 60000).toISOString(), EXTERNAL_AI_PROCESSING_APPROVED: 'false' };
   const state = { event: 'open', admin: true, blocked: false, calls: [], responses: [json(expected), json(yes)] };
   const retention = { eventRetentionStatus: () => ({ state: state.event, endsAt: '2999-01-01T00:00:00.000Z' }) };
-  const safety = load('../src/lib/ai-safety.ts', {}, env);
-  const probe = load('../src/lib/ai-probe.ts', { './event-retention': retention, './ai-safety': safety }, env, async (url, init) => {
+  const errors = load('../src/lib/ai-errors.ts', {}, env);
+  const safety = load('../src/lib/ai-safety.ts', { './ai-errors': errors }, env);
+  const probe = load('../src/lib/ai-probe.ts', { './event-retention': retention, './ai-safety': safety, './ai-errors': errors }, env, async (url, init) => {
     state.calls.push({ url, init, body: JSON.parse(init.body) });
     const result = state.responses.shift();
     if (typeof result === 'function') return result(init);
@@ -47,7 +48,7 @@ test('two fixed synthetic probes work with manuscript processing disabled', asyn
     assert.equal(call.url, 'https://cf.api.fan/v1/messages');
     assert.equal(call.init.redirect, 'error'); assert.equal(call.init.headers['x-api-key'], fakeKey);
     assert.equal(call.init.headers['anthropic-version'], '2023-06-01');
-    assert.equal(call.body.model, 'claude-sonnet-5'); assert.equal(call.body.max_tokens, 200);
+    assert.equal(call.body.model, 'claude-sonnet-5'); assert.equal(call.body.max_tokens, call.body.system.startsWith('You are a strict safety') ? 512 : 200);
     assert.equal(call.body.stream, false); assert.equal(call.body.temperature, 0);
     assert.equal(call.body.messages.length, 1); assert.equal(call.body.messages[0].role, 'user');
     assert.ok(call.body.messages[0].content.includes('fictional'));
@@ -95,19 +96,19 @@ test('provider HTTP errors never expose their body or send a second request', as
   assert.ok(!JSON.stringify(result).includes(fakeKey)); assert.ok(!JSON.stringify(result).includes('PRIVATE-MANUSCRIPT-CANARY'));
 });
 
-test('synthetic replies are bounded, redact credentials, and never become second-request input', async () => {
+test('unknown synthetic replies are withheld and never become second-request input', async () => {
   const s = setup(); const injected = `${fakeKey} Bearer another-key sk-secret123 https://attacker.invalid ${'x'.repeat(1500)}`;
   s.state.responses = [json(injected), json(yes)];
   const result = await (await s.route.POST(request())).json();
-  assert.equal(result.generation.pass, false); assert.ok(result.generation.response.length <= 1200);
-  assert.ok(!result.generation.response.includes(fakeKey)); assert.ok(!result.generation.response.includes('another-key'));
-  assert.ok(!result.generation.response.includes('sk-secret123')); assert.ok(!result.generation.response.includes('https://attacker'));
+  assert.equal(result.generation.pass, false); assert.equal(result.generation.response, undefined);
+  assert.ok(!JSON.stringify(result).includes(fakeKey)); assert.ok(!JSON.stringify(result).includes('another-key'));
+  assert.ok(!JSON.stringify(result).includes('sk-secret123')); assert.ok(!JSON.stringify(result).includes('https://attacker'));
   const reviewInput = s.state.calls[1].body.messages[0].content;
   assert.ok(!reviewInput.includes(fakeKey)); assert.ok(!reviewInput.includes('another-key')); assert.ok(reviewInput.includes(expected));
 });
 
 test('malformed or oversized success bodies fail without exposing parser excerpts', async () => {
-  for (const response of [new Response(`{broken ${fakeKey}`, { status: 200 }), json('x'.repeat(40000)), new Response(JSON.stringify({ error: { message: fakeKey } }), { status: 200 })]) {
+  for (const response of [new Response(`{broken ${fakeKey}`, { status: 200 }), json('x'.repeat(40000))]) {
     const s = setup(); s.state.responses = [response];
     const result = await (await s.route.POST(request())).json();
     assert.equal(result.generation.status, 'invalid_response'); assert.equal(result.review.status, 'skipped');
@@ -158,4 +159,42 @@ test('only the optional Fable fallback receives the longer 50-second deadline', 
   const result = await (await s.route.POST(request({ model: 'claude-fable-5-2' }))).json();
   assert.equal(result.pass, true); assert.deepEqual(timeouts, [50000, 50000]);
   assert.ok(s.state.calls.every(call => call.body.model === 'claude-fable-5-2'));
+});
+
+test('fixed probe exposes typed failures and no raw provider material', async () => {
+  const secret = 'PRIVATE-MANUSCRIPT-CANARY';
+  const cases = [
+    [Response.json({ error: { code: 'rate_limit_error', message: secret } }, { status: 429 }), { kind: 'http', httpStatus: 429, code: 'rate_limit_error' }],
+    [Response.json({ error: { type: 'overloaded_error', message: secret } }), { kind: 'http', httpStatus: 200, code: 'overloaded_error' }],
+    [Response.json({ error: { code: secret, message: secret } }), { kind: 'http', httpStatus: 200 }],
+    [new Response(secret), { kind: 'invalid_response', httpStatus: 200 }],
+    [Response.json({ content: [] }), { kind: 'empty_response', httpStatus: 200 }],
+    [Response.json({ content: [{ type: 'thinking', thinking: secret }], stop_reason: 'max_tokens' }), { kind: 'truncated_response', httpStatus: 200 }],
+    [new TypeError(secret), { kind: 'network' }],
+    [new Error(secret), { kind: 'unknown' }],
+  ];
+  for (const [response, failure] of cases) {
+    const s = setup(); s.state.responses = [response];
+    const result = await (await s.route.POST(request())).json();
+    assert.deepEqual(result.generation.failure, failure);
+    assert.equal(result.generation.response, undefined); assert.equal(result.review.status, 'skipped');
+    assert.equal(s.state.calls.length, 1); assert.ok(!JSON.stringify(result).includes(secret));
+  }
+});
+
+test('probe review uses the production 512-token budget and preserves its safe HTTP diagnostic', async () => {
+  const s = setup(); s.state.responses = [json(expected), Response.json({ error: { code: 'api_error', message: fakeKey } }, { status: 502 })];
+  const result = await (await s.route.POST(request())).json();
+  assert.equal(s.state.calls[0].body.max_tokens, 200); assert.equal(s.state.calls[1].body.max_tokens, 512);
+  assert.equal(result.generation.maxTokens, 200); assert.equal(result.review.maxTokens, 512);
+  assert.deepEqual(result.review.failure, { kind: 'http', httpStatus: 502, code: 'api_error' });
+  assert.equal(result.review.reviewReason, 'review_upstream_error'); assert.ok(!JSON.stringify(result).includes(fakeKey));
+});
+
+test('thinking-only truncation in the probe review is reported before empty content', async () => {
+  const s = setup(); s.state.responses = [json(expected), Response.json({ stop_reason: 'max_tokens', content: [{ type: 'thinking', thinking: fakeKey }] })];
+  const result = await (await s.route.POST(request())).json();
+  assert.equal(result.review.reviewReason, 'review_format');
+  assert.deepEqual(result.review.failure, { kind: 'truncated_response', httpStatus: 200 });
+  assert.equal(result.review.response, undefined); assert.ok(!JSON.stringify(result).includes(fakeKey));
 });

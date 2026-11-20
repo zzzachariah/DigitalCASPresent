@@ -1,4 +1,5 @@
 import type { AnswerLang } from "./types";
+import { safeAiFailure, type AiFailureDiagnostic } from "./ai-errors";
 
 /** These fixed replies are also used when generation/review is unavailable. */
 export function safeFallback(language: AnswerLang): string {
@@ -62,9 +63,13 @@ export type SafetyReviewer = (options: {
 }) => Promise<string>;
 
 const REVIEW_FIELDS = ["safe", "grounded", "private", "relevant", "respectful"] as const;
+export const REVIEW_MAX_TOKENS = 512;
 export interface SafetyReviewDiagnostic {
   reason: "local_rejection" | "model_rejection" | "review_format" | "review_timeout" | "review_upstream_error";
   rejectedCriteria?: (typeof REVIEW_FIELDS)[number][];
+  upstreamKind?: AiFailureDiagnostic["kind"];
+  httpStatus?: number;
+  upstreamCode?: AiFailureDiagnostic["code"];
 }
 
 const REVIEW_RULES = `You are a strict safety and grounding reviewer for a school exhibition. You do not answer the visitor.
@@ -97,11 +102,14 @@ export async function reviewExhibitionAnswer(input: SafetyReviewInput, reviewer:
       system: REVIEW_RULES,
       messages: [{ role: "user", content: JSON.stringify(input) }],
       temperature: 0,
-      maxTokens: 150,
+      maxTokens: REVIEW_MAX_TOKENS,
     });
   } catch (error) {
-    const timeout = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
-    return reject({ reason: timeout ? "review_timeout" : "review_upstream_error" });
+    const failure = safeAiFailure(error);
+    const timeout = failure.kind === "timeout" || failure.kind === "aborted" ||
+      (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"));
+    return reject({ reason: timeout ? "review_timeout" : failure.kind === "truncated_response" ? "review_format" : "review_upstream_error",
+      upstreamKind: failure.kind, ...(failure.httpStatus !== undefined ? { httpStatus: failure.httpStatus } : {}), ...(failure.code ? { upstreamCode: failure.code } : {}) });
   }
   try {
     // Deliberately no permissive fenced-JSON/prose extraction. Only actual

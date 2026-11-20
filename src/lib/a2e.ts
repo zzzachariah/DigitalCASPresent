@@ -48,8 +48,20 @@ export function a2eConfigured(): boolean {
   return a2eReadiness().ready;
 }
 
-/** Exact server-configured record IDs only: names, wildcards and browser input
- * never grant permission. Photo approval does not authorize TTS or other people. */
+/** Organizer approval for this activity's current and future participants.
+ * This authorizes only the existing person-bound A2E photo and reviewed TTS
+ * operations. It does not open D-ID or the legacy arbitrary media endpoints. */
+export function a2eActivityProcessingApproved(): boolean {
+  return process.env.A2E_PROCESSING_APPROVED?.trim().toLowerCase() === "true";
+}
+
+function approvedScope(personId: string | undefined, ids: string[]): boolean {
+  if (personId !== undefined && !/^[A-Za-z0-9_-]{1,40}$/.test(personId)) return false;
+  return a2eActivityProcessingApproved() || !!personId && ids.includes(personId);
+}
+
+/** Optional record-specific approval remains available when activity-wide
+ * processing is closed. Browser input never grants permission. */
 export function a2ePhotoApprovedPersonIds(): string[] {
   return approvedPersonIds(process.env.A2E_PHOTO_APPROVED_PERSON_IDS);
 }
@@ -63,33 +75,39 @@ export function a2eSpeechApprovedPersonIds(): string[] {
   return approvedPersonIds(process.env.A2E_SPEECH_APPROVED_PERSON_IDS);
 }
 
-/** Narration permission is independent of photos and never expands to others. */
+/** Activity approval covers narration; legacy photo-only approval does not. */
 export function a2eSpeechReadiness(personId?: string): A2eReadiness {
-  if (!personId || !a2eSpeechApprovedPersonIds().includes(personId)) return {
+  if (!approvedScope(personId, a2eSpeechApprovedPersonIds())) return {
     status: "privacy_disabled", ready: false,
     message: "尚未获准让 A2E 为此人的已审核讲解配音。照片与文字 AI 授权不包含配音。 / A2E narration requires this person's separate approval; photo and text AI permissions do not include narration.",
   };
   const readiness = a2eConfigurationReadiness();
-  return readiness.ready ? { ...readiness, message: "此人的已审核讲解配音已获准且配置完整；照片和其他人员权限保持独立。 / This person's reviewed narration is approved and configured; photo and other people's permissions remain separate." } : readiness;
+  return readiness.ready ? { ...readiness, message: a2eActivityProcessingApproved()
+    ? "本活动所有同学（包括后续提交）的已审核讲解配音已统一启用。 / Reviewed narration is enabled for all current and future participants in this activity."
+    : "此人的已审核讲解配音已获准且配置完整。 / This person's reviewed narration is approved and configured." } : readiness;
 }
 
 function requireSpeechProcessing(personId: string): void {
   assertEventOpen();
+  if (!/^[A-Za-z0-9_-]{1,40}$/.test(personId)) throw new Error("Invalid participant");
   const readiness = a2eSpeechReadiness(personId);
   if (!readiness.ready) throw new Error(readiness.message);
 }
 
 export function a2ePhotoReadiness(personId?: string): A2eReadiness {
-  if (!personId || !a2ePhotoApprovedPersonIds().includes(personId)) return {
+  if (!approvedScope(personId, a2ePhotoApprovedPersonIds())) return {
     status: "privacy_disabled", ready: false,
     message: "尚未获准让 A2E 处理此人的照片。仅单独获准的人员可生成卡通形象和动态视频，不包含配音。 / A2E photo processing requires this person's separate approval; narration is not included.",
   };
   const readiness = a2eConfigurationReadiness();
-  return readiness.ready ? { ...readiness, message: "此人的 A2E 卡通形象与动态视频处理已获准且配置完整；配音权限保持独立。 / This person's photo processing is approved and configured; narration permission is separate." } : readiness;
+  return readiness.ready ? { ...readiness, message: a2eActivityProcessingApproved()
+    ? "本活动所有同学（包括后续提交）的 A2E 卡通形象与动态视频已统一启用。 / A2E cartoons and ambient videos are enabled for all current and future participants in this activity."
+    : "此人的 A2E 卡通形象与动态视频处理已获准且配置完整。 / This person's photo processing is approved and configured." } : readiness;
 }
 
 function requirePhotoProcessing(personId: string): void {
   assertEventOpen();
+  if (!/^[A-Za-z0-9_-]{1,40}$/.test(personId)) throw new Error("Invalid participant");
   const readiness = a2ePhotoReadiness(personId);
   if (!readiness.ready) throw new Error(readiness.message);
 }

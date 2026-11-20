@@ -43,10 +43,24 @@ test('Anna photo approval enables only her cartoon/video while speech stays disa
   assert.deepEqual(Array.from(preparationSteps(person(), other.ready)), ['pregenerate']);
 });
 
-test('a ready person entry or legacy global approval cannot bypass the explicit photo list', () => {
-  const status = adminMediaStatus(health({ a2e: ready, a2ePhoto: { global: ready, approvedPersonIds: [], people: { anna: ready } } }));
+test('a ready person entry or legacy a2e flag cannot bypass scoped approval', () => {
+  const status = adminMediaStatus(health({ a2e: ready, a2ePhoto: { global: disabled, approvedPersonIds: [], people: { anna: ready } } }));
   assert.equal(speechStatusForPerson(status, 'anna').ready, false);
   assert.equal(photoStatusForPerson(status, 'anna').ready, false);
+});
+
+test('validated event-wide photo and speech approval includes current and future students', () => {
+  const status = adminMediaStatus(health({
+    a2ePhoto: { global: ready, approvedPersonIds: [], people: {} },
+    a2eSpeech: { global: ready, approvedPersonIds: [], people: {} },
+  }));
+  for (const id of ['anna', 'other-existing-student', 'future-upload']) {
+    assert.equal(photoStatusForPerson(status, id).ready, true);
+    assert.equal(speechStatusForPerson(status, id).ready, true);
+  }
+  const photoOnly = adminMediaStatus(health({ a2ePhoto: { global: ready, approvedPersonIds: [], people: {} } }));
+  assert.equal(photoStatusForPerson(photoOnly, 'future-upload').ready, true);
+  assert.equal(speechStatusForPerson(photoOnly, 'future-upload').ready, false);
 });
 
 test('approved photo still requires a fully configured and ready photo service', () => {

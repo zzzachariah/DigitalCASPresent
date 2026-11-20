@@ -4,6 +4,7 @@ import { readinessForPerson, type PersonReadiness } from "./readiness";
 export function narrationLanguages(language: Person["language"]): AnswerLang[] {
   return language === "auto" ? ["zh", "en"] : [language];
 }
+export const narrationLanguageLabels: Record<AnswerLang, string> = { zh: "中文", en: "English", bilingual: "中英双语" };
 export interface NarrationVariant { sectionId: string; title: string; language: AnswerLang }
 export function narrationVariants(person: Pick<Person, "language" | "sections">): NarrationVariant[] {
   return person.sections.flatMap((section) => narrationLanguages(person.language).map((language) => ({ sectionId: section.id, title: section.title, language })));
@@ -14,14 +15,20 @@ export function adminReadinessForPerson(person: Person): PersonReadiness {
   const result = readinessForPerson(person);
   const variants = narrationVariants(person);
   const complete = variants.length > 0;
-  const items = result.items.map((item) => item.key === "answers" || item.key === "audio" ? {
-    ...item,
-    detail: item.key === "answers" ? "每个部分的全部目标语言均需有固定讲解" : "每个部分的全部目标语言均需有固定语音",
-    ready: complete && variants.every((v) => {
+  const items = result.items.map((item) => {
+    if (item.key !== "answers" && item.key !== "audio") return item;
+    const missing = variants.filter((v) => {
       const section = person.sections.find((s) => s.id === v.sectionId);
-      return !!section?.cachedAnswers?.[v.language]?.trim() && (item.key !== "audio" || !!section.cachedAudio?.[v.language]);
-    }),
-  } : item);
+      return !section?.cachedAnswers?.[v.language]?.trim() || (item.key === "audio" && !section.cachedAudio?.[v.language]);
+    });
+    const count = `${variants.length - missing.length}/${variants.length}`;
+    return {
+      ...item,
+      label: `${item.label} ${count}`,
+      detail: missing.length ? `待准备：${missing.slice(0, 3).map((v) => `${v.title.slice(0, 30)}（${narrationLanguageLabels[v.language]}）`).join("、")}${missing.length > 3 ? `；另 ${missing.length - 3} 项见下方各段状态` : ""}` : complete ? "全部目标语言均已保存" : "尚无讲稿分段",
+      ready: complete && missing.length === 0,
+    };
+  });
   const done = items.filter((item) => item.ready).length;
   const warnings = items.filter((item) => !item.required && !item.ready);
   return { ...result, items, done, percent: Math.round(done / items.length * 100), warnings, ready: result.blockers.length === 0 && warnings.length === 0 };
@@ -35,6 +42,7 @@ export interface NarrationRequest {
 }
 export interface NarrationProgress { current: number; total: number; variant: NarrationVariant; retry: boolean }
 export interface NarrationFailure extends NarrationVariant { reason: string }
+export interface NarrationOutcome extends NarrationVariant { completed: boolean; reason: string; textReady: boolean; audioReady: boolean }
 export interface NarrationRun {
   person: Person;
   completed: number;
@@ -59,10 +67,12 @@ export interface NarrationDependencies {
   request: (body: NarrationRequest) => Promise<{ ok: boolean; status: number; data: unknown }>;
   onProgress?: (progress: NarrationProgress) => void;
   onUpdate?: (person: Person) => void;
+  onResult?: (outcome: NarrationOutcome) => void;
+  recover?: () => Promise<Person | null>;
 }
 
 const FAILURE_REASONS: Record<string, string> = {
-  answer_not_approved: "讲解未通过内容审核，或审核结果尚未确认",
+  answer_not_approved: "尚未获得有效的内容审核结论",
   generation_failed: "文字讲解生成未完成",
   empty_answer: "未生成有效的讲解文字",
   tts_failed: "配音合成失败",
@@ -91,10 +101,10 @@ const FAILURE_PHASES: Record<string, string> = {
 };
 const REVIEW_REASONS: Record<string, string> = {
   local_rejection: "本地内容检查未通过",
-  model_rejection: "审核模型未批准这段讲解",
-  review_format: "审核结果格式不符合要求",
-  review_timeout: "内容审核超时，结果尚未确认",
-  review_upstream_error: "审核服务暂不可用",
+  model_rejection: "内容检查未通过，审核模型未批准这段讲解",
+  review_format: "审核服务返回格式异常，未获得审核结论",
+  review_timeout: "审核服务超时，未获得审核结论",
+  review_upstream_error: "审核服务暂时失败，未获得审核结论",
 };
 const REVIEW_CRITERIA: Record<string, string> = {
   safe: "校园适宜性", grounded: "依据充分性", private: "保密要求", relevant: "展览相关性", respectful: "礼貌与中立",
@@ -119,13 +129,12 @@ function fixedMessage(value: unknown, messages: Record<string, string>): string 
 /** Render only local allowlisted labels. Provider/error messages, URLs,
  * credentials, manuscript text and unknown diagnostic values never enter UI. */
 function narrationFailureReason(result: NarrationResult | undefined, data: ResponseData, status: number): string {
-  const base = fixedMessage(result?.reason, FAILURE_REASONS) || fixedMessage(data.code, FAILURE_CODES) ||
+  const review = fixedMessage(result?.reviewReason, REVIEW_REASONS);
+  const base = review || fixedMessage(result?.reason, FAILURE_REASONS) || fixedMessage(data.code, FAILURE_CODES) ||
     fixedMessage(String(status), HTTP_FAILURES) || "此项未完成或保存结果尚未确认";
   const details: string[] = [];
   const phase = fixedMessage(result?.phase, FAILURE_PHASES);
   if (phase) details.push(`环节：${phase}`);
-  const review = fixedMessage(result?.reviewReason, REVIEW_REASONS);
-  if (review) details.push(review);
   if (result?.reviewReason === "model_rejection" && Array.isArray(result.rejectedCriteria)) {
     const criteria = Object.keys(REVIEW_CRITERIA).filter((key) => (result.rejectedCriteria as unknown[]).includes(key)).map((key) => REVIEW_CRITERIA[key]);
     if (criteria.length) details.push(`未通过：${criteria.join("、")}`);
@@ -147,9 +156,13 @@ export async function prepareNarrationVariants(
   let completed = 0;
   let stopReason = "";
   const failures: NarrationFailure[] = [];
+  function report(variant: NarrationVariant, reason: string) {
+    const section = current.sections.find((s) => s.id === variant.sectionId);
+    dependencies.onResult?.({ ...variant, completed: !reason, reason, textReady: !!section?.cachedAnswers?.[variant.language]?.trim(), audioReady: !!section?.cachedAudio?.[variant.language] });
+  }
   for (let index = 0; index < variants.length; index++) {
     const variant = variants[index];
-    if (stopReason) { failures.push({ ...variant, reason: stopReason }); continue; }
+    if (stopReason) { failures.push({ ...variant, reason: stopReason }); report(variant, stopReason); continue; }
     let failure = "未收到可确认的准备结果";
     for (let attempt = 0; attempt < 2; attempt++) {
       dependencies.onProgress?.({ current: index + 1, total: variants.length, variant, retry: attempt > 0 });
@@ -164,6 +177,14 @@ export async function prepareNarrationVariants(
       try { response = await dependencies.request(body); }
       catch {
         failure = "请求未完成，请刷新核对保存结果后重试";
+        try {
+          const recovered = await dependencies.recover?.();
+          if (recovered?.id === person.id) {
+            current = recovered;
+            dependencies.onUpdate?.(current);
+            failure = "请求中断，已重新读取保存结果，请核对后重试";
+          }
+        } catch { /* Keep all previously confirmed results if read-back fails. */ }
         stopReason = "前一请求状态未确认，后续部分未发起";
         break;
       }
@@ -190,6 +211,7 @@ export async function prepareNarrationVariants(
       break;
     }
     if (failure) failures.push({ ...variant, reason: failure });
+    report(variant, failure);
   }
   return { person: current, completed, total: variants.length, failures };
 }

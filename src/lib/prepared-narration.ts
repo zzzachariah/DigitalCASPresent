@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import type { AnswerLang, Person } from "./types";
 import type { SafetyReviewDiagnostic } from "./ai-safety";
+import type { AiFailureDiagnostic } from "./ai-errors";
 
 export interface AudioAsset { buffer: Buffer; contentType: string }
 export class AudioReadError extends Error {
@@ -18,6 +19,8 @@ export class AudioPreparationError extends Error {
   }
 }
 export interface PreparationDependencies {
+  signal?: AbortSignal;
+  onPhase?: (phase: PreparationPhase) => void;
   getPerson: (id: string) => Promise<Person | null>;
   updatePerson: (id: string, patch: Partial<Person>) => Promise<Person | null>;
   tts: (text: string, gender: Person["gender"]) => Promise<string>;
@@ -33,9 +36,19 @@ export interface PreparationResult {
   bytes?: number;
   elapsedMs: number;
   providerCode?: string;
+  upstreamKind?: AiFailureDiagnostic["kind"];
+  httpStatus?: number;
+  upstreamCode?: AiFailureDiagnostic["code"];
   phase?: PreparationPhase;
   reviewReason?: SafetyReviewDiagnostic["reason"];
   rejectedCriteria?: SafetyReviewDiagnostic["rejectedCriteria"];
+}
+
+/** Reporting cannot change a successful operation; cancellation is independent. */
+function reportPhase(dependencies: PreparationDependencies, phase: PreparationPhase): void {
+  dependencies.signal?.throwIfAborted();
+  try { dependencies.onPhase?.(phase); } catch { /* Observer failure is nonfatal. */ }
+  dependencies.signal?.throwIfAborted();
 }
 
 /** Check the actual payload, not just a 200 response or an audio MIME label. */
@@ -59,14 +72,18 @@ export async function createPermanentNarration(
 ): Promise<{ url: string; bytes: number }> {
   let phase: AudioPreparationPhase = "tts";
   try {
+    reportPhase(dependencies, phase);
     const temporaryUrl = await dependencies.tts(text, person.gender);
     phase = "download";
+    reportPhase(dependencies, phase);
     const asset = await dependencies.readAudio(temporaryUrl);
     const ext = audioExtension(asset);
     const key = `${sectionId.slice(0, 32)}-${language}-${randomUUID().replace(/-/g, "").slice(0, 16)}`;
     phase = "audio_save";
+    reportPhase(dependencies, phase);
     const url = await dependencies.saveAudio(person.id, key, asset.buffer, ext);
     phase = "audio_verification";
+    reportPhase(dependencies, phase);
     const saved = await dependencies.readAudio(url);
     audioExtension(saved);
     if (!saved.buffer.equals(asset.buffer)) throw new Error("Permanent audio verification failed");
@@ -85,6 +102,7 @@ export async function prepareExistingNarration(
     ({ sectionId, language, status, reason, elapsedMs: Date.now() - start, ...extra });
   let phase: PreparationPhase = "read";
   try {
+    reportPhase(dependencies, phase);
     const original = await dependencies.getPerson(personId);
     if (!original) return result("failed", "person_missing");
     const section = original.sections.find((s) => s.id === sectionId);
@@ -94,6 +112,8 @@ export async function prepareExistingNarration(
     const previousAudio = section.cachedAudio?.[language];
     if (previousAudio) {
       try {
+        phase = "audio_verification";
+        reportPhase(dependencies, phase);
         const existing = await dependencies.readAudio(previousAudio);
         audioExtension(existing);
         return result("skipped", "healthy_audio", { audioUrl: previousAudio, bytes: existing.buffer.length });
@@ -105,8 +125,10 @@ export async function prepareExistingNarration(
       }
     }
     phase = "audio_preparation";
+    reportPhase(dependencies, phase);
     const prepared = await createPermanentNarration(original, sectionId, language, text, dependencies);
     phase = "source_recheck";
+    reportPhase(dependencies, phase);
     const fresh = await dependencies.getPerson(personId);
     if (!fresh) return result("failed", "person_missing");
     const current = fresh.sections.find((s) => s.id === sectionId);
@@ -118,9 +140,11 @@ export async function prepareExistingNarration(
     const sections = fresh.sections.map((s) => s.id === sectionId
       ? { ...s, cachedAudio: { ...s.cachedAudio, [language]: prepared.url } } : s);
     phase = "persist";
+    reportPhase(dependencies, phase);
     const updated = await dependencies.updatePerson(personId, { sections });
     if (!updated) return result("failed", "person_missing");
     phase = "persist_verification";
+    reportPhase(dependencies, phase);
     const verified = await dependencies.getPerson(personId);
     const savedSection = verified?.sections.find((s) => s.id === sectionId);
     if (!verified || verified.script !== fresh.script || savedSection?.cachedAnswers?.[language] !== text ||

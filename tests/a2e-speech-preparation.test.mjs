@@ -32,7 +32,7 @@ function setup({ cached = true, approved = true } = {}) {
       if (name === 'crypto' || name === 'node:crypto') return crypto;
       if (!(name in mocks)) throw new Error(`Unexpected import ${name}`);
       return mocks[name];
-    }, process: { env }, Response, Buffer, AbortSignal, URL, Date, Set, Map, Promise, fetch, Error, DOMException });
+    }, process: { env }, Response, Buffer, AbortSignal, AbortController, ReadableStream, TextEncoder, URL, Date, Set, Map, Promise, fetch, Error, DOMException });
     return module.exports;
   }
   const policy = load('../src/lib/processing-policy.ts');
@@ -69,10 +69,11 @@ function setup({ cached = true, approved = true } = {}) {
     'next/server': { NextResponse: { json: (body, init) => new Response(JSON.stringify(body), init) } },
     '@/lib/auth': { isAdmin: () => state.admin }, '@/lib/store': store,
     '@/lib/processing-policy': policy, '@/lib/privacy': privacy, '@/lib/a2e': a2e,
-    '@/lib/ai-safety': load('../src/lib/ai-safety.ts'), '@/lib/sentences': load('../src/lib/sentences.ts'),
+    '@/lib/ai-safety': load('../src/lib/ai-safety.ts', { './ai-errors': load('../src/lib/ai-errors.ts') }), '@/lib/sentences': load('../src/lib/sentences.ts'),
+    '@/lib/preparation-response': load('../src/lib/preparation-response.ts'),
     '@/lib/prepared-narration': load('../src/lib/prepared-narration.ts'),
     '@/lib/prompts': { systemPrompt: () => 'Synthetic test', explainSectionPrompt: () => 'Explain this exhibit' },
-    '@/lib/ai': { chat: async options => { state.aiCalls.push(options); return options.maxTokens === 150 ? state.review(options) : state.generate(options); } },
+    '@/lib/ai': { chat: async options => { state.aiCalls.push(options); return options.system.startsWith('You are a strict safety') ? state.review(options) : state.generate(options); } },
   });
   const controller = new AbortController();
   return { env, state, controller, run: (options, id = 'anna-fixture') => route.POST({ json: async () => ({ sectionId: 'part', language: 'en', ...options }), signal: controller.signal }, { params: { id } }) };
@@ -84,7 +85,7 @@ test('approved audio-only preparation reviews existing text, persists exact audi
   const response = await s.run({ audioOnly: true }); const body = await response.json();
   assert.equal(response.status, 200); assert.equal(body.mode, 'audio-only'); assert.equal(body.results[0].reason, 'saved_and_verified');
   assert.deepEqual(s.state.person.sections[0].cachedAnswers, before);
-  assert.equal(s.state.aiCalls.length, 1); assert.equal(s.state.aiCalls[0].maxTokens, 150);
+  assert.equal(s.state.aiCalls.length, 1); assert.equal(s.state.aiCalls[0].maxTokens, 512);
   assert.equal(s.state.provider.length, 1); assert.equal(s.state.provider[0].msg, answer);
   assert.ok(!JSON.stringify(s.state.provider).includes(source));
   assert.equal(s.state.downloads, 1); assert.equal(s.state.writes, 1);

@@ -1,5 +1,13 @@
 # Privacy and AI operating state
 
+## November 21, 2026 activity-wide approval and preparation progress
+
+The organizer explicitly approved A2E processing for all participants in this activity, including future submissions. `A2E_PROCESSING_APPROVED=true` enables the existing person-bound photo/cartoon/video operations and reviewed, limited narration for those records. Individual approval lists remain a compatibility fallback, not an onboarding requirement. `EXTERNAL_AI_PROCESSING_APPROVED=false` continues to keep D-ID and arbitrary unscoped media processing closed. This approval does not fabricate student consent receipts or allow raw manuscripts to be sent as speech input; ordinary provider voices are used, not voice cloning. The public privacy notice now states the activity-wide scope.
+
+Preparation handles one section/language at a time and emits only fixed generation/review/speech/persistence phase names before its final result. The admin shows a complete per-step history, per-language saved text/audio counts and exact missing variants. A service failure is not described as a content rejection, and a partial run is never called fully ready. Review output has a 512-token ceiling; truncated or malformed responses still fail closed. Safe HTTP/error categories can be diagnosed using fixed fictional material at `/admin/service-check` without reading student manuscripts or exposing provider messages.
+
+The earlier approvals below are historical and are superseded by this activity-wide scope.
+
 ## November 21, 2026 narration repair
 
 The organizer subsequently requested narration repair and live verification for the same participant. Production `A2E_SPEECH_APPROVED_PERSON_IDS` separately identifies this approved record. This does not expand the photo list or authorize other participants. Only reviewed exhibition explanations reach A2E TTS; raw manuscripts and source sections are not TTS input. Ordinary provider voices are used, not voice cloning. Global external processing and D-ID remain closed.
@@ -8,7 +16,7 @@ Admin preparation processes each section/language variant sequentially, verifies
 
 ## November 21, 2026 photo-processing scope
 
-The organizer separately authorized one identified participant's photo for A2E cartoon and ambient-video generation. Production `A2E_PHOTO_APPROVED_PERSON_IDS` identifies that record; do not add other records without specific authorization. `EXTERNAL_AI_PROCESSING_APPROVED=false` continues to block external narration and D-ID. The existing text-AI consent does not grant photo-processing permission.
+Initially, the organizer separately authorized one identified participant's photo for A2E cartoon and ambient-video generation. `A2E_PHOTO_APPROVED_PERSON_IDS` identified that record. The later activity-wide approval above now governs photo and reviewed speech processing; D-ID remains closed.
 
 Admin diagnostics distinguish a deliberate privacy block from missing provider configuration. Photo routes read authorized private image bytes directly, never forward edit/preview credentials, and bind polling tokens to the participant and task purpose. Upload object names use content hashes to avoid collisions. The admin preparation flow can continue with explicit text-only processing when media is unavailable, without claiming missing assets are ready.
 
