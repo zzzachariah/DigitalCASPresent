@@ -44,6 +44,29 @@ test('Suggestions and private identifiers receive the same release checks', asyn
   assert.equal(await safety.reviewExhibitionAnswer({ ...input, answer: 'Contact person@example.com for the essay.' }, async () => yes), false);
 });
 
+test('Review diagnostics distinguish rejection, malformed output and outages without copying untrusted text', async () => {
+  const secret = 'PRIVATE-ERROR-CANARY: manuscript, answer, credential';
+  const cases = [
+    [{ ...input, answer: source }, async () => assert.fail('Local rejection cannot call a reviewer'), { reason: 'local_rejection' }],
+    [input, async () => yes.replace('"private":true', '"private":false'), { reason: 'model_rejection', rejectedCriteria: ['private'] }],
+    [input, async () => secret, { reason: 'review_format' }],
+    [input, async () => JSON.stringify({ ...JSON.parse(yes), [secret]: false }), { reason: 'review_format' }],
+    [input, async () => { throw new Error(secret); }, { reason: 'review_upstream_error' }],
+    [input, async () => { throw new DOMException(secret, 'TimeoutError'); }, { reason: 'review_timeout' }],
+    [input, async () => { throw new DOMException(secret, 'AbortError'); }, { reason: 'review_timeout' }],
+  ];
+  for (const [candidate, reviewer, expected] of cases) {
+    const diagnostics = [];
+    assert.equal(await safety.reviewExhibitionAnswer(candidate, reviewer, diagnostic => diagnostics.push(diagnostic)), false);
+    assert.deepEqual(diagnostics, [expected]);
+    assert.ok(!JSON.stringify(diagnostics).includes(secret));
+  }
+  let invoked = false;
+  assert.equal(await safety.reviewExhibitionAnswer(input, async () => yes, () => { invoked = true; }), true);
+  assert.equal(invoked, false);
+  assert.equal(await safety.reviewExhibitionAnswer(input, async () => 'bad JSON', () => { throw new Error(secret); }), false);
+});
+
 // Exercise the actual route with isolated storage/provider bindings and only
 // synthetic exhibition material. No real student records or service calls.
 let state;

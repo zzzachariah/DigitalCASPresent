@@ -1,16 +1,20 @@
 import { randomUUID } from "crypto";
 import type { AnswerLang, Person } from "./types";
+import type { SafetyReviewDiagnostic } from "./ai-safety";
 
 export interface AudioAsset { buffer: Buffer; contentType: string }
 export class AudioReadError extends Error {
   constructor(public code: "missing" | "invalid" | "unavailable") { super(`Audio ${code}`); }
 }
-class AudioPreparationError extends Error {
+type AudioPreparationPhase = "tts" | "download" | "audio_save" | "audio_verification";
+export type PreparationPhase = AudioPreparationPhase | "generation" | "review" | "read" | "audio_preparation" | "source_recheck" | "persist" | "persist_verification";
+export class AudioPreparationError extends Error {
   providerCode?: string;
-  constructor(public phase: string, cause: unknown) {
+  constructor(public phase: AudioPreparationPhase, cause: unknown) {
     super(`${phase} failed`);
     const message = cause instanceof Error ? cause.message : "";
-    this.providerCode = message.match(/"code"\s*:\s*"?(\d+)/)?.[1];
+    const code = message.match(/"code"\s*:\s*"?(\d+)/)?.[1];
+    this.providerCode = code && code.length <= 8 ? code : undefined;
   }
 }
 export interface PreparationDependencies {
@@ -29,6 +33,9 @@ export interface PreparationResult {
   bytes?: number;
   elapsedMs: number;
   providerCode?: string;
+  phase?: PreparationPhase;
+  reviewReason?: SafetyReviewDiagnostic["reason"];
+  rejectedCriteria?: SafetyReviewDiagnostic["rejectedCriteria"];
 }
 
 /** Check the actual payload, not just a 200 response or an audio MIME label. */
@@ -50,7 +57,7 @@ export async function createPermanentNarration(
   person: Person, sectionId: string, language: AnswerLang, text: string,
   dependencies: PreparationDependencies,
 ): Promise<{ url: string; bytes: number }> {
-  let phase = "tts";
+  let phase: AudioPreparationPhase = "tts";
   try {
     const temporaryUrl = await dependencies.tts(text, person.gender);
     phase = "download";
@@ -76,7 +83,7 @@ export async function prepareExistingNarration(
   const start = Date.now();
   const result = (status: PreparationResult["status"], reason: string, extra: Partial<PreparationResult> = {}): PreparationResult =>
     ({ sectionId, language, status, reason, elapsedMs: Date.now() - start, ...extra });
-  let phase = "read";
+  let phase: PreparationPhase = "read";
   try {
     const original = await dependencies.getPerson(personId);
     if (!original) return result("failed", "person_missing");
@@ -123,7 +130,7 @@ export async function prepareExistingNarration(
     // Provider diagnostics stay bounded and never expose URLs, keys or scripts.
     if (error instanceof AudioPreparationError) phase = error.phase;
     const providerCode = error instanceof AudioPreparationError ? error.providerCode : undefined;
-    return result("failed", `${phase}_failed`, providerCode ? { providerCode } : {});
+    return result("failed", `${phase}_failed`, { phase, ...(providerCode ? { providerCode } : {}) });
   }
 }
 

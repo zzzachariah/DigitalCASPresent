@@ -12,15 +12,17 @@ const bytes = Buffer.from('RIFF0000WAVEsynthetic-audio-fixture');
 
 function setup({ cached = true, approved = true } = {}) {
   const env = { AI_PROCESSING_APPROVED: 'true', EXTERNAL_AI_PROCESSING_APPROVED: 'false', AVATAR_PROVIDER: 'a2e', A2E_API_KEY: 'synthetic-key', A2E_BASE_URL: 'https://synthetic-provider.invalid', A2E_SPEECH_APPROVED_PERSON_IDS: approved ? 'anna-fixture' : '', EVENT_ENDS_AT: '2999-01-01T00:00:00Z' };
-  const state = { admin: true, reads: 0, aiCalls: [], provider: [], downloads: 0, writes: 0, audio: new Map(), review: () => yes };
+  const state = { admin: true, reads: 0, aiCalls: [], provider: [], downloads: 0, writes: 0, audio: new Map(), review: () => yes, generate: () => answer, failPhase: '' };
   async function fetch(url, init = {}) {
     init.signal?.throwIfAborted();
     if (url === 'https://synthetic-provider.invalid/api/v1/video/send_tts') {
       state.provider.push(JSON.parse(init.body));
+      if (state.failPhase === 'tts') return Response.json({ code: 1005, msg: 'PRIVATE-ERROR-CANARY: upstream echoed text' }, { status: 400 });
       return Response.json({ code: 0, data: 'https://synthetic-provider.invalid/audio.wav' });
     }
     assert.equal(url, 'https://synthetic-provider.invalid/audio.wav');
     state.downloads++;
+    if (state.failPhase === 'download') throw new Error('PRIVATE-ERROR-CANARY: failed audio URL');
     return new Response(bytes, { headers: { 'Content-Type': 'audio/wav' } });
   }
   function load(file, mocks = {}) {
@@ -30,7 +32,7 @@ function setup({ cached = true, approved = true } = {}) {
       if (name === 'crypto' || name === 'node:crypto') return crypto;
       if (!(name in mocks)) throw new Error(`Unexpected import ${name}`);
       return mocks[name];
-    }, process: { env }, Response, Buffer, AbortSignal, URL, Date, Set, Map, Promise, fetch });
+    }, process: { env }, Response, Buffer, AbortSignal, URL, Date, Set, Map, Promise, fetch, Error, DOMException });
     return module.exports;
   }
   const policy = load('../src/lib/processing-policy.ts');
@@ -44,15 +46,21 @@ function setup({ cached = true, approved = true } = {}) {
   };
   const store = {
     storageWritable: () => ({ ok: true }),
-    getPerson: async () => { state.reads++; return structuredClone(state.person); },
-    updatePerson: async (_id, patch) => { state.writes++; state.person = { ...state.person, ...structuredClone(patch) }; return structuredClone(state.person); },
+    getPerson: async () => {
+      state.reads++;
+      if (state.failReadAt === state.reads) throw new Error('PRIVATE-ERROR-CANARY: Blob token, manuscript, upstream body');
+      return structuredClone(state.person);
+    },
+    updatePerson: async (_id, patch) => { if (state.failPhase === 'persist') throw new Error('PRIVATE-ERROR-CANARY: storage body'); state.writes++; state.person = { ...state.person, ...structuredClone(patch) }; return structuredClone(state.person); },
     saveAudio: async (id, key, buffer) => {
+      if (state.failPhase === 'audio_save') throw new Error('PRIVATE-ERROR-CANARY: credentials');
       assert.equal(id, 'anna-fixture');
       const assetId = `${id}.audio.${key}`; const asset = crypto.createHash('sha256').update(buffer).digest('hex') + '.wav';
       state.audio.set(`${assetId}?asset=${asset}`, Buffer.from(buffer));
       return `/api/photo/${assetId}?asset=${asset}`;
     },
     readPhoto: async (id, asset) => {
+      if (state.failPhase === 'audio_verification') throw new Error('PRIVATE-ERROR-CANARY: private URL');
       const buffer = state.audio.get(`${id}?asset=${asset}`);
       return buffer ? { buffer, contentType: 'audio/wav' } : null;
     },
@@ -64,7 +72,7 @@ function setup({ cached = true, approved = true } = {}) {
     '@/lib/ai-safety': load('../src/lib/ai-safety.ts'), '@/lib/sentences': load('../src/lib/sentences.ts'),
     '@/lib/prepared-narration': load('../src/lib/prepared-narration.ts'),
     '@/lib/prompts': { systemPrompt: () => 'Synthetic test', explainSectionPrompt: () => 'Explain this exhibit' },
-    '@/lib/ai': { chat: async options => { state.aiCalls.push(options); return options.maxTokens === 150 ? state.review(options) : answer; } },
+    '@/lib/ai': { chat: async options => { state.aiCalls.push(options); return options.maxTokens === 150 ? state.review(options) : state.generate(options); } },
   });
   const controller = new AbortController();
   return { env, state, controller, run: (options, id = 'anna-fixture') => route.POST({ json: async () => ({ sectionId: 'part', language: 'en', ...options }), signal: controller.signal }, { params: { id } }) };
@@ -130,4 +138,53 @@ test('request cancellation after generation prevents review results reaching TTS
   assert.equal(response.status, 502); assert.equal(body.results[0].reason, 'request_time_budget');
   assert.equal(s.state.provider.length, 0); assert.equal(s.state.writes, 0);
   assert.equal(s.state.aiCalls[0].signal.aborted, true);
+});
+
+test('new generation exposes only fixed failure stages and bounded provider codes, never exception text', async () => {
+  for (const phase of ['generation', 'tts', 'download', 'audio_save', 'audio_verification', 'persist']) {
+    const s = setup({ cached: false }); s.state.failPhase = phase;
+    if (phase === 'generation') s.state.generate = () => { throw new Error('PRIVATE-ERROR-CANARY: upstream manuscript'); };
+    const response = await s.run({}); const body = await response.json();
+    assert.equal(response.status, 502, phase);
+    assert.equal(body.results[0].phase, phase);
+    assert.equal(body.results[0].reason, `${phase}_failed`);
+    assert.equal(body.results[0].providerCode, phase === 'tts' ? '1005' : undefined);
+    assert.ok(!JSON.stringify(body.results).includes('PRIVATE-ERROR-CANARY'));
+  }
+});
+
+test('new and cached answer failures retain safe review diagnostics without source or upstream output', async () => {
+  for (const cached of [false, true]) for (const reason of ['model_rejection', 'review_format', 'review_timeout', 'review_upstream_error']) {
+    const s = setup({ cached });
+    s.state.review = () => {
+      if (reason === 'model_rejection') return yes.replace('"grounded":true', '"grounded":false');
+      if (reason === 'review_format') return 'PRIVATE-ERROR-CANARY: malformed result';
+      if (reason === 'review_timeout') throw new DOMException('PRIVATE-ERROR-CANARY', 'TimeoutError');
+      throw new Error('PRIVATE-ERROR-CANARY');
+    };
+    const response = await s.run(cached ? { audioOnly: true } : {}); const body = await response.json();
+    assert.equal(response.status, 502);
+    assert.equal(body.results[0].phase, 'review'); assert.equal(body.results[0].reason, 'answer_not_approved');
+    assert.equal(body.results[0].reviewReason, reason);
+    assert.deepEqual(body.results[0].rejectedCriteria, reason === 'model_rejection' ? ['grounded'] : undefined);
+    assert.ok(!JSON.stringify(body.results).includes('PRIVATE-ERROR-CANARY'));
+    assert.ok(!JSON.stringify(body.results).includes(source));
+    assert.equal(s.state.provider.length, 0);
+  }
+});
+
+test('initial and final storage read errors stay structured and never repeat synthesis', async () => {
+  const initial = setup(); initial.state.failReadAt = 1;
+  const initialResponse = await initial.run({ audioOnly: true });
+  assert.equal(initialResponse.status, 503);
+  assert.deepEqual(await initialResponse.json(), { error: 'read_failed', code: 'read_failed' });
+  assert.equal(initial.state.aiCalls.length, 0); assert.equal(initial.state.provider.length, 0);
+
+  const final = setup(); final.state.failReadAt = 6; // initial, prepare, TTS guard, source, persistence, final read
+  const finalResponse = await final.run({ audioOnly: true }); const body = await finalResponse.json();
+  assert.equal(finalResponse.status, 503); assert.equal(body.code, 'read_failed');
+  assert.equal(body.sections, undefined); assert.equal(body.results[0].status, 'prepared');
+  assert.equal(final.state.provider.length, 1); assert.equal(final.state.writes, 1);
+  assert.ok(final.state.person.sections[0].cachedAudio.en);
+  assert.ok(!JSON.stringify(body).includes('PRIVATE-ERROR-CANARY'));
 });
