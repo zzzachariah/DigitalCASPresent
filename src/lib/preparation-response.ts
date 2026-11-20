@@ -9,7 +9,7 @@ export interface PreparationProgress {
 export interface PreparationOutcome { status: number; data: Record<string, unknown> }
 export type PreparationReporter = (progress: PreparationProgress) => void;
 const PHASES = new Set<PreparationPhase>([
-  "generation", "review", "read", "audio_preparation", "tts", "download",
+  "generation", "revision", "review", "read", "audio_preparation", "tts", "download",
   "audio_save", "audio_verification", "source_recheck", "persist", "persist_verification",
 ]);
 

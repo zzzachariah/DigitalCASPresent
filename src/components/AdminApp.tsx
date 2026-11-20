@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import type { Person } from "@/lib/types";
-import { adminReadinessForPerson as readinessForPerson, narrationLanguages, narrationLanguageLabels, prepareNarrationVariants, type NarrationRun } from "@/lib/admin-narration";
+import { adminReadinessForPerson as readinessForPerson, narrationLanguages, narrationLanguageLabels, prepareNarrationVariants, type NarrationOptions, type NarrationRun } from "@/lib/admin-narration";
 import { adminMediaStatus, MEDIA_LOADING, MEDIA_UNAVAILABLE, photoStatusForPerson, speechStatusForPerson, preparationSummary, type AdminMediaHealth } from "@/lib/admin-media";
 import { preparationEntries, narrationEntryKey, interruptPreparation, type PreparationEntry } from "@/lib/admin-preparation";
 import { readNarrationResponse } from "@/lib/admin-narration-stream";
@@ -233,9 +233,11 @@ export default function AdminApp() {
     });
   }
 
-  async function runNarration(p: Person, textOnly: boolean, audioOnly = false, offset = 0, total = p.sections.length * narrationLanguages(p.language).length) {
+  async function runNarration(p: Person, textOnly: boolean, audioOnly = false, options: { offset?: number; total?: number; regenerateRejectedText?: boolean; variant?: NarrationOptions["variant"] } = {}) {
     const speech = speechStatusForPerson(media, p.id);
-    return prepareNarrationVariants(p, { textOnly, audioOnly }, {
+    const offset = options.offset ?? 0;
+    const total = options.total ?? (options.variant ? 1 : p.sections.length * narrationLanguages(p.language).length);
+    return prepareNarrationVariants(p, { textOnly, audioOnly, regenerateRejectedText: options.regenerateRejectedText, variant: options.variant }, {
       request: async (body) => {
         const res = await fetch(`/api/admin/people/${p.id}/pregenerate`, {
           method: "POST", headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" }, body: JSON.stringify(body),
@@ -256,9 +258,10 @@ export default function AdminApp() {
       onUpdate: (updated) => setPeople((list) => list.map((x) => x.id === p.id ? { ...x, sections: updated.sections } : x)),
       onResult: (outcome) => {
         const saved = `文字${outcome.textReady ? "已保存" : "待准备"}；语音${outcome.audioReady ? "已保存" : "待准备"}`;
-        const detail = outcome.completed
+        const revision = outcome.revisionAttempted ? outcome.completed ? "已修订一次并通过独立审核。" : "已尝试一次修订，本项仍未完成。" : "";
+        const detail = revision + (outcome.completed
           ? textOnly ? `${saved}。${speech.ready ? "本次仅准备文字。" : speech.message}` : `${saved}，已核验完成。`
-          : `${outcome.reason}。${saved}。`;
+          : `${outcome.reason}。${saved}。`);
         updatePreparation(p.id, narrationEntryKey(outcome.sectionId, outcome.language), { status: outcome.completed ? "complete" : "failed", detail });
       },
     });
@@ -269,7 +272,7 @@ export default function AdminApp() {
     setError("");
     let current = p;
     const textOnly = !speechStatusForPerson(media, p.id).ready;
-    const entries = preparationEntries(p, { includeMedia: true, photo: photoStatusForPerson(media, p.id), textOnly });
+    const entries = preparationEntries(p, { includeMedia: true, photo: photoStatusForPerson(media, p.id), textOnly, regenerateRejectedText: true });
     setPreparations((runs) => ({ ...runs, [p.id]: { entries, summary: "" } }));
     const mediaEntries = entries.filter((entry) => entry.kind !== "narration");
     setJob(p.id, "正在依次准备…");
@@ -292,7 +295,7 @@ export default function AdminApp() {
           updatePreparation(p.id, entry.key, { status: "failed", detail: "形象生成未完成，请核对服务状态后重试；继续准备讲解。" });
         }
       }
-      const run = await runNarration(current, textOnly, false, mediaEntries.length, entries.length);
+      const run = await runNarration(current, textOnly, false, { offset: mediaEntries.length, total: entries.length, regenerateRejectedText: true });
       const summary = preparationSummary(run.person, run.failures.length, textOnly);
       finishPreparation(p.id, summary);
       notify(summary);
@@ -328,6 +331,36 @@ export default function AdminApp() {
       const message = "准备过程未完成，请查看逐项进度并刷新核对已保存结果。";
       finishPreparation(p.id, message, true);
       setError(message);
+    } finally {
+      setPregenId(null);
+      setJob(p.id, null);
+    }
+  }
+
+  /** An explicit retry targets the failed source section/language and retains
+   * its original mode; it never rechecks the other completed variants. */
+  async function retryNarration(p: Person, entry: PreparationEntry) {
+    const mode = entry.narration;
+    if (!mode?.variant || entry.status !== "failed" || jobs[p.id] || pregenId === p.id) return;
+    const speech = speechStatusForPerson(media, p.id);
+    if (!mode.textOnly && !speech.ready) { setError(speech.message); return; }
+    setPregenId(p.id);
+    setError("");
+    updatePreparation(p.id, entry.key, { status: "running", detail: "正在重试此项，其他已完成结果保持不变" });
+    try {
+      const run = await runNarration(p, mode.textOnly, mode.audioOnly, { regenerateRejectedText: mode.regenerateRejectedText, variant: mode.variant });
+      setPreparations((runs) => {
+        const saved = runs[p.id];
+        if (!saved) return runs;
+        const remaining = saved.entries.filter((step) => step.status !== "complete").length;
+        const summary = remaining === 0 && readinessForPerson(run.person).ready ? `素材已就绪：${p.name}`
+          : `本项${run.completed ? "已完成" : "尚未完成"}；${remaining ? `仍有 ${remaining} 个准备步骤未完成` : "其他素材状态见上方现场准备"}。`;
+        return { ...runs, [p.id]: { ...saved, summary } };
+      });
+      notify(run.completed ? "本项已完成，其他结果已保留" : "本项尚未完成，请查看原因");
+    } catch {
+      updatePreparation(p.id, entry.key, { status: "failed", detail: "本项未完成，请刷新核对保存结果后重试" });
+      setError("本项未完成，其他已完成结果已保留。");
     } finally {
       setPregenId(null);
       setJob(p.id, null);
@@ -551,6 +584,7 @@ export default function AdminApp() {
         >
           <IconSparkle size={15} /> {selectedPhoto.ready || selectedSpeech.ready ? "一键准备素材" : "一键准备文字"}
         </button>
+        <p className="mt-2 text-[11px] leading-relaxed text-ink-3">一键准备会保留通过审核的讲解；仅因依据或保密问题未通过时，尝试一次修订并重新独立审核。审核服务故障不会触发修订。“仅补语音”始终不改文字。</p>
         {!selectedPhoto.ready && <p role="status" className="mt-2 text-[12px] leading-relaxed text-ink-3">{selectedPhoto.message}</p>}
         {!selectedSpeech.ready && <p className="mt-2 text-[12px] leading-relaxed text-ink-3">{selectedSpeech.message}</p>}
         <a href="/admin/service-check" className="mt-2 inline-block text-[12px] text-accent underline underline-offset-2">检查讲解服务</a>
@@ -596,6 +630,11 @@ export default function AdminApp() {
                     <p className={`mt-0.5 leading-relaxed ${entry.status === "complete" ? "text-success" : entry.status === "failed" ? "text-danger" : entry.status === "running" ? "text-accent" : "text-ink-3"}`}>
                       {entry.status === "complete" ? "已完成" : entry.status === "failed" ? "未完成" : entry.status === "blocked" ? "待处理" : entry.status === "running" ? "处理中" : "等待"} · {entry.detail}
                     </p>
+                    {entry.status === "failed" && entry.narration && (
+                      <button type="button" className="btn-ghost mt-1 px-0 text-[11px]" disabled={!!jobs[selected.id] || pregenId === selected.id} onClick={() => retryNarration(selected, entry)} aria-label={`仅重试${entry.label}`}>
+                        仅重试此项
+                      </button>
+                    )}
                   </div>
                 </li>
               ))}

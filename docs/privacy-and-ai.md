@@ -24,6 +24,12 @@ Admin diagnostics distinguish a deliberate privacy block from missing provider c
 
 ## November 19, 2026 verification
 
+### November 21 preparation follow-up
+
+The organizer's activity-wide A2E approval now covers all current and future submissions via `A2E_PROCESSING_APPROVED=true`; individual ID lists are only a fallback when this global flag is off. In production, `AI_REVIEW_FORMAT=tool` is explicitly selected after Chinese and English synthetic checks. The fixed five-boolean return is validated and no tool is executed. Native JSON-schema mode passed short probes but still returned malformed reviews for some real sections, so it is not used as an automatic fallback.
+
+One-key preparation may make one concise revision when a valid review rejects only grounding or privacy. The replacement uses the same selected-section source, receives the full independent review, and is paired with audio only after approval and durable storage. Service errors, malformed reviews, other rejected criteria, and unsuccessful revisions remain incomplete. The audio-only action never rewrites text. Each failed narration variant can be retried separately without repeating completed variants.
+
 The original configuration used `claude-opus-4-8` through the old `.com` endpoint and returned a no-channel error during an earlier synthetic request. The organizer subsequently prioritized fast Anthropic-family replies. Production configuration now selects `AI_MODEL=AI_MODEL_LIVE=claude-sonnet-5` and `AI_BASE_URL=https://cf.api.fan/v1`, the production endpoint recommended in the logged-in Packy console. These are relay identifiers, not independent attestation of the upstream model.
 
 On November 19, a fixed fictional compass question using the existing CAS key completed in **3,448 ms**, and the application's five-field safety reviewer accepted a fixed correct answer in **3,428 ms** (6,887 ms total). Both returned HTTP 200. The same Haiku probe returned HTTP 404. This is a small connectivity/format check, not a comprehensive quality evaluation or latency guarantee. No student manuscript, photo or record was used.

@@ -1,7 +1,7 @@
 import type { NarrationRequest } from "./admin-narration";
 
 const PHASE_LABELS: Record<string, string> = {
-  generation: "正在生成文字讲解", review: "正在审核讲解内容", read: "正在读取已有资料",
+  generation: "正在生成文字讲解", revision: "正在修订讲解", review: "正在审核讲解内容", read: "正在读取已有资料",
   audio_preparation: "正在检查已有配音", tts: "正在合成配音", download: "正在下载配音",
   audio_save: "正在保存配音", audio_verification: "正在校验配音",
   source_recheck: "正在复核讲解与资料", persist: "正在保存讲解与配音记录", persist_verification: "正在核验保存结果",

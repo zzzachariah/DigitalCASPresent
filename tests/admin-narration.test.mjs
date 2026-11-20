@@ -40,6 +40,7 @@ test('auto-language multi-section work is sequential, complete and reuses text v
   assert.equal(result.total, 6); assert.equal(result.completed, 6); assert.equal(result.failures.length, 0);
   assert.deepEqual(calls.map((c) => `${c.sectionId}/${c.language}`), ['s0/zh', 's0/en', 's1/zh', 's1/en', 's2/zh', 's2/en']);
   assert.ok(calls.every((c) => c.audioOnly === true && !c.regenerateText && !c.textOnly && !('script' in c)));
+  assert.ok(calls.every((c) => c.regenerateRejectedText === undefined));
   assert.equal(updates.length, 6); assert.deepEqual(progress.map((x) => x.current), [1, 2, 3, 4, 5, 6]);
   assert.equal(adminReadinessForPerson(result.person).ready, true);
 });
@@ -58,7 +59,72 @@ test('audio-only mode never generates missing text and still prepares other exis
   const p = source(1); delete p.sections[0].cachedAnswers.zh; const calls = [];
   const result = await prepareNarrationVariants(p, { textOnly: false, audioOnly: true }, { request: async (body) => { calls.push(body); return success(p, body); } });
   assert.equal(calls.length, 1); assert.equal(calls[0].language, 'en'); assert.equal(calls[0].audioOnly, true);
+  assert.equal(calls[0].regenerateRejectedText, undefined);
   assert.equal(result.completed, 1); assert.equal(result.failures.length, 1); assert.equal(result.failures[0].language, 'zh');
+});
+
+test('one-key opt-in allows one server-managed rejected-text revision without changing ordinary audio mode', async () => {
+  for (const textOnly of [false, true]) {
+    const p = source(1, { language: 'zh' }); let calls = 0; let payload; const outcomes = [];
+    const result = await prepareNarrationVariants(p, { textOnly, regenerateRejectedText: true }, {
+      request: async (body) => {
+        calls++; payload = body;
+        p.sections[0].cachedAnswers.zh = 'Synthetic revised and reviewed explanation';
+        const response = success(p, body, { reason: textOnly ? 'text_revised' : 'text_and_audio_revised', audio: !textOnly });
+        response.data.results[0].revisionAttempted = true;
+        return response;
+      }, onResult: (outcome) => outcomes.push(outcome),
+    });
+    assert.equal(calls, 1); assert.equal(payload.regenerateRejectedText, true);
+    assert.equal(payload.audioOnly, undefined); assert.equal(payload.regenerateText, undefined);
+    assert.equal(payload.textOnly, textOnly ? true : undefined);
+    assert.equal(result.completed, 1); assert.equal(outcomes[0].revisionAttempted, true);
+    assert.equal(result.person.sections[0].cachedAnswers.zh, 'Synthetic revised and reviewed explanation');
+  }
+});
+
+test('audio-only cannot opt into text revision and rejects before any request', async () => {
+  let calls = 0;
+  await assert.rejects(prepareNarrationVariants(source(1), { textOnly: false, audioOnly: true, regenerateRejectedText: true }, { request: async () => { calls++; } }), /cannot revise text/);
+  assert.equal(calls, 0);
+});
+
+test('one-key service failures and unsuccessful revisions never trigger a client retry or replace saved text', async () => {
+  for (const resultData of [
+    { reason: 'answer_not_approved', reviewReason: 'review_upstream_error' },
+    { reason: 'answer_not_approved', reviewReason: 'review_timeout' },
+    { reason: 'answer_not_approved', reviewReason: 'review_format', formatIssue: 'fenced_json' },
+    { reason: 'answer_not_approved', reviewReason: 'model_rejection', rejectedCriteria: ['grounded'], revisionAttempted: true },
+    { reason: 'revision_failed', phase: 'revision', revisionAttempted: true },
+  ]) {
+    const p = source(1, { language: 'zh' }); const original = structuredClone(p.sections); let calls = 0; const outcomes = [];
+    const result = await prepareNarrationVariants(p, { textOnly: false, regenerateRejectedText: true }, { request: async (body) => {
+      calls++; return { ok: true, status: 200, data: { sections: structuredClone(p.sections), results: [{ ...body, status: 'failed', ...resultData }] } };
+    }, onResult: (outcome) => outcomes.push(outcome) });
+    assert.equal(calls, 1); assert.equal(result.completed, 0); assert.equal(result.failures.length, 1);
+    assert.deepEqual(result.person.sections, original);
+    assert.equal(outcomes[0].revisionAttempted, resultData.revisionAttempted ? true : undefined);
+  }
+});
+
+test('explicit failed-item retry addresses exactly its source section and language and preserves other completed variants', async () => {
+  const p = source(3); const original = structuredClone(p.sections); const calls = [];
+  const result = await prepareNarrationVariants(p, { textOnly: false, regenerateRejectedText: true, variant: { sectionId: 's1', language: 'en' } }, { request: async (body) => {
+    calls.push(body); return success(p, body);
+  } });
+  assert.equal(calls.length, 1); assert.equal(calls[0].sectionId, 's1'); assert.equal(calls[0].language, 'en');
+  assert.equal(calls[0].regenerateRejectedText, true); assert.equal(calls[0].audioOnly, undefined);
+  assert.equal(result.total, 1); assert.equal(result.completed, 1);
+  assert.deepEqual(result.person.sections[0], original[0]); assert.deepEqual(result.person.sections[2], original[2]);
+  assert.deepEqual(result.person.sections[1].cachedAnswers, original[1].cachedAnswers);
+});
+
+test('a stale or unsupported failed-item retry cannot select an arbitrary section or language', async () => {
+  let calls = 0;
+  for (const variant of [{ sectionId: 'missing', language: 'zh' }, { sectionId: 's0', language: 'en' }]) {
+    await assert.rejects(prepareNarrationVariants(source(1, { language: 'zh' }), { textOnly: false, variant }, { request: async () => { calls++; } }), /no longer available/);
+  }
+  assert.equal(calls, 0);
 });
 
 test('missing text in normal preparation uses one exact variant without forcing regeneration', async () => {
@@ -175,6 +241,23 @@ test('only explicit review rejections describe content checks as failed', async 
     assert.equal(result.completed, 0);
     if (reviewReason?.endsWith('_rejection')) assert.match(result.failures[0].reason, /内容检查未通过/);
     else { assert.match(result.failures[0].reason, /尚未获得有效的内容审核结论/); assert.doesNotMatch(result.failures[0].reason, /未通过|未批准/); }
+  }
+});
+
+test('review format diagnostics show only allowlisted format categories without exposing model output', async () => {
+  for (const [formatIssue, expected] of [
+    ['fenced_json', '审核结果多了代码围栏'], ['invalid_json', '审核结果不是有效的数据格式'],
+    ['wrong_fields', '审核结果的字段不符合要求'], ['wrong_values', '审核结果的取值不符合要求'],
+    ['PRIVATE-RAW-OUTPUT', undefined], ['__proto__', undefined],
+  ]) {
+    const p = source(1, { language: 'zh' });
+    const result = await prepareNarrationVariants(p, { textOnly: false }, { request: async (body) => ({
+      ok: true, status: 200, data: { sections: p.sections, results: [{ ...body, status: 'failed', reason: 'answer_not_approved', reviewReason: 'review_format', formatIssue, message: 'PRIVATE-CONTENT' }] },
+    }) });
+    assert.match(result.failures[0].reason, /^审核服务返回格式异常，未获得审核结论/);
+    if (expected) assert.ok(result.failures[0].reason.includes(expected));
+    assert.doesNotMatch(result.failures[0].reason, /PRIVATE|__proto__|未通过/);
+    assert.equal(result.completed, 0);
   }
 });
 
