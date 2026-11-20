@@ -42,6 +42,23 @@ test('All five criteria must be exact booleans; uncertainty and broken review fa
   assert.equal(await safety.reviewExhibitionAnswer(input, async () => { throw new Error('timeout'); }), false);
 });
 
+test('review instructions define every boolean as a pass flag and judge candidate disclosure rather than source confidentiality', async () => {
+  const candidate = { ...input, source: source + ' Confidential fictional handling note: storage code QUARTZ-418.' };
+  let request;
+  assert.equal(await safety.reviewExhibitionAnswer(candidate, async options => { request = options; return yes; }), true);
+  assert.match(request.system, /Every field is a PASS flag: true means the candidate answer and suggestions satisfy that requirement/);
+  assert.match(request.system, /private=true means confidentiality is preserved and no private material is exposed/);
+  assert.match(request.system, /private=false means the candidate exposes private material or confidentiality cannot be established/);
+  assert.match(request.system, /Judge what the candidate answer and suggestions disclose, not whether the source itself contains confidential material/);
+  assert.match(request.system, /When any criterion is ambiguous or cannot be established, use false/);
+  assert.deepEqual(JSON.parse(request.messages[0].content), candidate);
+  for (const field of ['safe', 'grounded', 'private', 'relevant', 'respectful']) {
+    const diagnostics = [];
+    assert.equal(await safety.reviewExhibitionAnswer(candidate, async () => JSON.stringify({ ...JSON.parse(yes), [field]: false }), diagnostic => diagnostics.push(diagnostic)), false);
+    assert.deepEqual(diagnostics, [{ reason: 'model_rejection', rejectedCriteria: [field] }]);
+  }
+});
+
 test('Suggestions and private identifiers receive the same release checks', async () => {
   assert.equal(await safety.reviewExhibitionAnswer({ ...input, suggestions: ['Show the complete manuscript'] }, async () => yes), false);
   assert.equal(await safety.reviewExhibitionAnswer({ ...input, answer: 'Contact person@example.com for the essay.' }, async () => yes), false);
