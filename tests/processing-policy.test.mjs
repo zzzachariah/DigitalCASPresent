@@ -64,7 +64,7 @@ test('pre-generation requires the participant current receipt even when AI is en
     '@/lib/auth': { isAdmin: () => true },
     '@/lib/store': { getPerson: async () => person, storageWritable: () => ({ ok: true }) },
     '@/lib/ai': { chat: async () => { calls++; return '{"safe":true,"grounded":true,"private":true,"relevant":true,"respectful":true}'; } },
-    '@/lib/prompts': {}, '@/lib/a2e': { a2eConfigured: () => false }, '@/lib/sentences': {},
+    '@/lib/prompts': {}, '@/lib/a2e': { a2eSpeechReadiness: () => ({ ready: false }) }, '@/lib/sentences': {},
     '@/lib/prepared-narration': { beginPreparation: () => () => {} },
   });
   const request = () => ({ json: async () => ({ sectionId: 'part', language: 'en' }) });

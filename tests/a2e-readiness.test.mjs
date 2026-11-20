@@ -27,6 +27,7 @@ function setup() {
     ...a2e,
     a2eReadiness: () => { state.readinessChecks++; return a2e.a2eReadiness(); },
     a2ePhotoReadiness: personId => { state.readinessChecks++; return a2e.a2ePhotoReadiness(personId); },
+    a2eSpeechReadiness: personId => { state.readinessChecks++; return a2e.a2eSpeechReadiness(personId); },
     a2eUploadImageBytes: async () => { state.providerCalls++; return 'https://synthetic-provider.invalid/photo.png'; },
     a2eCartoonStart: async () => { state.providerCalls++; return { taskId: 'synthetic-task' }; },
     a2eCartoonPoll: async () => { state.providerCalls++; return { pending: true }; },
@@ -50,8 +51,8 @@ const params = { params: { id: 'synthetic' } };
 
 const conditions = [
   [{ EXTERNAL_AI_PROCESSING_APPROVED: 'false' }, 'privacy_disabled', 403],
-  [{ EXTERNAL_AI_PROCESSING_APPROVED: 'true', AVATAR_PROVIDER: 'mock', A2E_PHOTO_APPROVED_PERSON_IDS: 'synthetic' }, 'provider_missing', 503],
-  [{ EXTERNAL_AI_PROCESSING_APPROVED: 'true', AVATAR_PROVIDER: 'a2e', A2E_API_KEY: '  ', A2E_PHOTO_APPROVED_PERSON_IDS: 'synthetic' }, 'key_missing', 503],
+  [{ EXTERNAL_AI_PROCESSING_APPROVED: 'true', AVATAR_PROVIDER: 'mock', A2E_PHOTO_APPROVED_PERSON_IDS: 'synthetic', A2E_SPEECH_APPROVED_PERSON_IDS: 'synthetic' }, 'provider_missing', 503],
+  [{ EXTERNAL_AI_PROCESSING_APPROVED: 'true', AVATAR_PROVIDER: 'a2e', A2E_API_KEY: '  ', A2E_PHOTO_APPROVED_PERSON_IDS: 'synthetic', A2E_SPEECH_APPROVED_PERSON_IDS: 'synthetic' }, 'key_missing', 503],
 ];
 
 test('readiness distinguishes deliberate privacy blocking, provider selection, missing key and ready locally', () => {
@@ -135,7 +136,7 @@ test('audio-only preparation reports the same readiness before student reads, AI
 
 test('textOnly guarantees no media even when A2E is ready, for both new text and existing answers', async () => {
   for (const cached of [false, true]) {
-    const s = preparationSetup(); s.env.EXTERNAL_AI_PROCESSING_APPROVED = 'true'; if (cached) s.setCached();
+    const s = preparationSetup(); s.env.A2E_SPEECH_APPROVED_PERSON_IDS = 'synthetic'; if (cached) s.setCached();
     const response = await s.route.POST(s.request({ textOnly: true, sectionId: 'part', language: 'en' }), params);
     const body = await response.json();
     assert.equal(response.status, 200); assert.equal(body.mode, 'text-only'); assert.equal(s.prepState.mediaCalls, 0);
@@ -160,6 +161,12 @@ test('admin health exposes readiness without implying a configured key is missin
   const body = await (await route.GET()).json();
   assert.equal(body.a2eKeySet, true); assert.equal(body.a2e.status, 'privacy_disabled');
   assert.equal(body.a2ePhoto.approvedPersonIds.length, 0); assert.equal(body.a2e.ready, false);
+  assert.equal(body.a2eSpeech.approvedPersonIds.length, 0); assert.equal(body.a2eSpeech.global.ready, false);
+  s.env.A2E_SPEECH_APPROVED_PERSON_IDS = 'synthetic';
+  const scoped = await (await route.GET()).json();
+  assert.deepEqual(scoped.a2eSpeech.approvedPersonIds, ['synthetic']);
+  assert.equal(scoped.a2eSpeech.people.synthetic.ready, true);
+  assert.equal(scoped.a2ePhoto.approvedPersonIds.length, 0); assert.equal(scoped.a2e.ready, false);
   assert.ok(!JSON.stringify(body).includes('synthetic-private-key'));
   s.state.admin = false;
   assert.equal((await route.GET()).status, 401);

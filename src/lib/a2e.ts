@@ -27,7 +27,7 @@ export interface A2eReadiness {
 export function a2eReadiness(): A2eReadiness {
   if (!externalProcessingAllowed()) return {
     status: "privacy_disabled", ready: false,
-    message: "A2E 通用媒体与配音处理尚未获准。个别获准的照片处理会单独显示，文字 AI 授权不包含 A2E 配音。 / General A2E media and narration are disabled; individual photo permissions are separate.",
+    message: "A2E 通用媒体处理尚未获准。个别人员的照片与配音授权单独显示，文字 AI 授权不包含 A2E。 / General A2E processing is disabled; individual photo and narration permissions are separate.",
   };
   return a2eConfigurationReadiness();
 }
@@ -51,8 +51,32 @@ export function a2eConfigured(): boolean {
 /** Exact server-configured record IDs only: names, wildcards and browser input
  * never grant permission. Photo approval does not authorize TTS or other people. */
 export function a2ePhotoApprovedPersonIds(): string[] {
-  return Array.from(new Set((process.env.A2E_PHOTO_APPROVED_PERSON_IDS || "").split(",").map((id) => id.trim())
+  return approvedPersonIds(process.env.A2E_PHOTO_APPROVED_PERSON_IDS);
+}
+
+function approvedPersonIds(value?: string): string[] {
+  return Array.from(new Set((value || "").split(",").map((id) => id.trim())
     .filter((id) => /^[A-Za-z0-9_-]{1,40}$/.test(id))));
+}
+
+export function a2eSpeechApprovedPersonIds(): string[] {
+  return approvedPersonIds(process.env.A2E_SPEECH_APPROVED_PERSON_IDS);
+}
+
+/** Narration permission is independent of photos and never expands to others. */
+export function a2eSpeechReadiness(personId?: string): A2eReadiness {
+  if (!personId || !a2eSpeechApprovedPersonIds().includes(personId)) return {
+    status: "privacy_disabled", ready: false,
+    message: "尚未获准让 A2E 为此人的已审核讲解配音。照片与文字 AI 授权不包含配音。 / A2E narration requires this person's separate approval; photo and text AI permissions do not include narration.",
+  };
+  const readiness = a2eConfigurationReadiness();
+  return readiness.ready ? { ...readiness, message: "此人的已审核讲解配音已获准且配置完整；照片和其他人员权限保持独立。 / This person's reviewed narration is approved and configured; photo and other people's permissions remain separate." } : readiness;
+}
+
+function requireSpeechProcessing(personId: string): void {
+  assertEventOpen();
+  const readiness = a2eSpeechReadiness(personId);
+  if (!readiness.ready) throw new Error(readiness.message);
 }
 
 export function a2ePhotoReadiness(personId?: string): A2eReadiness {
@@ -104,10 +128,14 @@ export interface A2eResult {
   json: any;
 }
 
-export async function a2e(path: string, method = "POST", body?: unknown, signal?: AbortSignal, photoPersonId?: string): Promise<A2eResult> {
-  if (photoPersonId !== undefined) {
-    requirePhotoProcessing(photoPersonId);
+export async function a2e(path: string, method = "POST", body?: unknown, signal?: AbortSignal, scope?: string | { speechPersonId: string }): Promise<A2eResult> {
+  assertEventOpen();
+  if (typeof scope === "string") {
+    requirePhotoProcessing(scope);
     if (!photoPathAllowed(path, method)) throw new Error("This operation is outside photo-only approval");
+  } else if (scope !== undefined) {
+    requireSpeechProcessing(scope.speechPersonId);
+    if (method !== "POST" || path !== "/api/v1/video/send_tts") throw new Error("This operation is outside speech-only approval");
   } else requireExternalProcessing();
   const res = await fetch(`${BASE}${path}`, {
     method,
@@ -173,7 +201,7 @@ async function a2eHostedImage(srcUrl: string): Promise<string> {
 
 /** Text-to-speech: returns an audio URL. This call is synchronous/fast (no
  *  polling needed) — this is what makes the "fast" avatar path near-instant. */
-export async function a2eTts(text: string, gender?: "male" | "female", signal?: AbortSignal): Promise<string> {
+export async function a2eTts(text: string, gender?: "male" | "female", signal?: AbortSignal, personId?: string): Promise<string> {
   if (!SPEAKABLE_TEXT.test(text)) throw new Error("send_tts requires speakable text.");
   // Set the locale for each spoken chunk, including bilingual answers. Leaving
   // it to upstream detection can reject short/mixed Chinese chunks with 1005.
@@ -182,7 +210,7 @@ export async function a2eTts(text: string, gender?: "male" | "female", signal?: 
   const locale = HAN_SCRIPT.test(text)
     ? { country: "zh", region: "CN" }
     : { country: "en", region: "US" };
-  const tts = await a2e("/api/v1/video/send_tts", "POST", { msg: text, tts_id: voiceFor(gender), ...locale }, signal);
+  const tts = await a2e("/api/v1/video/send_tts", "POST", { msg: text, tts_id: voiceFor(gender), ...locale }, signal, personId === undefined ? undefined : { speechPersonId: personId });
   if (!tts.ok) throw new Error(`send_tts failed (${tts.httpStatus}): ${JSON.stringify(tts.json).slice(0, 200)}`);
   const audioUrl = typeof tts.json?.data === "string" ? tts.json.data : findUrl(tts.json?.data);
   if (!audioUrl || !/^https?:\/\//.test(audioUrl)) {

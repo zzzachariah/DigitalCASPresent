@@ -6,7 +6,7 @@ import { isAdmin } from "@/lib/auth";
 import { getPerson, readPhoto, saveAudio, updatePerson, storageWritable } from "@/lib/store";
 import { chat } from "@/lib/ai";
 import { explainSectionPrompt, systemPrompt } from "@/lib/prompts";
-import { a2eConfigured, a2eReadiness, a2eTts } from "@/lib/a2e";
+import { a2eSpeechReadiness, a2eTts } from "@/lib/a2e";
 import { splitAnswer } from "@/lib/sentences";
 import { AudioReadError, beginPreparation, createPermanentNarration, prepareExistingNarration } from "@/lib/prepared-narration";
 import type { AudioAsset, PreparationResult } from "@/lib/prepared-narration";
@@ -21,7 +21,8 @@ function targetLangKeys(language: Person["language"]): AnswerLang[] {
 
 /** Download without credentials. For local media, read the same bytes served
  *  by /api/photo instead of making an authenticated request to ourselves. */
-async function readAudio(url: string): Promise<AudioAsset> {
+async function readAudio(url: string, signal: AbortSignal): Promise<AudioAsset> {
+  signal.throwIfAborted();
   if (url.startsWith("/api/photo/")) {
     const id = url.slice("/api/photo/".length).split("?")[0];
     if (!/^[A-Za-z0-9_-]{1,40}\.audio\.[A-Za-z0-9_-]{1,80}$/.test(id)) throw new AudioReadError("unavailable");
@@ -32,7 +33,7 @@ async function readAudio(url: string): Promise<AudioAsset> {
   }
   const parsed = new URL(url);
   if (parsed.protocol !== "https:" || parsed.username || parsed.password) throw new AudioReadError("unavailable");
-  const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
+  const response = await fetch(url, { cache: "no-store", signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]) });
   if (response.status === 404 || response.status === 410) throw new AudioReadError("missing");
   if (!response.ok || !response.body) throw new AudioReadError("unavailable");
   const limit = 20 * 1024 * 1024;
@@ -58,14 +59,29 @@ async function readAudio(url: string): Promise<AudioAsset> {
   return { buffer: Buffer.concat(chunks), contentType: response.headers.get("content-type") || "" };
 }
 
-const dependencies = {
-  getPerson, updatePerson, saveAudio, readAudio,
-  tts: (text: string, gender: Person["gender"]) => a2eTts(text, gender, AbortSignal.timeout(55_000)),
-};
+function narrationDependencies(person: Person, section: Section, reviewedAnswer: string, signal: AbortSignal) {
+  return {
+    getPerson, updatePerson, saveAudio,
+    readAudio: (url: string) => readAudio(url, signal),
+    tts: async (text: string, gender: Person["gender"]) => {
+      signal.throwIfAborted();
+      // The preparation service rereads caches. A concurrent edit must not
+      // substitute new, unreviewed words after this request's safety review.
+      if (text !== reviewedAnswer) throw new Error("Reviewed narration changed");
+      const fresh = await getPerson(person.id);
+      const current = fresh?.sections.find((s) => s.id === section.id);
+      if (!fresh || !current || fresh.privacyConsent?.version !== PRIVACY_VERSION ||
+          fresh.script !== person.script || fresh.gender !== person.gender ||
+          current.title !== section.title || current.content !== section.content) throw new Error("Reviewed source changed");
+      signal.throwIfAborted();
+      return a2eTts(text, gender, AbortSignal.any([signal, AbortSignal.timeout(55_000)]), person.id);
+    },
+  };
+}
 
 /** Only an explicit regenerateText=true replaces a populated text cache.
  *  Commit a new text/audio pair together, after the audio is permanent. */
-async function generateVariant(person: Person, section: Section, index: number, language: AnswerLang, includeAudio = true): Promise<PreparationResult> {
+async function generateVariant(person: Person, section: Section, index: number, language: AnswerLang, signal: AbortSignal, includeAudio = true): Promise<PreparationResult> {
   const start = Date.now();
   const result = (status: PreparationResult["status"], reason: string, extra: Partial<PreparationResult> = {}): PreparationResult =>
     ({ sectionId: section.id, language, status, reason, elapsedMs: Date.now() - start, ...extra });
@@ -73,12 +89,14 @@ async function generateVariant(person: Person, section: Section, index: number, 
     let prompt = explainSectionPrompt(section, index, person.sections.length);
     if (language !== "bilingual") prompt += `\n\nSpeak in ${language === "zh" ? "Simplified Chinese (简体中文)" : "English"}.`;
     const { answer, suggestions } = splitAnswer(await chat({
-      system: systemPrompt({ ...person, script: section.content, sections: [section] }), messages: [{ role: "user", content: prompt }], temperature: 0.6, maxTokens: 600,
+      system: systemPrompt({ ...person, script: section.content, sections: [section] }), messages: [{ role: "user", content: prompt }], temperature: 0.6, maxTokens: 600, signal,
     }));
     if (!answer.trim()) return result("failed", "empty_answer");
-    const approved = await reviewExhibitionAnswer({ source: section.content, question: `Explain this selected exhibition section briefly: ${section.title}`, answer, suggestions }, (opts) => chat(opts));
+    const approved = await reviewExhibitionAnswer({ source: section.content, question: `Explain this selected exhibition section briefly: ${section.title}`, answer, suggestions }, (opts) => chat({ ...opts, signal }));
+    signal.throwIfAborted();
     if (!approved) return result("failed", "answer_not_approved");
-    const audio = includeAudio && a2eConfigured() ? await createPermanentNarration(person, section.id, language, answer, dependencies) : undefined;
+    const audio = includeAudio && a2eSpeechReadiness(person.id).ready
+      ? await createPermanentNarration(person, section.id, language, answer, narrationDependencies(person, section, answer, signal)) : undefined;
     const fresh = await getPerson(person.id);
     const current = fresh?.sections.find((s) => s.id === section.id);
     if (!fresh || !current) return result("failed", "person_or_section_missing");
@@ -99,7 +117,7 @@ async function generateVariant(person: Person, section: Section, index: number, 
     }
     return result("prepared", audio ? "text_and_audio_saved" : "text_saved", audio ? { audioUrl: audio.url, bytes: audio.bytes } : {});
   } catch {
-    return result("failed", "generation_failed");
+    return result("failed", signal.aborted ? "request_time_budget" : "generation_failed");
   }
 }
 
@@ -119,7 +137,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     return NextResponse.json({ error: "invalid preparation options" }, { status: 400 });
   }
   if (body.audioOnly) {
-    const readiness = a2eReadiness();
+    const readiness = a2eSpeechReadiness(params.id);
     if (!readiness.ready) return NextResponse.json(
       { error: readiness.message, code: `a2e_${readiness.status}`, a2e: readiness },
       { status: readiness.status === "privacy_disabled" ? 403 : 503 }
@@ -142,12 +160,16 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   if (!release) return NextResponse.json({ error: "This person's preparation is already running; wait for it to finish." }, { status: 409 });
   try {
     const started = Date.now();
+    // Leave time for persistence/readback before the platform's 120 s limit.
+    // Generation, review, speech and audio download share this same deadline.
+    const deadline = AbortSignal.timeout(100_000);
+    const signal = req.signal ? AbortSignal.any([req.signal, deadline]) : deadline;
     const results: PreparationResult[] = [];
     // Deliberately sequential: parallel read/merge/write of one Person loses
     // other sections' freshly prepared caches. Prefer one variant per call.
     for (const { section, index } of targets) {
       for (const language of languages) {
-        if (Date.now() - started > 25_000) {
+        if (signal.aborted || Date.now() - started > 25_000) {
           results.push({ sectionId: section.id, language, status: "skipped", reason: "request_time_budget", elapsedMs: 0 });
           continue;
         }
@@ -157,16 +179,16 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
             question: `Explain this selected exhibition section briefly: ${section.title}`,
             answer: section.cachedAnswers?.[language] || "",
             suggestions: section.cachedSuggestions?.[language] || [],
-          }, (opts) => chat({ ...opts, signal: AbortSignal.timeout(25_000) }));
+          }, (opts) => chat({ ...opts, signal: AbortSignal.any([signal, AbortSignal.timeout(25_000)]) }));
           if (!approved) {
-            results.push({ sectionId: section.id, language, status: "failed", reason: "answer_not_approved", elapsedMs: 0 });
+            results.push({ sectionId: section.id, language, status: "failed", reason: signal.aborted ? "request_time_budget" : "answer_not_approved", elapsedMs: 0 });
             continue;
           }
-          results.push(!body.textOnly && a2eConfigured()
-            ? await prepareExistingNarration(person.id, section.id, language, dependencies)
+          results.push(!body.textOnly && a2eSpeechReadiness(person.id).ready
+            ? await prepareExistingNarration(person.id, section.id, language, narrationDependencies(person, section, section.cachedAnswers?.[language] || "", signal))
             : { sectionId: section.id, language, status: "skipped", reason: "text_already_cached", elapsedMs: 0 });
         } else {
-          results.push(await generateVariant(person, section, index, language, !body.textOnly));
+          results.push(await generateVariant(person, section, index, language, signal, !body.textOnly));
         }
       }
     }

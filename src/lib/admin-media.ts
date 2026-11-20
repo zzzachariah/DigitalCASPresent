@@ -1,5 +1,5 @@
 import type { Person } from "./types";
-import { readinessForPerson } from "./readiness";
+import { adminReadinessForPerson } from "./admin-narration";
 
 export type AdminMediaStatus = {
   status: "loading" | "unavailable" | "privacy_disabled" | "provider_missing" | "key_missing" | "ready";
@@ -7,7 +7,9 @@ export type AdminMediaStatus = {
   message: string;
 };
 export interface AdminMediaHealth {
-  speech: AdminMediaStatus;
+  speechGlobal: AdminMediaStatus;
+  speechApprovedIds: string[];
+  speeches: Record<string, AdminMediaStatus>;
   photoGlobal: AdminMediaStatus;
   photoApprovedIds: string[];
   photos: Record<string, AdminMediaStatus>;
@@ -18,8 +20,8 @@ const loadingStatus: AdminMediaStatus = {
 const unavailableStatus: AdminMediaStatus = {
   status: "unavailable", ready: false, message: "暂时无法确认媒体服务状态，卡通、视频和外部语音已暂停；可先准备文字讲解，稍后刷新重试。",
 };
-export const MEDIA_LOADING: AdminMediaHealth = { speech: loadingStatus, photoGlobal: loadingStatus, photoApprovedIds: [], photos: {} };
-export const MEDIA_UNAVAILABLE: AdminMediaHealth = { speech: unavailableStatus, photoGlobal: unavailableStatus, photoApprovedIds: [], photos: {} };
+export const MEDIA_LOADING: AdminMediaHealth = { speechGlobal: loadingStatus, speechApprovedIds: [], speeches: {}, photoGlobal: loadingStatus, photoApprovedIds: [], photos: {} };
+export const MEDIA_UNAVAILABLE: AdminMediaHealth = { speechGlobal: unavailableStatus, speechApprovedIds: [], speeches: {}, photoGlobal: unavailableStatus, photoApprovedIds: [], photos: {} };
 
 function readStatus(input: unknown): AdminMediaStatus {
   if (!input || typeof input !== "object") return unavailableStatus;
@@ -39,24 +41,36 @@ function readStatus(input: unknown): AdminMediaStatus {
 export function adminMediaStatus(health: unknown): AdminMediaHealth {
   if (!health || typeof health !== "object") return MEDIA_UNAVAILABLE;
   const root = health as Record<string, unknown>;
-  const photo = root.a2ePhoto as Record<string, unknown> | undefined;
-  if (!photo || typeof photo !== "object" || !Array.isArray(photo.approvedPersonIds) ||
-      !photo.approvedPersonIds.every((id) => typeof id === "string" && /^[A-Za-z0-9_-]{1,40}$/.test(id)) ||
-      !photo.people || typeof photo.people !== "object" || Array.isArray(photo.people)) return MEDIA_UNAVAILABLE;
-  const speech = readStatus(root.a2e);
-  const photoGlobal = readStatus(photo.global);
-  if (speech.status === "unavailable" || photoGlobal.status === "unavailable") return MEDIA_UNAVAILABLE;
-  const photos: Record<string, AdminMediaStatus> = {};
-  for (const id of photo.approvedPersonIds as string[]) {
-    photos[id] = readStatus((photo.people as Record<string, unknown>)[id]);
+  function scoped(value: unknown) {
+    if (!value || typeof value !== "object") return null;
+    const scope = value as Record<string, unknown>;
+    if (!Array.isArray(scope.approvedPersonIds) || !scope.approvedPersonIds.every((id) => typeof id === "string" && /^[A-Za-z0-9_-]{1,40}$/.test(id)) ||
+        !scope.people || typeof scope.people !== "object" || Array.isArray(scope.people)) return null;
+    const global = readStatus(scope.global);
+    if (global.status === "unavailable") return null;
+    const people: Record<string, AdminMediaStatus> = {};
+    for (const id of scope.approvedPersonIds as string[]) people[id] = readStatus((scope.people as Record<string, unknown>)[id]);
+    return { global, ids: scope.approvedPersonIds as string[], people };
   }
-  return { speech, photoGlobal, photoApprovedIds: photo.approvedPersonIds as string[], photos };
+  const photo = scoped(root.a2ePhoto);
+  const speech = scoped(root.a2eSpeech);
+  if (!photo || !speech) return MEDIA_UNAVAILABLE;
+  return {
+    speechGlobal: speech.global, speechApprovedIds: speech.ids, speeches: speech.people,
+    photoGlobal: photo.global, photoApprovedIds: photo.ids, photos: photo.people,
+  };
 }
 
 export function photoStatusForPerson(health: AdminMediaHealth, personId?: string): AdminMediaStatus {
   if (personId && health.photoApprovedIds.includes(personId)) return health.photos[personId] ?? unavailableStatus;
   if (health.photoGlobal.status === "loading" || health.photoGlobal.status === "unavailable") return health.photoGlobal;
   return { status: "privacy_disabled", ready: false, message: "这位同学的照片尚未单独获准发送给形象服务，卡通和视频生成已暂停。" };
+}
+
+export function speechStatusForPerson(health: AdminMediaHealth, personId?: string): AdminMediaStatus {
+  if (personId && health.speechApprovedIds.includes(personId)) return health.speeches[personId] ?? unavailableStatus;
+  if (health.speechGlobal.status === "loading" || health.speechGlobal.status === "unavailable") return health.speechGlobal;
+  return { status: "privacy_disabled", ready: false, message: "这位同学的讲解尚未单独获准发送给配音服务；当前仅准备文字。" };
 }
 
 export type PreparationStep = "cartoon" | "loop-video" | "pregenerate";
@@ -73,7 +87,7 @@ export function preparationSteps(person: Pick<Person, "photoUrl" | "cartoonUrl" 
 /** Completion describes the saved record; an HTTP 200 alone is not readiness. */
 export function preparationSummary(person: Person, failed: number, textOnly: boolean): string {
   if (failed > 0) return `${person.name}：有 ${failed} 项讲解未完成，请检查后重试`;
-  const readiness = readinessForPerson(person);
+  const readiness = adminReadinessForPerson(person);
   const missing = readiness.items.filter((item) => !item.ready).map((item) => item.label);
   if (missing.length) return `本次准备已完成：${person.name}；仍待准备：${missing.join("、")}`;
   return textOnly ? `文字讲解已准备：${person.name}（本次未生成外部语音）` : `素材已就绪：${person.name}`;

@@ -1,6 +1,6 @@
 import { aiProcessingAllowed, externalProcessingAllowed } from "@/lib/processing-policy";
 import { NextResponse } from "next/server";
-import { a2eReadiness, a2ePhotoReadiness, a2ePhotoApprovedPersonIds } from "@/lib/a2e";
+import { a2eReadiness, a2ePhotoReadiness, a2ePhotoApprovedPersonIds, a2eSpeechReadiness, a2eSpeechApprovedPersonIds } from "@/lib/a2e";
 import { adminConfigured, isAdmin } from "@/lib/auth";
 import { storageDriverName, storageWritable } from "@/lib/store";
 import { resolveBlobToken, mediaBlobConfigured, recordsBlobConfigured, hasBlobOidcToken } from "@/lib/store-shared";
@@ -49,6 +49,11 @@ export async function GET() {
       global: a2ePhotoReadiness(),
       approvedPersonIds: a2ePhotoApprovedPersonIds(),
       people: Object.fromEntries(a2ePhotoApprovedPersonIds().map((id) => [id, a2ePhotoReadiness(id)])),
+    },
+    a2eSpeech: {
+      global: a2eSpeechReadiness(),
+      approvedPersonIds: a2eSpeechApprovedPersonIds(),
+      people: Object.fromEntries(a2eSpeechApprovedPersonIds().map((id) => [id, a2eSpeechReadiness(id)])),
     },
     didKeySet: !!process.env.DID_API_KEY,
     baseUrl: process.env.NEXT_PUBLIC_BASE_URL || "(not set)",
