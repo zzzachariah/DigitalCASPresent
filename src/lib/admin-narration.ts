@@ -71,6 +71,8 @@ interface NarrationResult {
   rejectedCriteria?: unknown;
   revisionAttempted?: unknown;
   formatIssue?: unknown;
+  upstreamKind?: unknown;
+  providerCode?: unknown;
 }
 export interface NarrationDependencies {
   request: (body: NarrationRequest) => Promise<{ ok: boolean; status: number; data: unknown }>;
@@ -125,6 +127,15 @@ const REVIEW_FORMAT_ISSUES: Record<string, string> = {
   wrong_fields: "审核结果的字段不符合要求",
   wrong_values: "审核结果的取值不符合要求",
 };
+const REVIEW_SERVICE_ISSUES: Record<string, string> = {
+  truncated_response: "审核结果被截断，未获得完整审核结论",
+  invalid_response: "审核服务响应格式异常",
+  empty_response: "审核服务未返回有效内容",
+  http: "审核服务请求失败",
+  network: "审核服务连接失败",
+  timeout: "审核服务响应超时",
+  aborted: "审核请求已中止",
+};
 const FAILURE_CODES: Record<string, string> = {
   read_failed: "资料暂时读取失败，请刷新核对已保存结果后重试",
   a2e_privacy_disabled: "这位同学的配音尚未获准",
@@ -146,11 +157,13 @@ function fixedMessage(value: unknown, messages: Record<string, string>): string 
  * credentials, manuscript text and unknown diagnostic values never enter UI. */
 function narrationFailureReason(result: NarrationResult | undefined, data: ResponseData, status: number): string {
   const review = fixedMessage(result?.reviewReason, REVIEW_REASONS);
-  const base = review || fixedMessage(result?.reason, FAILURE_REASONS) || fixedMessage(data.code, FAILURE_CODES) ||
+  const serviceIssue = review ? fixedMessage(result?.upstreamKind, REVIEW_SERVICE_ISSUES) : undefined;
+  const base = serviceIssue || review || fixedMessage(result?.reason, FAILURE_REASONS) || fixedMessage(data.code, FAILURE_CODES) ||
     fixedMessage(String(status), HTTP_FAILURES) || "此项未完成或保存结果尚未确认";
   const details: string[] = [];
   const phase = fixedMessage(result?.phase, FAILURE_PHASES);
   if (phase) details.push(`环节：${phase}`);
+  if (result?.phase === "tts" && typeof result.providerCode === "string" && /^\d{1,8}$/.test(result.providerCode)) details.push(`配音服务代码：${result.providerCode}`);
   const formatIssue = result?.reviewReason === "review_format" ? fixedMessage(result.formatIssue, REVIEW_FORMAT_ISSUES) : undefined;
   if (formatIssue) details.push(formatIssue);
   if (result?.reviewReason === "model_rejection" && Array.isArray(result.rejectedCriteria)) {

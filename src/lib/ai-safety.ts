@@ -64,7 +64,9 @@ export type SafetyReviewer = (options: {
   reviewOutput?: ReviewOutputMode;
 }) => Promise<string>;
 
-export const REVIEW_MAX_TOKENS = 512;
+// Leave room for provider reasoning before the five-field verdict. The request
+// deadline still bounds execution, and any max_tokens termination is rejected.
+export const REVIEW_MAX_TOKENS = 2048;
 export interface SafetyReviewDiagnostic {
   reason: "local_rejection" | "model_rejection" | "review_format" | "review_timeout" | "review_upstream_error";
   rejectedCriteria?: (typeof REVIEW_FIELDS)[number][];

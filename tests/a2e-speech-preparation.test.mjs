@@ -87,7 +87,7 @@ test('approved audio-only preparation reviews existing text, persists exact audi
   const response = await s.run({ audioOnly: true }); const body = await response.json();
   assert.equal(response.status, 200); assert.equal(body.mode, 'audio-only'); assert.equal(body.results[0].reason, 'saved_and_verified');
   assert.deepEqual(s.state.person.sections[0].cachedAnswers, before);
-  assert.equal(s.state.aiCalls.length, 1); assert.equal(s.state.aiCalls[0].maxTokens, 512);
+  assert.equal(s.state.aiCalls.length, 1); assert.equal(s.state.aiCalls[0].maxTokens, 2048);
   assert.equal(s.state.provider.length, 1); assert.equal(s.state.provider[0].msg, answer);
   assert.ok(!JSON.stringify(s.state.provider).includes(source));
   assert.equal(s.state.downloads, 1); assert.equal(s.state.writes, 1);
