@@ -1,4 +1,4 @@
-import { put as blobPut, get, list, del, head, BlobNotFoundError } from "@vercel/blob";
+import { put as blobPut, get, list, del, head, BlobError, BlobNotFoundError } from "@vercel/blob";
 import { createHash } from "node:crypto";
 import type { Person } from "./types";
 import { assertEventPurgeAllowed, assertEventOpen, eventDataClosed, type PurgeResult } from "./event-retention";
@@ -395,10 +395,23 @@ function privateMediaView(person: Person): Person {
   };
 }
 async function readPrivateBytes(pathname: string): Promise<Buffer | null> {
-  const response = await get(pathname, { access: "private", useCache: false, ...recordsBlobAuth() });
-  if (!response) return null;
-  if (response.statusCode !== 200 || !response.stream) throw new Error("Private media could not be read");
-  return boundedBytes(new Response(response.stream));
+  const delays = [100, 300];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const response = await get(pathname, { access: "private", useCache: false, ...recordsBlobAuth() });
+      if (!response) return null;
+      if (response.statusCode !== 200 || !response.stream) throw new Error("Private media could not be read");
+      return await boundedBytes(new Response(response.stream));
+    } catch (error) {
+      // SDK get() throws BlobError with this fixed prefix for HTTP failures;
+      // it has no status property or built-in retries. Only repeat reads for
+      // transient service/network failures, never authorization or bad bytes.
+      const transientHttp = error instanceof BlobError && /^Vercel Blob: Failed to fetch blob: (?:429|5\d\d)(?:\s|$)/.test(error.message);
+      const transientNetwork = error instanceof TypeError && /^(?:fetch failed|Failed to fetch|Network request failed|Load failed|terminated)$/.test(error.message);
+      if (attempt >= delays.length || (!transientHttp && !transientNetwork)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+    }
+  }
 }
 async function boundedBytes(response: Response): Promise<Buffer> {
   const max = 64 * 1024 * 1024;
