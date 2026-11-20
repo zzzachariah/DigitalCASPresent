@@ -11,9 +11,13 @@ const errors = ts.transpileModule(await readFile(new URL('../src/lib/ai-errors.t
 const errorsUrl = `data:text/javascript;base64,${Buffer.from(errors).toString('base64')}`;
 const reviewSource = ts.transpileModule(await readFile(new URL('../src/lib/review-output.ts', import.meta.url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText.replace('"./ai-errors"', JSON.stringify(errorsUrl));
 const reviewUrl = `data:text/javascript;base64,${Buffer.from(reviewSource).toString('base64')}`;
+const profileSource = ts.transpileModule(await readFile(new URL('../src/lib/review-profile.ts', import.meta.url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
+const profileUrl = `data:text/javascript;base64,${Buffer.from(profileSource).toString('base64')}`;
+const modelOptions = ts.transpileModule(await readFile(new URL('../src/lib/model-options.ts', import.meta.url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
+const modelOptionsUrl = `data:text/javascript;base64,${Buffer.from(modelOptions).toString('base64')}`;
 const compiled = ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
-}).outputText.replace('"./processing-policy"', JSON.stringify(policyUrl)).replaceAll('"./ai-errors"', JSON.stringify(errorsUrl)).replace('"./review-output"', JSON.stringify(reviewUrl));
+}).outputText.replace('"./processing-policy"', JSON.stringify(policyUrl)).replaceAll('"./ai-errors"', JSON.stringify(errorsUrl)).replace('"./review-output"', JSON.stringify(reviewUrl)).replace('"./review-profile"', JSON.stringify(profileUrl)).replace('"./model-options"', JSON.stringify(modelOptionsUrl));
 const beforeApproval = process.env.EXTERNAL_AI_PROCESSING_APPROVED;
 const beforeAiApproval = process.env.AI_PROCESSING_APPROVED;
 process.env.EXTERNAL_AI_PROCESSING_APPROVED = 'false';
@@ -27,10 +31,10 @@ const fakeKey = 'test-only-not-a-real-key';
 const opts = { system: 'Use only the supplied exhibit.', messages: [{ role: 'user', content: 'Explain it.' }] };
 
 async function client(overrides = {}) {
-  const config = { AI_API_KEY: fakeKey, AI_BASE_URL: 'https://relay.example/v1/', AI_MODEL: 'claude-opus-test', AI_MODEL_LIVE: '', AI_API_PROTOCOL: 'auto', EXTERNAL_AI_PROCESSING_APPROVED: 'false', AI_PROCESSING_APPROVED: 'true', ...overrides };
+  const config = { AI_API_KEY: fakeKey, AI_BASE_URL: 'https://relay.example/v1/', AI_MODEL: 'claude-opus-test', AI_MODEL_LIVE: '', AI_API_PROTOCOL: 'auto', AI_REVIEW_EFFORT: undefined, EXTERNAL_AI_PROCESSING_APPROVED: 'false', AI_PROCESSING_APPROVED: 'true', ...overrides };
   const before = Object.fromEntries(Object.keys(config).map((key) => [key, process.env[key]]));
   try {
-    Object.assign(process.env, config);
+    for (const [key, value] of Object.entries(config)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     return await import(`data:text/javascript;base64,${Buffer.from(compiled + `\n// case ${moduleId++}`).toString('base64')}`);
   } finally {
     for (const [key, value] of Object.entries(before)) {
@@ -369,7 +373,79 @@ test('unsupported structured requests fail closed without silently falling back 
   await assert.rejects(ai.chat({ ...opts, reviewOutput: 'json_schema' }), error => ai.safeAiFailure(error).httpStatus === 400);
   assert.equal(calls, 1);
   const openai = await client({ AI_MODEL: 'gpt-test' });
-  await assert.rejects(openai.chat({ ...opts, reviewOutput: 'json_schema' }), /Anthropic Messages/);
+  await assert.rejects(openai.chat({ ...opts, reviewOutput: 'json_schema' }), error => ai.safeAiFailure(error).httpStatus === 400);
   await assert.rejects(collect(ai.chatStream({ ...opts, reviewOutput: 'tool' })), /non-streaming/);
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
+});
+
+test('effort applies only to Sonnet 5 review, preserves schemas, and never alters ordinary generation', async t => {
+  let body;
+  t.mock.method(globalThis, 'fetch', async (_url, init) => { body = JSON.parse(init.body); return json({ content: [{ type: 'text', text: 'fixture' }] }); });
+  for (const effort of ['medium', 'low']) {
+    const ai = await client({ AI_MODEL: 'claude-sonnet-5', AI_REVIEW_EFFORT: effort });
+    await ai.chat(opts); assert.equal(body.output_config, undefined); assert.equal(body.thinking, undefined);
+    await ai.chat({ ...opts, reviewOutput: 'json_schema' });
+    assert.equal(body.output_config.effort, effort); assert.equal(body.output_config.format.type, 'json_schema');
+  }
+  const invalid = await client({ AI_MODEL: 'claude-sonnet-5', AI_REVIEW_EFFORT: 'PRIVATE-CONFIG-CANARY' });
+  await invalid.chat(opts); // Invalid review configuration cannot alter ordinary generation.
+  await assert.rejects(invalid.chat({ ...opts, reviewOutput: 'text' }), { message: 'Invalid AI review effort configuration' });
+  const unsupported = await client({ AI_MODEL: 'claude-fable-5-2', AI_REVIEW_EFFORT: 'low' });
+  await assert.rejects(unsupported.chat({ ...opts, reviewOutput: 'text' }), /Unsupported review effort/);
+});
+
+test('Qwen uses native OpenAI schema/tool requests with exact model non-thinking options', async t => {
+  const decision = { safe: true, grounded: true, private: true, relevant: true, respectful: true };
+  let mode = 'generation';
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    const body = JSON.parse(init.body);
+    assert.equal(url, 'https://relay.example/v1/chat/completions'); assert.equal(init.headers.Authorization, `Bearer ${fakeKey}`);
+    assert.equal(body.enable_thinking, false); assert.equal(body.output_config, undefined); assert.equal(body.store, false);
+    if (mode === 'generation') { assert.equal(body.tools, undefined); assert.equal(body.response_format, undefined); }
+    if (mode === 'schema') {
+      assert.equal(body.response_format.type, 'json_schema'); assert.equal(body.response_format.json_schema.strict, true);
+      assert.equal(body.response_format.json_schema.schema.additionalProperties, false);
+    }
+    if (mode === 'tool') {
+      assert.deepEqual(body.tool_choice, { type: 'function', function: { name: 'submit_safety_review' } });
+      assert.equal(body.parallel_tool_calls, false); assert.equal(body.tools.length, 1);
+      assert.equal(body.tools[0].function.parameters.additionalProperties, false);
+      return json({ choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [{ type: 'function', function: { name: 'submit_safety_review', arguments: JSON.stringify(decision) } }] } }] });
+    }
+    return json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(decision) } }] });
+  });
+  for (const model of ['qwen3.7-plus', 'qwen3.8-flash']) {
+    const ai = await client({ AI_MODEL: model });
+    mode = 'generation'; await ai.chat(opts);
+    mode = 'schema'; assert.equal(await ai.chat({ ...opts, reviewOutput: 'json_schema' }), JSON.stringify(decision));
+    mode = 'tool'; assert.equal(await ai.chat({ ...opts, reviewOutput: 'tool' }), JSON.stringify(decision));
+  }
+});
+
+test('OpenAI tool review rejects text, truncation, extra or ambiguous calls and malformed arguments without retries', async t => {
+  const ai = await client({ AI_MODEL: 'qwen3.8-flash' });
+  const decision = { safe: true, grounded: false, private: true, relevant: true, respectful: true };
+  const tool = { type: 'function', function: { name: 'submit_safety_review', arguments: JSON.stringify(decision) } };
+  const choice = { finish_reason: 'tool_calls', message: { tool_calls: [tool] } };
+  let current = { choices: [choice] }; let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => { calls++; return json(current); });
+  assert.deepEqual(JSON.parse(await ai.chat({ ...opts, reviewOutput: 'tool' })), decision);
+  const cases = [
+    { choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(decision) } }] },
+    { choices: [{ ...choice, finish_reason: 'stop' }] }, { choices: [choice, choice] },
+    ...[
+      [tool, tool], [{ ...tool, type: 'other' }],
+      [{ ...tool, function: { ...tool.function, name: 'other' } }],
+      ...['```json\n' + JSON.stringify(decision) + '\n```', 'PRIVATE-ARGUMENT-CANARY', JSON.stringify({ ...decision, extra: true }), JSON.stringify({ ...decision, safe: 'true' }), '{"safe":false,' + JSON.stringify(decision).slice(1)].map(arguments_ => [{ ...tool, function: { ...tool.function, arguments: arguments_ } }]),
+    ].map(tool_calls => ({ choices: [{ ...choice, message: { tool_calls } }] })),
+  ];
+  for (const data of cases) {
+    current = data;
+    await assert.rejects(ai.chat({ ...opts, reviewOutput: 'tool' }), error => {
+      assert.deepEqual(ai.safeAiFailure(error), { kind: 'invalid_response', httpStatus: 200 }); assert.ok(!error.message.includes('PRIVATE')); return true;
+    });
+  }
+  current = { choices: [{ ...choice, finish_reason: 'length' }] };
+  await assert.rejects(ai.chat({ ...opts, reviewOutput: 'tool' }), error => ai.safeAiFailure(error).kind === 'truncated_response');
+  assert.equal(calls, cases.length + 2);
 });
