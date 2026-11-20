@@ -289,6 +289,18 @@ test('OpenAI length termination is a typed truncation even when no content was e
   });
 });
 
+test('Anthropic truncation rejects an apparently complete tool verdict without retrying', async t => {
+  const ai = await client(); let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => { calls++; return json({
+    stop_reason: 'max_tokens', content: [{ type: 'tool_use', id: 'synthetic-review', name: 'submit_safety_review',
+      input: { safe: true, grounded: true, private: true, relevant: true, respectful: true } }],
+  }); });
+  await assert.rejects(ai.chat({ ...opts, maxTokens: 2048, reviewOutput: 'tool' }), error => {
+    assert.deepEqual(ai.safeAiFailure(error), { kind: 'truncated_response', httpStatus: 200 }); return true;
+  });
+  assert.equal(calls, 1);
+});
+
 test('network, timeout, cancellation and unrelated local errors stay distinct without echoing their messages', async t => {
   const ai = await client(); const secret = 'PRIVATE-MANUSCRIPT-CANARY';
   let raised = new TypeError(secret); let calls = 0;

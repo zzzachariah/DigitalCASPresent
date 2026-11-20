@@ -316,6 +316,33 @@ test('unknown diagnostics and raw top-level errors never appear in failure messa
   assert.equal(result.failures[0].reason, '此项未完成或保存结果尚未确认');
 });
 
+test('truncated review is distinguished from malformed JSON without leaking provider details', async () => {
+  for (const upstreamKind of ['truncated_response', 'PRIVATE-PROVIDER-DIAGNOSTIC']) {
+    const p = source(1, { language: 'zh' }); let calls = 0;
+    const result = await prepareNarrationVariants(p, { textOnly: false }, { request: async (body) => {
+      calls++;
+      return { ok: false, status: 502, data: { sections: p.sections, results: [{
+        ...body, status: 'failed', reason: 'answer_not_approved', phase: 'review', reviewReason: 'review_format', upstreamKind,
+      }] } };
+    } });
+    assert.equal(calls, 1); assert.equal(result.completed, 0);
+    assert.doesNotMatch(result.failures[0].reason, /PRIVATE/);
+    if (upstreamKind === 'truncated_response') assert.match(result.failures[0].reason, /审核结果被截断/);
+    else assert.match(result.failures[0].reason, /审核服务返回格式异常/);
+  }
+});
+
+test('speech diagnostics expose only a short numeric provider code', async () => {
+  for (const providerCode of ['1005', 'PRIVATE-SPEECH-DETAIL']) {
+    const p = source(1, { language: 'zh' });
+    const result = await prepareNarrationVariants(p, { textOnly: false }, { request: async (body) => ({
+      ok: false, status: 502, data: { sections: p.sections, results: [{ ...body, status: 'failed', reason: 'tts_failed', phase: 'tts', providerCode }] },
+    }) });
+    assert.doesNotMatch(result.failures[0].reason, /PRIVATE/);
+    if (providerCode === '1005') assert.match(result.failures[0].reason, /配音服务代码：1005/);
+  }
+});
+
 test('known permission/configuration codes use safe local text instead of server error.message', async () => {
   const result = await prepareNarrationVariants(source(1, { language: 'zh' }), { textOnly: false }, { request: async () => ({
     ok: false, status: 503, data: { code: 'a2e_key_missing', error: 'PRIVATE-ERROR-MESSAGE' },

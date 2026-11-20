@@ -49,7 +49,7 @@ test('two fixed synthetic probes work with manuscript processing disabled', asyn
     assert.equal(call.url, 'https://cf.api.fan/v1/messages');
     assert.equal(call.init.redirect, 'error'); assert.equal(call.init.headers['x-api-key'], fakeKey);
     assert.equal(call.init.headers['anthropic-version'], '2023-06-01');
-    assert.equal(call.body.model, 'claude-sonnet-5'); assert.equal(call.body.max_tokens, call.body.system.startsWith('You are a strict safety') ? 512 : 200);
+    assert.equal(call.body.model, 'claude-sonnet-5'); assert.equal(call.body.max_tokens, call.body.system.startsWith('You are a strict safety') ? 2048 : 200);
     assert.equal(call.body.stream, false); assert.equal(call.body.temperature, 0);
     assert.equal(call.body.messages.length, 1); assert.equal(call.body.messages[0].role, 'user');
     assert.ok(call.body.messages[0].content.includes('fictional'));
@@ -183,11 +183,11 @@ test('fixed probe exposes typed failures and no raw provider material', async ()
   }
 });
 
-test('probe review uses the production 512-token budget and preserves its safe HTTP diagnostic', async () => {
+test('probe review uses the production 2048-token budget and preserves its safe HTTP diagnostic', async () => {
   const s = setup(); s.state.responses = [json(expected), Response.json({ error: { code: 'api_error', message: fakeKey } }, { status: 502 })];
   const result = await (await s.route.POST(request())).json();
-  assert.equal(s.state.calls[0].body.max_tokens, 200); assert.equal(s.state.calls[1].body.max_tokens, 512);
-  assert.equal(result.generation.maxTokens, 200); assert.equal(result.review.maxTokens, 512);
+  assert.equal(s.state.calls[0].body.max_tokens, 200); assert.equal(s.state.calls[1].body.max_tokens, 2048);
+  assert.equal(result.generation.maxTokens, 200); assert.equal(result.review.maxTokens, 2048);
   assert.deepEqual(result.review.failure, { kind: 'http', httpStatus: 502, code: 'api_error' });
   assert.equal(result.review.reviewReason, 'review_upstream_error'); assert.ok(!JSON.stringify(result).includes(fakeKey));
 });
@@ -198,6 +198,19 @@ test('thinking-only truncation in the probe review is reported before empty cont
   assert.equal(result.review.reviewReason, 'review_format');
   assert.deepEqual(result.review.failure, { kind: 'truncated_response', httpStatus: 200 });
   assert.equal(result.review.response, undefined); assert.ok(!JSON.stringify(result).includes(fakeKey));
+});
+
+test('a truncated tool verdict never passes even when all five visible fields are true', async () => {
+  const s = setup();
+  s.state.responses = [json(expected), Response.json({ stop_reason: 'max_tokens', content: [
+    { type: 'thinking', thinking: fakeKey },
+    { type: 'tool_use', id: 'synthetic-review', name: 'submit_safety_review', input: JSON.parse(yes) },
+  ] })];
+  const result = await (await s.route.POST(request({ model: 'claude-sonnet-5', reviewMode: 'tool' }))).json();
+  assert.equal(result.pass, false); assert.equal(result.review.reviewReason, 'review_format');
+  assert.deepEqual(result.review.failure, { kind: 'truncated_response', httpStatus: 200 });
+  assert.equal(result.review.response, undefined); assert.ok(!JSON.stringify(result).includes(fakeKey));
+  assert.equal(s.state.calls.length, 2); // One generation and one review; never retry into approval.
 });
 
 test('Chinese synthetic fixture tests the identical fixed review schema without any manuscript input', async () => {

@@ -71,7 +71,7 @@ test('Review diagnostics distinguish rejection, malformed output and outages wit
   let invoked = false;
   assert.equal(await safety.reviewExhibitionAnswer(input, async () => yes, () => { invoked = true; }), true);
   assert.equal(invoked, false);
-  assert.equal(await safety.reviewExhibitionAnswer(input, async options => { assert.equal(options.maxTokens, 512); assert.equal(options.reviewOutput, 'json_schema'); return yes; }), true);
+  assert.equal(await safety.reviewExhibitionAnswer(input, async options => { assert.equal(options.maxTokens, 2048); assert.equal(options.reviewOutput, 'json_schema'); return yes; }), true);
   assert.equal(await safety.reviewExhibitionAnswer(input, async () => 'bad JSON', () => { throw new Error(secret); }), false);
 });
 
