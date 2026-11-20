@@ -219,13 +219,16 @@ async function a2eHostedImage(srcUrl: string): Promise<string> {
 
 /** Text-to-speech: returns an audio URL. This call is synchronous/fast (no
  *  polling needed) — this is what makes the "fast" avatar path near-instant. */
-export async function a2eTts(text: string, gender?: "male" | "female", signal?: AbortSignal, personId?: string): Promise<string> {
+export async function a2eTts(text: string, gender?: "male" | "female", signal?: AbortSignal, personId?: string, language?: "en" | "zh"): Promise<string> {
   if (!SPEAKABLE_TEXT.test(text)) throw new Error("send_tts requires speakable text.");
+  if (language !== undefined && language !== "en" && language !== "zh") throw new Error("Unsupported speech language.");
   // Set the locale for each spoken chunk, including bilingual answers. Leaving
   // it to upstream detection can reject short/mixed Chinese chunks with 1005.
   // A2E's documented locale fields are country (language) + region, not `lang`.
   // https://video.a2e.ai/dev/text-to-speech-api
-  const locale = HAN_SCRIPT.test(text)
+  // A known answer language takes precedence over names/titles written in
+  // another script. Bilingual chunks retain the existing per-chunk detection.
+  const locale = (language ?? (HAN_SCRIPT.test(text) ? "zh" : "en")) === "zh"
     ? { country: "zh", region: "CN" }
     : { country: "en", region: "US" };
   const tts = await a2e("/api/v1/video/send_tts", "POST", { msg: text, tts_id: voiceFor(gender), ...locale }, signal, personId === undefined ? undefined : { speechPersonId: personId });

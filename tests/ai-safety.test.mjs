@@ -97,7 +97,7 @@ test('Review diagnostics distinguish rejection, malformed output and outages wit
 let state;
 function reset() {
   state = {
-    approved: true, mediaApproved: true, closed: false, calls: [], tts: [], ttsPersonIds: [], speechPersonIds: ['student-1'],
+    approved: true, mediaApproved: true, closed: false, calls: [], tts: [], ttsPersonIds: [], ttsLanguages: [], speechPersonIds: ['student-1'],
     person: { id: 'student-1', name: 'Synthetic student', slug: 'student-1', language: 'auto', status: 'approved', privacyConsent: { version: privacy.PRIVACY_VERSION, acceptedAt: 1 }, script: `${source}\nOTHER-SECTION-PRIVATE-CANARY`, sections: [{ id: 'part-1', title: 'Compass', content: source }] },
     replies: [answer, yes],
   };
@@ -116,7 +116,7 @@ globalThis.__safetyRouteBindings = {
   '@/lib/privacy': privacy,
   '@/lib/access': { canView: person => person.status === 'approved' },
   '@/lib/ratelimit': { limitRequest: () => null },
-  '@/lib/a2e': { a2eSpeechReadiness: personId => ({ ready: state.mediaApproved && state.speechPersonIds.includes(personId) }), a2eTts: async (text, _gender, _signal, personId) => { state.tts.push(text); state.ttsPersonIds.push(personId); return 'https://synthetic.example/audio.wav'; } },
+  '@/lib/a2e': { a2eSpeechReadiness: personId => ({ ready: state.mediaApproved && state.speechPersonIds.includes(personId) }), a2eTts: async (text, _gender, _signal, personId, language) => { state.tts.push(text); state.ttsPersonIds.push(personId); state.ttsLanguages.push(language); return 'https://synthetic.example/audio.wav'; } },
   '@/lib/sentences': sentences,
 };
 const routeCode = (await compile('../src/app/api/chat/route.ts')).replace(/import\s+\{([^}]+)\}\s+from\s+"([^"]+)";/g, (_, fields, path) => `const {${fields}} = globalThis.__safetyRouteBindings[${JSON.stringify(path)}];`);
@@ -281,4 +281,26 @@ test('another person cannot use an approved person narration permission', async 
   assert.ok(wire.includes(answer)); assert.equal(state.calls.length, 2);
   assert.equal(state.tts.length, 0);
   assert.equal(wire.trim().split('\n').map(JSON.parse)[0].avatar, 'tts');
+});
+
+test('live narration and browser fallback metadata honor the selected language around mixed-script exhibit names', async () => {
+  const beforeProvider = process.env.AVATAR_PROVIDER; const beforeMode = process.env.A2E_MODE;
+  process.env.AVATAR_PROVIDER = 'a2e'; process.env.A2E_MODE = 'fast';
+  try {
+    for (const [language, text, expectedTtsLanguage, expectedMetaLanguage] of [
+      ['en', 'The exhibit 山河 connects observations with context.', 'en', 'en'],
+      ['zh', 'Compass 这个展品联系观察与背景。', 'zh', 'zh'],
+      ['bilingual', 'The exhibit connects observations with context. 中文：这个展品联系观察与背景。', undefined, 'zh'],
+    ]) {
+      reset(); state.person.language = language; state.person.sections[0].cachedAnswers = { [language]: text }; state.replies = [yes];
+      const events = (await (await route.POST(request({ stream: true }))).text()).trim().split('\n').map(JSON.parse);
+      assert.equal(events.find(e => e.type === 'meta').lang, expectedMetaLanguage);
+      assert.equal(events.find(e => e.type === 'done').text, text);
+      assert.ok(state.tts.length > 0); assert.ok(state.ttsLanguages.every(value => value === expectedTtsLanguage));
+      assert.ok(state.ttsPersonIds.every(id => id === 'student-1'));
+    }
+  } finally {
+    if (beforeProvider === undefined) delete process.env.AVATAR_PROVIDER; else process.env.AVATAR_PROVIDER = beforeProvider;
+    if (beforeMode === undefined) delete process.env.A2E_MODE; else process.env.A2E_MODE = beforeMode;
+  }
 });

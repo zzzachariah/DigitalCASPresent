@@ -35,14 +35,14 @@ function avatarMode(personId: string): AvatarMode {
 
 let ttsInFlight = 0;
 const ttsWaiters: (() => void)[] = [];
-async function synth(text: string, person: Person, signal: AbortSignal): Promise<string> {
+async function synth(text: string, person: Person, signal: AbortSignal, language: AnswerLang): Promise<string> {
   if (ttsInFlight >= 6) await new Promise<void>((resolve) => ttsWaiters.push(resolve));
   ttsInFlight++;
   try {
     signal.throwIfAborted();
     if (eventDataClosed()) throw new Error("Event closed");
     // No in-process cache of student-derived narration text.
-    return await a2eTts(text, person.gender, AbortSignal.any([signal, AbortSignal.timeout(12_000)]), person.id);
+    return await a2eTts(text, person.gender, AbortSignal.any([signal, AbortSignal.timeout(12_000)]), person.id, language === "bilingual" ? undefined : language);
   } finally {
     ttsInFlight--;
     ttsWaiters.shift()?.();
@@ -146,7 +146,7 @@ export async function POST(req: NextRequest) {
   }
   if (eventDataClosed()) return NextResponse.json({ error: "活动已结束 / Event closed" }, { status: 410, headers: PRIVATE_HEADERS });
   if (req.signal.aborted) return new Response(null, { status: 499, headers: PRIVATE_HEADERS });
-  const lang = language === "zh" || looksChinese(answer) ? "zh" : "en";
+  const lang = language === "zh" || (language === "bilingual" && looksChinese(answer)) ? "zh" : "en";
   // Legacy audio has no trustworthy binding to the reviewed words. Never
   // release it; only synthesize the reviewed text when processing is enabled.
   if (!body.stream) {
@@ -170,7 +170,7 @@ export async function POST(req: NextRequest) {
         if (mode === "audio") {
           for (const text of takeSentences(answer, true).chunks) {
             const seq = count++;
-            jobs.push(synth(text, person, req.signal)
+            jobs.push(synth(text, person, req.signal, language)
               .then((url) => send({ type: "audio", seq, url, text }))
               .catch(() => send({ type: "audio", seq, url: null, text })));
           }

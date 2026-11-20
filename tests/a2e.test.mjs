@@ -73,6 +73,27 @@ test('Bilingual chunks select their own locale while retaining the female voice'
   ]);
 });
 
+test('an explicit narration language overrides mixed-script titles without changing text or person scope', async t => {
+  const { ai, restore } = await client({ EXTERNAL_AI_PROCESSING_APPROVED: 'false', AVATAR_PROVIDER: 'a2e', A2E_SPEECH_APPROVED_PERSON_IDS: 'locale-fixture', EVENT_ENDS_AT: '2999-01-01T00:00:00Z' });
+  t.after(restore);
+  const bodies = [];
+  t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return Response.json({ code: 0, data: 'https://audio.example/result.mp3' });
+  });
+  const english = 'The exhibit 山河 shows why observations need context.';
+  const chinese = 'Compass 这个展品说明观察需要结合背景。';
+  await ai.a2eTts(english, 'female', undefined, 'locale-fixture', 'en');
+  await ai.a2eTts(chinese, 'female', undefined, 'locale-fixture', 'zh');
+  assert.deepEqual(bodies, [
+    { msg: english, tts_id: 'test-female', country: 'en', region: 'US' },
+    { msg: chinese, tts_id: 'test-female', country: 'zh', region: 'CN' },
+  ]);
+  await assert.rejects(ai.a2eTts(english, 'female', undefined, 'other-person', 'en'), /separate approval/);
+  await assert.rejects(ai.a2eTts(english, 'female', undefined, 'locale-fixture', 'unsupported'), /Unsupported speech language/);
+  assert.equal(bodies.length, 2);
+});
+
 test('activity approval permits future person-bound TTS without opening arbitrary media operations', async t => {
   const { ai, restore } = await client({ A2E_PROCESSING_APPROVED: 'true', EXTERNAL_AI_PROCESSING_APPROVED: 'false', AVATAR_PROVIDER: 'a2e', EVENT_ENDS_AT: '2999-01-01T00:00:00Z' });
   t.after(restore); let calls = 0;
