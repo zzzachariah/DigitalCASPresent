@@ -14,7 +14,7 @@ export default function PrivacyPage() {
   const retention = eventRetentionStatus();
   const ends = retention.endsAt ? new Date(retention.endsAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) : null;
   const textAi = aiProcessingAllowed();
-  const media = externalProcessingAllowed();
+  const speech = externalProcessingAllowed();
   const terms = [
     {
       title: "1. 用途与保密 · Purpose and confidentiality",
@@ -33,8 +33,8 @@ export default function PrivacyPage() {
     },
     {
       title: "4. AI 与服务商 · AI and service providers",
-      zh: "本站使用托管及存储服务运行。组织者已批准通过 Packy 及其上游服务商进行文字 AI 处理，并接受上游保留期限尚未公开确认的限制。你同意后，自动分段可发送讲稿全文；讲解、问答及回答审查可发送所选段落、必要的展示信息、提问和候选回答。Packy 的条款声明其自身不保留输入/输出正文、不将客户内容用于模型训练，但会保留用量等元数据；上游服务商依其自身条款处理和保留数据，不能据此承诺上游零留存。本站及组织者不能保证上游在活动结束日或本站清理日同步删除副本。本次同意仅涵盖上述文字处理，不授权模型训练，也不包含向 A2E、D-ID 发送照片、语音或形象资料；这些媒体服务保持关闭，另行启用需要另外告知和取得同意。AI 回答有内容限制与审查，无法确认时应礼貌表示“这个问题再想想”，但仍不能保证每次回答完全准确。",
-      en: "Hosting and storage services operate this app. The organizer has approved text AI processing through Packy and its upstream providers, accepting that upstream retention periods have not been publicly confirmed. With your agreement, automatic splitting may send the full manuscript; explanations, Q&A and answer review may send the selected section, necessary exhibition details, the question and a candidate answer. Packy states that it does not retain input/output content or train models on customer content, while retaining usage metadata. Upstream providers process and retain data under their own terms; this is not a promise of zero upstream retention. Neither this app nor the organizer can guarantee upstream copies are deleted on the event end date or this app’s cleanup date. This agreement covers only the text processing described here. It does not authorize model training or sending photos, speech or avatar material to A2E or D-ID. Those media services remain disabled; enabling them requires separate notice and agreement. AI answers are constrained and reviewed, with a polite response when an answer cannot be confirmed, but accuracy cannot be guaranteed for every reply.",
+      zh: "本站使用托管及存储服务运行。组织者已批准通过 Packy 及其上游服务商进行文字 AI 处理，并接受上游保留期限尚未公开确认的限制。你同意后，自动分段可发送讲稿全文；讲解、问答及回答审查可发送所选段落、必要的展示信息、提问和候选回答。Packy 的条款声明其自身不保留输入/输出正文、不将客户内容用于模型训练，但会保留用量等元数据；上游服务商依其自身条款处理和保留数据，不能据此承诺上游零留存。本站及组织者不能保证上游在活动结束日或本站清理日同步删除副本。本次同意仅涵盖上述文字处理，不授权模型训练，也不包含向 A2E、D-ID 发送照片、语音或形象资料；未单独获准的照片处理保持关闭；组织者另行明确指定并单独获准的资料，仅可将对应照片及生成的形象发送给 A2E 制作卡通和动态视频，不因此授权处理其他同学的照片。外部配音及 D-ID 仍保持关闭。AI 回答有内容限制与审查，无法确认时应礼貌表示“这个问题再想想”，但仍不能保证每次回答完全准确。",
+      en: "Hosting and storage services operate this app. The organizer has approved text AI processing through Packy and its upstream providers, accepting that upstream retention periods have not been publicly confirmed. With your agreement, automatic splitting may send the full manuscript; explanations, Q&A and answer review may send the selected section, necessary exhibition details, the question and a candidate answer. Packy states that it does not retain input/output content or train models on customer content, while retaining usage metadata. Upstream providers process and retain data under their own terms; this is not a promise of zero upstream retention. Neither this app nor the organizer can guarantee upstream copies are deleted on the event end date or this app’s cleanup date. This agreement covers only the text processing described here. It does not authorize model training or sending photos, speech or avatar material to A2E or D-ID. Photo processing remains disabled unless separately approved for a specifically identified participant. That separate approval permits only the corresponding photo and generated portrait to be sent to A2E to create a cartoon and ambient video; it does not authorize other students’ photos. External speech generation and D-ID remain disabled. AI answers are constrained and reviewed, with a polite response when an answer cannot be confirmed, but accuracy cannot be guaranteed for every reply.",
     },
     {
       title: "5. 活动结束后的销毁 · Deletion after the event",
@@ -55,7 +55,8 @@ export default function PrivacyPage() {
       <aside className="my-6 space-y-2 rounded-lg bg-surface-2 p-5 text-sm leading-relaxed">
         <p><b>活动结束时间 / Event ends:</b> {ends ? `${ends}（北京时间 / Beijing time）` : "尚未配置有效时间，请向老师确认销毁安排。 / No valid time is configured; confirm deletion arrangements with your teacher."}</p>
         <p><b>Packy 文字 AI / Packy text AI:</b> {textAi ? "已启用；接受新版协议后按第 4 条处理。 / Enabled; processing follows section 4 after acceptance of this agreement." : "当前关闭；自动分段在本站完成。 / Currently disabled; automatic splitting runs within this app."}</p>
-        <p><b>外部语音与形象 / External speech and avatars:</b> {media ? "当前已启用；不在本次文字 AI 同意范围内，须另行确认。 / Currently enabled; outside this text AI agreement and requires separate confirmation." : "关闭；A2E、D-ID 不在本次授权范围内。 / Disabled; A2E and D-ID are outside this approval."}</p>
+        <p><b>照片与形象 / Photos and avatars:</b> 仅单独获准的指定资料可用于生成卡通和视频；本文字 AI 协议不包含照片授权。 / Only specifically approved material may be used for cartoons and videos; this text AI agreement does not authorize photo processing.</p>
+        <p><b>外部配音 / External speech:</b> {speech ? "当前已启用，须有独立的配音授权。 / Currently enabled and requires separate speech approval." : "关闭；单独的照片授权不会开启配音。 / Disabled; separate photo approval does not enable speech generation."}</p>
       </aside>
       <div className="space-y-7">
         {terms.map((term) => (

@@ -5,7 +5,8 @@ import ts from 'typescript';
 
 const source = await readFile(new URL('../src/lib/a2e.ts', import.meta.url), 'utf8');
 const policy = await readFile(new URL('../src/lib/processing-policy.ts', import.meta.url), 'utf8');
-const bundledSource = source.replace(/import \{ externalProcessingAllowed, requireExternalProcessing \} from \".\/processing-policy\";/, '') + '\n' + policy;
+const retention = await readFile(new URL('../src/lib/event-retention.ts', import.meta.url), 'utf8');
+const bundledSource = source.replace('import { assertEventOpen } from "./event-retention";', '').replace(/import \{ externalProcessingAllowed, requireExternalProcessing \} from \".\/processing-policy\";/, '') + '\n' + policy + '\n' + retention;
 const compiled = ts.transpileModule(bundledSource, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
 }).outputText;
@@ -111,4 +112,42 @@ test('Text AI approval cannot enable A2E narration or uploaded images', async t 
   t.mock.method(globalThis, 'fetch', async () => { throw new Error('Unexpected network request'); });
   await assert.rejects(ai.a2eTts('Confidential fixture'), /disabled pending/);
   await assert.rejects(ai.a2eUploadImage('https://example.test/private-photo'), /disabled pending/);
+});
+
+
+test('approved photo bytes use only presign and upload, never a private application URL or TTS', async t => {
+  const { ai, restore } = await client({ EXTERNAL_AI_PROCESSING_APPROVED: 'false', AVATAR_PROVIDER: 'a2e', A2E_PHOTO_APPROVED_PERSON_IDS: 'anna-fixture', EVENT_ENDS_AT: '2999-01-01T00:00:00Z' });
+  t.after(restore); const calls = []; const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    calls.push({ url, init });
+    if (url.endsWith('/upload-presigned-url')) {
+      const body = JSON.parse(init.body);
+      assert.equal(body.contentType, 'image/png'); assert.equal(body.fileSize, bytes.length);
+      assert.match(body.key, /^dcp\/[a-f0-9]{64}\.png$/);
+      return Response.json({ code: 0, data: { uploadUrl: 'https://upload.example/signed', cdnUrl: 'https://cdn.example/photo.png' } });
+    }
+    assert.equal(url, 'https://upload.example/signed'); assert.equal(init.method, 'PUT');
+    assert.equal(init.headers.Authorization, undefined); assert.equal(init.redirect, 'error');
+    assert.ok(Buffer.from(init.body).equals(bytes));
+    return new Response(null, { status: 200 });
+  });
+  assert.equal(await ai.a2eUploadImageBytes(bytes, 'image/png', 'anna-fixture'), 'https://cdn.example/photo.png');
+  assert.equal(calls.length, 2);
+  await assert.rejects(ai.a2eUploadImageBytes(bytes, 'image/png', 'other-student'), /approval/);
+  await assert.rejects(ai.a2eTts('Synthetic narration'), /disabled pending/);
+  assert.equal(calls.length, 2);
+});
+
+test('photo authorization and event expiry are rechecked after presign before uploading bytes', async t => {
+  const { ai, restore } = await client({ EXTERNAL_AI_PROCESSING_APPROVED: 'false', AVATAR_PROVIDER: 'a2e', A2E_PHOTO_APPROVED_PERSON_IDS: 'anna-fixture', EVENT_ENDS_AT: '2999-01-01T00:00:00Z' });
+  t.after(restore); let calls = 0;
+  t.mock.method(globalThis, 'fetch', async url => {
+    calls++; assert.ok(url.endsWith('/upload-presigned-url'));
+    process.env.EVENT_ENDS_AT = '2000-01-01T00:00:00Z';
+    return Response.json({ code: 0, data: { uploadUrl: 'https://upload.example/signed', cdnUrl: 'https://cdn.example/photo.png' } });
+  });
+  await assert.rejects(ai.a2eUploadImageBytes(Buffer.from('synthetic bytes'), 'image/png', 'anna-fixture'), /closed/);
+  assert.equal(calls, 1);
+  await assert.rejects(ai.a2eCartoonPoll('task-fixture', 'anna-fixture'), /closed/);
+  assert.equal(calls, 1);
 });

@@ -167,7 +167,7 @@ export default function SubmitApp({ id, token }: { id?: string; token?: string }
           <ul className="list-disc space-y-2 pl-5 text-[13px] leading-relaxed text-ink-2">
             <li>组织者已批准 Packy 及其上游的文字 AI 处理。自动分段可能发送全文；讲解和问答仅发送所需段落及相关问题。<br />The organizer has approved text AI processing by Packy and upstream providers. Splitting may send the full manuscript; explanations and Q&A use the necessary section and related questions.</li>
             <li>Packy 声明自身不保存输入/输出正文、不用于模型训练；上游保留期限尚未公开确认，不能保证其与本站同时删除。<br />Packy states that it does not retain input/output content or use it for training. Upstream retention periods remain unconfirmed; simultaneous deletion with this app cannot be guaranteed.</li>
-            <li>活动结束后关闭访问并安排销毁本站资料。A2E、D-ID 等外部语音与形象服务不在本次同意范围内，保持关闭。<br />Access closes after the event, followed by deletion from this app. External speech and avatar services such as A2E and D-ID are outside this agreement and remain disabled.</li>
+            <li>活动结束后关闭访问并安排销毁本站资料。本次文字 AI 同意不包含照片处理；未单独获准则保持关闭。另行获准的指定照片仅用于 A2E 卡通和视频生成，配音及 D-ID 仍关闭。<br />Access closes after the event, followed by deletion from this app. This text AI agreement does not cover photos. Only separately approved, specifically identified photos may be used for A2E cartoons and videos. External speech and D-ID remain disabled.</li>
             <li>AI 回答会受到限制与审查，但仍可能出错；无法确认时应礼貌表示“这个问题再想想”。<br />AI answers are constrained and reviewed but may still be wrong; uncertain questions receive a polite response.</li>
             <li>修改与预览链接均须保密。草稿仅在本浏览器会话保留，请用自己的设备。<br />Keep edit and preview links private. Drafts last for this browser session; use your own device.</li>
           </ul>

@@ -1,4 +1,6 @@
 import { externalProcessingAllowed, requireExternalProcessing } from "./processing-policy";
+import { createHmac, createHash, timingSafeEqual } from "node:crypto";
+import { assertEventOpen } from "./event-retention";
 // ─────────────────────────────────────────────────────────────────────
 // A2E (video.a2e.com.cn) — domestic talking-photo / lip-sync provider.
 // Responses are wrapped as { code: 0, data: {...} }. Auth: Bearer sk_...
@@ -12,8 +14,88 @@ function key(): string {
   return process.env.A2E_API_KEY?.trim() || "";
 }
 
+export type A2eReadinessStatus = "privacy_disabled" | "provider_missing" | "key_missing" | "ready";
+export interface A2eReadiness {
+  status: A2eReadinessStatus;
+  ready: boolean;
+  message: string;
+}
+
+/** Local configuration/approval only; this never contacts the provider.
+ * Privacy takes precedence so a deliberate block is not misreported as a
+ * missing credential. Text AI approval does not approve A2E media processing. */
+export function a2eReadiness(): A2eReadiness {
+  if (!externalProcessingAllowed()) return {
+    status: "privacy_disabled", ready: false,
+    message: "A2E 通用媒体与配音处理尚未获准。个别获准的照片处理会单独显示，文字 AI 授权不包含 A2E 配音。 / General A2E media and narration are disabled; individual photo permissions are separate.",
+  };
+  return a2eConfigurationReadiness();
+}
+
+function a2eConfigurationReadiness(): A2eReadiness {
+  if ((process.env.AVATAR_PROVIDER || "mock").toLowerCase() !== "a2e") return {
+    status: "provider_missing", ready: false,
+    message: "尚未选择 A2E 作为形象与配音服务，请由管理员检查服务设置。 / A2E is not selected as the media provider.",
+  };
+  if (!key()) return {
+    status: "key_missing", ready: false,
+    message: "A2E 服务凭据尚未配置，请由管理员补齐。 / A2E credentials are missing.",
+  };
+  return { status: "ready", ready: true, message: "A2E 已获准且配置完整，尚未验证服务连通性。 / A2E is approved and configured; connectivity has not been verified." };
+}
+
 export function a2eConfigured(): boolean {
-  return externalProcessingAllowed() && (process.env.AVATAR_PROVIDER || "mock").toLowerCase() === "a2e" && !!key();
+  return a2eReadiness().ready;
+}
+
+/** Exact server-configured record IDs only: names, wildcards and browser input
+ * never grant permission. Photo approval does not authorize TTS or other people. */
+export function a2ePhotoApprovedPersonIds(): string[] {
+  return Array.from(new Set((process.env.A2E_PHOTO_APPROVED_PERSON_IDS || "").split(",").map((id) => id.trim())
+    .filter((id) => /^[A-Za-z0-9_-]{1,40}$/.test(id))));
+}
+
+export function a2ePhotoReadiness(personId?: string): A2eReadiness {
+  if (!personId || !a2ePhotoApprovedPersonIds().includes(personId)) return {
+    status: "privacy_disabled", ready: false,
+    message: "尚未获准让 A2E 处理此人的照片。仅单独获准的人员可生成卡通形象和动态视频，不包含配音。 / A2E photo processing requires this person's separate approval; narration is not included.",
+  };
+  const readiness = a2eConfigurationReadiness();
+  return readiness.ready ? { ...readiness, message: "此人的 A2E 卡通形象与动态视频处理已获准且配置完整；配音权限保持独立。 / This person's photo processing is approved and configured; narration permission is separate." } : readiness;
+}
+
+function requirePhotoProcessing(personId: string): void {
+  assertEventOpen();
+  const readiness = a2ePhotoReadiness(personId);
+  if (!readiness.ready) throw new Error(readiness.message);
+}
+
+function photoPathAllowed(path: string, method: string): boolean {
+  return method === "POST" ? ["/api/v1/r2/upload-presigned-url", "/api/v1/userNanoBanana/start", "/api/v1/userImage2Video/start"].includes(path)
+    : method === "GET" && /^\/api\/v1\/(?:userNanoBanana\/detail|userImage2Video)\/[A-Za-z0-9_-]{1,64}$/.test(path);
+}
+
+export type A2ePhotoTaskKind = "cartoon" | "loop";
+/** Keep the browser's taskId opaque and bind it to its owner and purpose. */
+export function issueA2ePhotoTask(personId: string, kind: A2ePhotoTaskKind, taskId: string): string {
+  requirePhotoProcessing(personId);
+  if (!safeTaskId(taskId)) throw new Error("Invalid photo task id");
+  const payload = Buffer.from(JSON.stringify([personId, kind, taskId, Date.now()])).toString("base64url");
+  return `${payload}.${createHmac("sha256", key()).update(`a2e-photo-task:${payload}`).digest("base64url")}`;
+}
+
+export function verifyA2ePhotoTask(token: string | null, personId: string, kind: A2ePhotoTaskKind): string | null {
+  if (!key() || !token || token.length > 512 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) return null;
+  try {
+    const [payload, signature] = token.split(".");
+    const expected = createHmac("sha256", key()).update(`a2e-photo-task:${payload}`).digest("base64url");
+    const a = Buffer.from(signature); const b = Buffer.from(expected);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+    const values: unknown = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (!Array.isArray(values) || values.length !== 4 || values[0] !== personId || values[1] !== kind ||
+        typeof values[3] !== "number" || values[3] > Date.now() + 60_000 || Date.now() - values[3] > 24 * 60 * 60_000) return null;
+    return typeof values[2] === "string" ? safeTaskId(values[2]) : null;
+  } catch { return null; }
 }
 
 export interface A2eResult {
@@ -22,8 +104,11 @@ export interface A2eResult {
   json: any;
 }
 
-export async function a2e(path: string, method = "POST", body?: unknown, signal?: AbortSignal): Promise<A2eResult> {
-  requireExternalProcessing();
+export async function a2e(path: string, method = "POST", body?: unknown, signal?: AbortSignal, photoPersonId?: string): Promise<A2eResult> {
+  if (photoPersonId !== undefined) {
+    requirePhotoProcessing(photoPersonId);
+    if (!photoPathAllowed(path, method)) throw new Error("This operation is outside photo-only approval");
+  } else requireExternalProcessing();
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: { Authorization: `Bearer ${key()}`, "Content-Type": "application/json" },
@@ -148,18 +233,20 @@ export async function a2ePollTalkingPhoto(id: string): Promise<AvatarPollResult>
 
 /** Start a cartoon-ify task. Returns the A2E task id (or an error reason). */
 export async function a2eCartoonStart(
-  srcPhotoUrl: string
+  srcPhotoUrl: string, photoPersonId?: string
 ): Promise<{ taskId: string } | { error: string }> {
   const model = process.env.A2E_CARTOON_MODEL || "nano-banana-pro";
   try {
-    const cdnUrl = await a2eHostedImage(srcPhotoUrl);
+    if (photoPersonId !== undefined) requirePhotoProcessing(photoPersonId);
+    // Scoped callers supply only the CDN result of a2eUploadImageBytes.
+    const cdnUrl = photoPersonId !== undefined ? srcPhotoUrl : await a2eHostedImage(srcPhotoUrl);
     const start = await a2e("/api/v1/userNanoBanana/start", "POST", {
       model,
       prompt:
         "Turn this portrait into a soft, lightly stylized cartoon illustration while keeping the person clearly recognizable (same face, hair, features). Clean friendly cartoon style, smooth shading, not too realistic, head and shoulders, simple plain background.",
       input_images: [cdnUrl],
       image_size: "1K",
-    });
+    }, undefined, photoPersonId);
     const id = start.json?.data?._id;
     if (!id) {
       const j = start.json || {};
@@ -175,9 +262,9 @@ export async function a2eCartoonStart(
 
 /** Poll a cartoon-ify task once. */
 export async function a2eCartoonPoll(
-  taskId: string
+  taskId: string, photoPersonId?: string
 ): Promise<{ done: true; url: string } | { pending: true } | { error: string }> {
-  const d = await a2e(`/api/v1/userNanoBanana/detail/${taskId}`, "GET");
+  const d = await a2e(`/api/v1/userNanoBanana/detail/${taskId}`, "GET", undefined, undefined, photoPersonId);
   const data = d.json?.data;
   const urls: string[] = data?.image_urls || [];
   if (urls.length > 0) return { done: true, url: urls[0] };
@@ -192,10 +279,12 @@ export async function a2eCartoonPoll(
 
 /** Start generating the ambient loop video from a person's photo/cartoon. */
 export async function a2eLoopVideoStart(
-  srcPhotoUrl: string
+  srcPhotoUrl: string, photoPersonId?: string
 ): Promise<{ taskId: string } | { error: string }> {
   try {
-    const cdnUrl = await a2eHostedImage(srcPhotoUrl);
+    if (photoPersonId !== undefined) requirePhotoProcessing(photoPersonId);
+    // Scoped callers supply only the CDN result of a2eUploadImageBytes.
+    const cdnUrl = photoPersonId !== undefined ? srcPhotoUrl : await a2eHostedImage(srcPhotoUrl);
     const start = await a2e("/api/v1/userImage2Video/start", "POST", {
       name: "dcp-loop",
       prompt:
@@ -206,7 +295,7 @@ export async function a2eLoopVideoStart(
       duration: "5",
       aspect_ratio: "9:16",
       resolution: "720p",
-    });
+    }, undefined, photoPersonId);
     const id = start.json?.data?._id;
     if (!id) {
       const j = start.json || {};
@@ -246,9 +335,9 @@ function extractVideoUrl(data: any): string | null {
  *  bare "timed out" (this is what let a silent failure go unnoticed before —
  *  the error banner just wasn't visible on screen when it happened). */
 export async function a2eLoopVideoPoll(
-  taskId: string
+  taskId: string, photoPersonId?: string
 ): Promise<{ done: true; url: string } | { pending: true; status?: string } | { error: string }> {
-  const d = await a2e(`/api/v1/userImage2Video/${taskId}`, "GET");
+  const d = await a2e(`/api/v1/userImage2Video/${taskId}`, "GET", undefined, undefined, photoPersonId);
   const data = d.json?.data;
   const url = extractVideoUrl(data);
   if (url) return { done: true, url };
@@ -256,23 +345,38 @@ export async function a2eLoopVideoPoll(
   return { pending: true, status: data?.current_status };
 }
 
-/** Upload an image (from any public URL) into A2E's storage; returns cdnUrl. */
+/** Legacy broad-media path only; individual photo approval never fetches a
+ * browser-supplied URL or forwards a private application/preview link. */
 export async function a2eUploadImage(srcUrl: string): Promise<string> {
   requireExternalProcessing();
-  const img = await fetch(srcUrl);
+  const img = await fetch(srcUrl, { redirect: "error", signal: AbortSignal.timeout(20_000) });
   if (!img.ok) throw new Error(`fetch source image failed: ${img.status}`);
-  const buf = Buffer.from(await img.arrayBuffer());
-  const ct = img.headers.get("content-type") || "image/jpeg";
-  const ext = ct.includes("png") ? "png" : ct.includes("webp") ? "webp" : "jpg";
-  const stamp = `${buf.length}-${ext}`;
+  return uploadImageBytes(Buffer.from(await img.arrayBuffer()), img.headers.get("content-type") || "image/jpeg");
+}
+
+/** Source bytes must come from the authenticated server-side owner lookup. */
+export async function a2eUploadImageBytes(buffer: Buffer, contentType: string, personId: string): Promise<string> {
+  requirePhotoProcessing(personId);
+  return uploadImageBytes(buffer, contentType, personId);
+}
+
+async function uploadImageBytes(buffer: Buffer, contentType: string, personId?: string): Promise<string> {
+  if (personId !== undefined) requirePhotoProcessing(personId); else requireExternalProcessing();
+  const ext = ({ "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" } as Record<string, string>)[contentType];
+  if (!ext || buffer.length === 0 || buffer.length > 4 * 1024 * 1024) throw new Error("Unsupported source image");
+  // Content hash avoids collisions between different students' equal-size files.
+  const stamp = createHash("sha256").update(buffer).digest("hex");
   const pres = await a2e("/api/v1/r2/upload-presigned-url", "POST", {
-    key: `dcp/${stamp}.${ext}`,
-    contentType: ct,
-    fileSize: buf.length,
-  });
+    key: `dcp/${stamp}.${ext}`, contentType, fileSize: buffer.length,
+  }, undefined, personId);
   const up = pres.json?.data;
-  if (!up?.uploadUrl) throw new Error("presign failed: " + JSON.stringify(pres.json).slice(0, 200));
-  const put = await fetch(up.uploadUrl, { method: "PUT", headers: { "Content-Type": ct }, body: buf });
-  if (!put.ok) throw new Error(`PUT upload failed: ${put.status}`);
-  return up.cdnUrl as string;
+  if (!pres.ok || typeof up?.uploadUrl !== "string" || typeof up?.cdnUrl !== "string") throw new Error("A2E image upload could not be prepared");
+  for (const value of [up.uploadUrl, up.cdnUrl]) {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password) throw new Error("Invalid A2E image upload location");
+  }
+  if (personId !== undefined) requirePhotoProcessing(personId); else requireExternalProcessing();
+  const response = await fetch(up.uploadUrl, { method: "PUT", redirect: "error", headers: { "Content-Type": contentType }, body: buffer as BodyInit, signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new Error(`A2E image upload failed (${response.status})`);
+  return up.cdnUrl;
 }
