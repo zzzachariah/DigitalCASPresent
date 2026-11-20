@@ -36,8 +36,8 @@ function readStatus(input: unknown): AdminMediaStatus {
   return unavailableStatus;
 }
 
-/** Text, one person's photo and speech approvals are independent. Older or
- * incomplete health payloads never broaden the approval to other people. */
+/** Photo and reviewed-speech readiness remain separate. Only validated scoped
+ * health can grant event-wide approval; the legacy a2e flag never grants it. */
 export function adminMediaStatus(health: unknown): AdminMediaHealth {
   if (!health || typeof health !== "object") return MEDIA_UNAVAILABLE;
   const root = health as Record<string, unknown>;
@@ -62,14 +62,16 @@ export function adminMediaStatus(health: unknown): AdminMediaHealth {
 }
 
 export function photoStatusForPerson(health: AdminMediaHealth, personId?: string): AdminMediaStatus {
+  if (personId && health.photoGlobal.ready) return health.photoGlobal;
   if (personId && health.photoApprovedIds.includes(personId)) return health.photos[personId] ?? unavailableStatus;
-  if (health.photoGlobal.status === "loading" || health.photoGlobal.status === "unavailable") return health.photoGlobal;
+  if (health.photoGlobal.status === "loading" || health.photoGlobal.status === "unavailable" || health.photoGlobal.status === "provider_missing" || health.photoGlobal.status === "key_missing") return health.photoGlobal;
   return { status: "privacy_disabled", ready: false, message: "这位同学的照片尚未单独获准发送给形象服务，卡通和视频生成已暂停。" };
 }
 
 export function speechStatusForPerson(health: AdminMediaHealth, personId?: string): AdminMediaStatus {
+  if (personId && health.speechGlobal.ready) return health.speechGlobal;
   if (personId && health.speechApprovedIds.includes(personId)) return health.speeches[personId] ?? unavailableStatus;
-  if (health.speechGlobal.status === "loading" || health.speechGlobal.status === "unavailable") return health.speechGlobal;
+  if (health.speechGlobal.status === "loading" || health.speechGlobal.status === "unavailable" || health.speechGlobal.status === "provider_missing" || health.speechGlobal.status === "key_missing") return health.speechGlobal;
   return { status: "privacy_disabled", ready: false, message: "这位同学的讲解尚未单独获准发送给配音服务；当前仅准备文字。" };
 }
 
@@ -89,6 +91,6 @@ export function preparationSummary(person: Person, failed: number, textOnly: boo
   if (failed > 0) return `${person.name}：有 ${failed} 项讲解未完成，请检查后重试`;
   const readiness = adminReadinessForPerson(person);
   const missing = readiness.items.filter((item) => !item.ready).map((item) => item.label);
-  if (missing.length) return `本次准备已完成：${person.name}；仍待准备：${missing.join("、")}`;
+  if (missing.length) return `本次处理已结束：${person.name}；仍待准备：${missing.join("、")}`;
   return textOnly ? `文字讲解已准备：${person.name}（本次未生成外部语音）` : `素材已就绪：${person.name}`;
 }

@@ -6,7 +6,7 @@ AI 依据讲稿自然作答，数字人开口讲解。
 
 同学可以**自己提交**照片和讲稿（`/submit`），老师在后台**审核通过**后页面上线；老师也可以直接在后台录入。
 
-> 隐私与 AI：组织者已接受 Packy 及上游文字 AI 处理，使用实测可用的 `claude-sonnet-5`。学生须同意新版 `/privacy`；旧记录在作者重新确认保存前不发送给 AI。D-ID 仍关闭；A2E 照片处理与讲解配音分别限定到另行明确批准的记录，两个授权互不替代。Packy 声明自身不保存正文、不训练；上游保留规则另行适用，不能承诺活动结束时删除供应商的所有副本。详见 [隐私与 AI 运行说明](docs/privacy-and-ai.md) 和 [资料清理流程](docs/retention.md)。
+> 隐私与 AI：组织者已接受 Packy 及上游文字 AI 处理，使用 `claude-sonnet-5`。学生须同意 `/privacy`；旧记录在作者重新确认保存前不发送给 AI。组织者已统一批准本活动所有现有及未来同学的 A2E 照片、形象及审核后有限讲解配音；不发送全文配音、不克隆本人声音，D-ID 仍关闭。Packy 声明自身不保存正文、不训练；上游保留规则另行适用，不能承诺活动结束时删除供应商的所有副本。详见 [隐私与 AI 运行说明](docs/privacy-and-ai.md) 和 [资料清理流程](docs/retention.md)。
 > 活动结束时间：2026-12-13 北京时间 00:00；停止访问并由每日任务尝试物理清理，必须核验清理结果。
 
 ---
@@ -73,12 +73,13 @@ npm run dev                     # http://localhost:3000
 | `NEXT_PUBLIC_BASE_URL` | 二维码 / 学生链接用的公开网址（本地 `http://localhost:3000`，线上填 Vercel 域名）。 |
 | `AI_API_KEY` | packyapi 的 API key。**留空 = 演示模式**。 |
 | `AI_BASE_URL` / `AI_MODEL` | 默认 `https://cf.api.fan/v1` 与 `claude-sonnet-5`。 |
-| `AI_PROCESSING_APPROVED` | 文字 AI 授权；默认关闭，开启后仍需学生新版同意。外部媒体由 `EXTERNAL_AI_PROCESSING_APPROVED` 单独控制。 |
+| `AI_PROCESSING_APPROVED` | 文字 AI 授权；默认关闭，开启后仍需学生新版同意。 |
 | `AI_API_PROTOCOL` | `auto`（默认）：Claude 使用 Anthropic Messages，其他模型使用 OpenAI Chat Completions；可显式设为 `anthropic` / `openai`。 |
 | `AI_MODEL_LIVE` | 可选但**建议设置**为一个更快的模型。现场实时回答（追问、未预生成的部分）用它；分段和预生成仍用 `AI_MODEL`。 |
 | `AVATAR_PROVIDER` | `mock`（默认）/ `a2e` / `did`。 |
 | `A2E_PHOTO_APPROVED_PERSON_IDS` | 另行获得照片处理授权的记录 ID，逗号分隔。仅允许指定记录的卡通与动态视频，不启用配音或其他人的照片处理。 |
 | `A2E_SPEECH_APPROVED_PERSON_IDS` | 单独获准配音的记录 ID，逗号分隔。仅将审核通过的有限讲解文字交给 A2E 合成普通语音，不发送整篇原稿，不克隆声音。 |
+| `A2E_PROCESSING_APPROVED` | 本活动统一 A2E 授权，包含现有及未来提交的同学。开启后无需逐人加入上述列表；仅允许绑定同学的照片/视频和审核后讲解配音，不开放 D-ID。 |
 | `A2E_API_KEY` | 选 `a2e` 时填。 |
 | `A2E_MODE` | `fast`（默认，秒回）或 `precise`（逐句口型渲染，慢）。 |
 | `A2E_TTS_ID_MALE` / `A2E_TTS_ID_FEMALE` / `A2E_TTS_ID` | 音色 id，默认为多语言男声 / 女声。 |
@@ -103,7 +104,7 @@ packyapi（PackyCode）是国内可直连的 OpenAI/Anthropic 兼容中转，支
 
 - 后台「生成卡通形象」：用本人照片生成轻卡通（还认得出是谁），用于访客端显示与说话。
 - 后台「生成动态视频」：从卡通（或照片）生成一段几秒的说话状态循环视频，只做一次。
-- 访客提问时：`/api/chat` 先生成完整回答并完成保密与内容审核，通过后才展示文字或提供朗读。仅单独获准配音的记录可把审核通过的讲解交给 A2E 合成语音。
+- 访客提问时：`/api/chat` 先生成完整回答并完成保密与内容审核，通过后才展示文字或提供朗读。活动统一授权或原有单独授权允许把审核通过的有限讲解交给 A2E 配音。
 - 后台「预生成讲解」提前生成讲解文字与追问建议，并保存至活动资料清理期限；启用外部语音还需另外批准。
 - `A2E_MODE=precise`：每个回答单独做口型渲染（几十秒），需要 Vercel Pro 的函数时长。
 

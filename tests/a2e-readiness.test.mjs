@@ -10,7 +10,7 @@ function load(file, mocks, env = {}) {
   const module = { exports: {} };
   vm.runInNewContext(code, {
     module, exports: module.exports, require: name => { if (name === 'node:crypto') return crypto; if (!(name in mocks)) throw new Error(`Unexpected import ${name}`); return mocks[name]; },
-    process: { env }, Response, Buffer, AbortSignal, URL, Date, Set, Map, Promise,
+    process: { env }, Response, Buffer, AbortSignal, AbortController, ReadableStream, TextEncoder, URL, Date, Set, Map, Promise,
     fetch: () => assert.fail('No real external requests are permitted in this test'),
     console: { error() {} },
   });
@@ -68,6 +68,30 @@ test('readiness distinguishes deliberate privacy blocking, provider selection, m
   assert.equal(s.a2e.a2eReadiness().status, 'privacy_disabled');
 });
 
+test('activity A2E approval includes future participants but still needs provider configuration', () => {
+  const s = setup();
+  for (const value of ['', 'false', '1', '*']) {
+    s.env.A2E_PROCESSING_APPROVED = value;
+    assert.equal(s.a2e.a2ePhotoReadiness('future-participant').ready, false);
+    assert.equal(s.a2e.a2eSpeechReadiness('future-participant').ready, false);
+  }
+  s.env.A2E_PROCESSING_APPROVED = 'true';
+  for (const id of [undefined, 'current-participant', 'future-participant']) {
+    assert.equal(s.a2e.a2ePhotoReadiness(id).ready, true);
+    assert.equal(s.a2e.a2eSpeechReadiness(id).ready, true);
+  }
+  assert.equal(s.a2e.a2eReadiness().ready, false);
+  assert.equal(s.policy.externalProcessingAllowed(), false);
+  for (const id of ['', '../bad', '*']) {
+    assert.equal(s.a2e.a2ePhotoReadiness(id).ready, false);
+    assert.equal(s.a2e.a2eSpeechReadiness(id).ready, false);
+  }
+  s.env.A2E_API_KEY = '';
+  assert.equal(s.a2e.a2eSpeechReadiness('future-participant').status, 'key_missing');
+  s.env.AVATAR_PROVIDER = 'did';
+  assert.equal(s.a2e.a2ePhotoReadiness('future-participant').status, 'provider_missing');
+});
+
 test('cartoon and loop POST/GET return exact disabled reason before reading any student data or polling', async () => {
   for (const [config, status, http] of conditions) {
     const s = setup(); Object.assign(s.env, config);
@@ -103,7 +127,7 @@ test('ready media configuration retains start/poll behavior using mocked synthet
 function preparationSetup() {
   const s = setup();
   const privacy = load('../src/lib/privacy.ts', {});
-  const safety = load('../src/lib/ai-safety.ts', {});
+  const safety = load('../src/lib/ai-safety.ts', { './ai-errors': load('../src/lib/ai-errors.ts', {}) });
   const sentences = load('../src/lib/sentences.ts', {});
   const answer = 'The exhibit connects a compass with checking observations.';
   let person = { id: 'synthetic', privacyConsent: { version: privacy.PRIVACY_VERSION, acceptedAt: 1 }, language: 'en', script: 'Synthetic source', sections: [{ id: 'part', title: 'Compass', content: 'A museum compass demonstrates how observation can help people make decisions. Its needle provides a shared point of reference that people can check for themselves.' }] };
@@ -111,6 +135,7 @@ function preparationSetup() {
   let replies = [answer, '{"safe":true,"grounded":true,"private":true,"relevant":true,"respectful":true}'];
   const route = load('../src/app/api/admin/people/[id]/pregenerate/route.ts', {
     '@/lib/processing-policy': s.policy, '@/lib/privacy': privacy, '@/lib/ai-safety': safety,
+    '@/lib/preparation-response': load('../src/lib/preparation-response.ts', {}),
     'next/server': next, '@/lib/auth': { isAdmin: () => s.state.admin },
     '@/lib/store': { ...s.store, getPerson: async () => { s.state.reads++; return structuredClone(person); }, updatePerson: async (_id, patch) => { person = { ...person, ...patch }; return structuredClone(person); } },
     '@/lib/ai': { chat: async () => { state.aiCalls++; return replies.shift(); } },

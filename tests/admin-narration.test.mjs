@@ -154,14 +154,73 @@ test('safe review diagnostics render only known phases, review outcomes and crit
   assert.doesNotMatch(text, /SECRET|https|__proto__|grounded/);
 });
 
-test('review timeout and malformed review output remain distinguishable without raw messages', async () => {
-  for (const [reviewReason, expected] of [['review_timeout', '内容审核超时'], ['review_format', '审核结果格式'], ['review_upstream_error', '审核服务暂不可用'], ['local_rejection', '本地内容检查']]) {
+test('review service failures lead with no verdict, never a rejected-content claim', async () => {
+  for (const [reviewReason, expected] of [['review_timeout', '审核服务超时，未获得审核结论'], ['review_format', '审核服务返回格式异常，未获得审核结论'], ['review_upstream_error', '审核服务暂时失败，未获得审核结论']]) {
     const p = source(1, { language: 'zh' });
     const result = await prepareNarrationVariants(p, { textOnly: false }, { request: async (body) => ({
-      ok: false, status: 502, data: { sections: p.sections, results: [{ ...body, status: 'failed', reason: 'answer_not_approved', phase: 'review', reviewReason }] },
+      ok: false, status: 502, data: { error: 'PRIVATE-UPSTREAM', sections: p.sections, results: [{ ...body, status: 'failed', reason: 'answer_not_approved', phase: 'review', reviewReason, rejectedCriteria: ['private'] }] },
     }) });
-    assert.ok(result.failures[0].reason.includes(expected));
+    assert.ok(result.failures[0].reason.startsWith(expected));
+    assert.doesNotMatch(result.failures[0].reason, /未通过|未批准|PRIVATE|保密要求/);
+    assert.equal(result.completed, 0);
   }
+});
+
+test('only explicit review rejections describe content checks as failed', async () => {
+  for (const reviewReason of ['local_rejection', 'model_rejection', undefined, 'unknown']) {
+    const p = source(1, { language: 'zh' });
+    const result = await prepareNarrationVariants(p, { textOnly: false }, { request: async (body) => ({
+      ok: true, status: 200, data: { sections: p.sections, results: [{ ...body, status: 'failed', reason: 'answer_not_approved', reviewReason }] },
+    }) });
+    assert.equal(result.completed, 0);
+    if (reviewReason?.endsWith('_rejection')) assert.match(result.failures[0].reason, /内容检查未通过/);
+    else { assert.match(result.failures[0].reason, /尚未获得有效的内容审核结论/); assert.doesNotMatch(result.failures[0].reason, /未通过|未批准/); }
+  }
+});
+
+test('three failed reviews retain every failed item and every saved English audio without retrying', async () => {
+  const p = source(3); const calls = []; const outcomes = [];
+  for (const section of p.sections) section.cachedAudio = { en: `/api/photo/synthetic.audio.${section.id}-en-existing` };
+  const original = structuredClone(p.sections);
+  const result = await prepareNarrationVariants(p, { textOnly: false }, { onResult: (item) => outcomes.push(item), request: async (body) => {
+    calls.push(body);
+    return { ok: true, status: 200, data: { sections: structuredClone(p.sections), results: [{
+      ...body, status: body.language === 'en' ? 'skipped' : 'failed', reason: body.language === 'en' ? 'healthy_audio' : 'answer_not_approved',
+      ...(body.language === 'zh' ? { reviewReason: 'review_upstream_error', phase: 'review' } : {}),
+    }] } };
+  } });
+  assert.equal(calls.length, 6); assert.equal(result.completed, 3); assert.equal(result.failures.length, 3);
+  assert.equal(outcomes.length, 6); assert.equal(outcomes.filter((item) => item.completed).length, 3);
+  assert.ok(result.failures.every((item) => item.reason.startsWith('审核服务暂时失败，未获得审核结论')));
+  assert.deepEqual(result.person.sections, original);
+});
+
+test('readiness counts all requested languages and identifies missing sections and languages', () => {
+  const p = source(4);
+  p.sections[0].cachedAnswers.zh = '';
+  for (const section of p.sections) section.cachedAudio = { en: '/api/photo/existing-english' };
+  const readiness = adminReadinessForPerson(p);
+  const text = readiness.items.find((item) => item.key === 'answers');
+  const audio = readiness.items.find((item) => item.key === 'audio');
+  assert.equal(text.label, '固定讲解 7/8'); assert.match(text.detail, /Synthetic object 0（中文）/);
+  assert.equal(audio.label, '固定语音 4/8'); assert.match(audio.detail, /另 1 项见下方各段状态/);
+  assert.equal(readiness.ready, false);
+});
+
+test('an interrupted request reads back saved records once, keeps all outcomes, and makes no paid retry', async () => {
+  const p = source(2); const saved = structuredClone(p); saved.sections[0].cachedAudio = { zh: '/api/photo/saved-before-disconnect' };
+  let requests = 0; let reads = 0; const outcomes = []; const updates = [];
+  const result = await prepareNarrationVariants(p, { textOnly: false }, {
+    request: async () => { requests++; throw new Error('PRIVATE-CONNECTION-DETAIL'); },
+    recover: async () => { reads++; return saved; },
+    onResult: (item) => outcomes.push(item), onUpdate: (person) => updates.push(person),
+  });
+  assert.equal(requests, 1); assert.equal(reads, 1); assert.equal(result.completed, 0);
+  assert.equal(result.failures.length, 4); assert.equal(outcomes.length, 4); assert.equal(updates.length, 1);
+  assert.equal(result.person.sections[0].cachedAudio.zh, '/api/photo/saved-before-disconnect');
+  assert.match(result.failures[0].reason, /已重新读取保存结果/);
+  assert.ok(outcomes.every((item) => !item.completed));
+  assert.doesNotMatch(JSON.stringify(result.failures), /PRIVATE/);
 });
 
 test('unknown diagnostics and raw top-level errors never appear in failure messages', async () => {

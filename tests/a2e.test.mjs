@@ -15,6 +15,7 @@ let moduleId = 0;
 async function client(overrides = {}) {
   const config = {
     EXTERNAL_AI_PROCESSING_APPROVED: 'true',
+    A2E_PROCESSING_APPROVED: 'false',
     A2E_BASE_URL: 'https://tts.example', A2E_API_KEY: 'test-only-fake-key',
     A2E_TTS_ID_MALE: 'test-male', A2E_TTS_ID_FEMALE: 'test-female', A2E_TTS_ID: 'test-neutral',
     ...overrides,
@@ -70,6 +71,23 @@ test('Bilingual chunks select their own locale while retaining the female voice'
     { country: 'zh', region: 'CN', tts_id: 'test-female' },
     { country: 'en', region: 'US', tts_id: 'test-female' },
   ]);
+});
+
+test('activity approval permits future person-bound TTS without opening arbitrary media operations', async t => {
+  const { ai, restore } = await client({ A2E_PROCESSING_APPROVED: 'true', EXTERNAL_AI_PROCESSING_APPROVED: 'false', AVATAR_PROVIDER: 'a2e', EVENT_ENDS_AT: '2999-01-01T00:00:00Z' });
+  t.after(restore); let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    calls++; assert.ok(url.endsWith('/api/v1/video/send_tts'));
+    assert.equal(JSON.parse(init.body).msg, 'Reviewed fictional explanation.');
+    return Response.json({ code: 0, data: 'https://audio.example/result.mp3' });
+  });
+  await ai.a2eTts('Reviewed fictional explanation.', 'female', undefined, 'future-participant');
+  await assert.rejects(ai.a2eTts('Reviewed fictional explanation.'), /disabled pending/);
+  await assert.rejects(ai.a2e('/api/v1/userNanoBanana/start', 'POST', {}, undefined, { speechPersonId: 'future-participant' }), /outside speech-only/);
+  await assert.rejects(ai.a2eTts('Reviewed fictional explanation.', 'female', undefined, '../bad'), /Invalid participant/);
+  process.env.EVENT_ENDS_AT = '2000-01-01T00:00:00Z';
+  await assert.rejects(ai.a2eTts('Reviewed fictional explanation.', 'female', undefined, 'future-participant'), /closed/);
+  assert.equal(calls, 1);
 });
 
 test('TTS preserves cancellation and configured neutral voice', async t => {

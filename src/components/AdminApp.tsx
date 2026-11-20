@@ -4,8 +4,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import type { Person } from "@/lib/types";
-import { adminReadinessForPerson as readinessForPerson, prepareNarrationVariants, type NarrationRun } from "@/lib/admin-narration";
-import { adminMediaStatus, MEDIA_LOADING, MEDIA_UNAVAILABLE, photoStatusForPerson, speechStatusForPerson, preparationSteps, preparationSummary, type AdminMediaHealth } from "@/lib/admin-media";
+import { adminReadinessForPerson as readinessForPerson, narrationLanguages, narrationLanguageLabels, prepareNarrationVariants, type NarrationRun } from "@/lib/admin-narration";
+import { adminMediaStatus, MEDIA_LOADING, MEDIA_UNAVAILABLE, photoStatusForPerson, speechStatusForPerson, preparationSummary, type AdminMediaHealth } from "@/lib/admin-media";
+import { preparationEntries, narrationEntryKey, interruptPreparation, type PreparationEntry } from "@/lib/admin-preparation";
+import { readNarrationResponse } from "@/lib/admin-narration-stream";
 import { readJson } from "@/lib/http";
 import { generateAsset } from "@/lib/editor-api";
 import { pad2, timeAgo } from "@/lib/format";
@@ -66,6 +68,7 @@ export default function AdminApp() {
   // Long jobs per person ("卡通…", "视频…", "讲解 2/3…") so several students
   // can be processed at once while the list stays usable.
   const [jobs, setJobs] = useState<Record<string, string>>({});
+  const [preparations, setPreparations] = useState<Record<string, { entries: PreparationEntry[]; summary: string }>>({});
   const [toast, setToast] = useState("");
   function notify(msg: string) {
     setToast(msg);
@@ -213,61 +216,92 @@ export default function AdminApp() {
 
   function failureDetails(run: NarrationRun): string {
     if (!run.failures.length) return "";
-    const labels = { zh: "中文", en: "English", bilingual: "中英双语" };
-    return `已确认完成 ${run.completed}/${run.total} 项讲解。` + run.failures.slice(0, 3)
-      .map((item) => `${item.title}（${labels[item.language]}）：${item.reason}`).join("；") + (run.failures.length > 3 ? `；另有 ${run.failures.length - 3} 项未完成` : "");
+    return `已确认完成 ${run.completed}/${run.total} 项讲解；全部 ${run.failures.length} 项未完成原因已列在准备进度中。`;
   }
 
-  async function runNarration(p: Person, textOnly: boolean, audioOnly = false) {
+  function updatePreparation(id: string, key: string, patch: Partial<PreparationEntry>) {
+    setPreparations((runs) => {
+      const run = runs[id];
+      return run ? { ...runs, [id]: { ...run, entries: run.entries.map((entry) => entry.key === key ? { ...entry, ...patch } : entry) } } : runs;
+    });
+  }
+
+  function finishPreparation(id: string, summary: string, interrupted = false) {
+    setPreparations((runs) => {
+      const run = runs[id];
+      return run ? { ...runs, [id]: { entries: interrupted ? interruptPreparation(run.entries) : run.entries, summary } } : runs;
+    });
+  }
+
+  async function runNarration(p: Person, textOnly: boolean, audioOnly = false, offset = 0, total = p.sections.length * narrationLanguages(p.language).length) {
+    const speech = speechStatusForPerson(media, p.id);
     return prepareNarrationVariants(p, { textOnly, audioOnly }, {
       request: async (body) => {
         const res = await fetch(`/api/admin/people/${p.id}/pregenerate`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+          method: "POST", headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" }, body: JSON.stringify(body),
         });
-        return { ok: res.ok, status: res.status, data: await readJson(res) };
+        return readNarrationResponse(res, body, (detail) => updatePreparation(p.id, narrationEntryKey(body.sectionId, body.language), { detail }));
       },
-      onProgress: ({ current, total, variant, retry }) => setJob(p.id,
-        `${current}/${total} · ${variant.title} · ${variant.language === "zh" ? "中文" : variant.language === "en" ? "English" : "双语"}${retry ? " · 补做" : ""}`),
+      recover: async () => {
+        const res = await fetch(`/api/admin/people/${p.id}`, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
+        if (!res.ok) return null;
+        const data = await res.json();
+        return data.person?.id === p.id && Array.isArray(data.person.sections) ? data.person : null;
+      },
+      onProgress: ({ current, variant, retry }) => {
+        const activity = textOnly ? "正在生成或核验文字讲解" : "正在检查讲解、内容审核及配音";
+        setJob(p.id, `第 ${offset + current}/${total} 步 · ${variant.title} · ${narrationLanguageLabels[variant.language]}${retry ? " · 补做" : ""}`);
+        updatePreparation(p.id, narrationEntryKey(variant.sectionId, variant.language), { status: "running", detail: activity });
+      },
       onUpdate: (updated) => setPeople((list) => list.map((x) => x.id === p.id ? { ...x, sections: updated.sections } : x)),
+      onResult: (outcome) => {
+        const saved = `文字${outcome.textReady ? "已保存" : "待准备"}；语音${outcome.audioReady ? "已保存" : "待准备"}`;
+        const detail = outcome.completed
+          ? textOnly ? `${saved}。${speech.ready ? "本次仅准备文字。" : speech.message}` : `${saved}，已核验完成。`
+          : `${outcome.reason}。${saved}。`;
+        updatePreparation(p.id, narrationEntryKey(outcome.sectionId, outcome.language), { status: outcome.completed ? "complete" : "failed", detail });
+      },
     });
   }
 
   /** Prepare permitted assets; unavailable media never blocks text preparation. */
   async function prepareAll(p: Person) {
     setError("");
-    const steps = preparationSteps(p, photoStatusForPerson(media, p.id).ready);
     let current = p;
     const textOnly = !speechStatusForPerson(media, p.id).ready;
-    let failed = 0;
-    let narrationDetails = "";
-    let mediaError = "";
+    const entries = preparationEntries(p, { includeMedia: true, photo: photoStatusForPerson(media, p.id), textOnly });
+    setPreparations((runs) => ({ ...runs, [p.id]: { entries, summary: "" } }));
+    const mediaEntries = entries.filter((entry) => entry.kind !== "narration");
+    setJob(p.id, "正在依次准备…");
     try {
-      for (let i = 0; i < steps.length; i++) {
-        const step = steps[i];
-        const prefix = `${i + 1}/${steps.length} · `;
-        if (step === "cartoon" || step === "loop-video") {
-          if (mediaError) continue;
-          setJob(p.id, prefix + (step === "cartoon" ? "卡通生成中…" : "动态视频生成中…"));
-          try {
-            const url = await generateAsset(p.id, step);
-            current = { ...current, [step === "cartoon" ? "cartoonUrl" : "loopVideoUrl"]: url };
-            setPeople((list) => list.map((x) => (x.id === p.id ? current : x)));
-          } catch (e) {
-            // Approval/configuration can change after health was loaded.
-            mediaError = e instanceof Error ? e.message : "媒体生成失败";
-          }
-        } else {
-          const run = await runNarration(current, textOnly);
-          current = run.person;
-          failed = run.failures.length;
-          narrationDetails = failureDetails(run);
+      for (let i = 0; i < mediaEntries.length; i++) {
+        const entry = mediaEntries[i];
+        if (entry.status === "blocked" || entry.kind === "narration") continue;
+        if (entry.kind === "loop-video" && !current.cartoonUrl) {
+          updatePreparation(p.id, entry.key, { status: "blocked", detail: "卡通形象尚未准备完成，视频待处理；继续准备讲解。" });
+          continue;
+        }
+        setJob(p.id, `第 ${i + 1}/${entries.length} 步 · ${entry.label}生成中…`);
+        updatePreparation(p.id, entry.key, { status: "running", detail: "正在生成并保存，请稍候" });
+        try {
+          const url = await generateAsset(p.id, entry.kind);
+          current = { ...current, [entry.kind === "cartoon" ? "cartoonUrl" : "loopVideoUrl"]: url };
+          setPeople((list) => list.map((x) => (x.id === p.id ? { ...x, [entry.kind === "cartoon" ? "cartoonUrl" : "loopVideoUrl"]: url } : x)));
+          updatePreparation(p.id, entry.key, { status: "complete", detail: "已生成并保存" });
+        } catch {
+          updatePreparation(p.id, entry.key, { status: "failed", detail: "形象生成未完成，请核对服务状态后重试；继续准备讲解。" });
         }
       }
-      notify(preparationSummary(current, failed, textOnly));
-      const issues = [mediaError ? `形象准备未完成（${mediaError}）；已继续处理讲解。` : "", narrationDetails].filter(Boolean);
-      if (issues.length) setError(`${p.name}：${issues.join(" ")}`);
-    } catch (e) {
-      setError(`${p.name}：${e instanceof Error ? e.message : "准备素材失败"}`);
+      const run = await runNarration(current, textOnly, false, mediaEntries.length, entries.length);
+      const summary = preparationSummary(run.person, run.failures.length, textOnly);
+      finishPreparation(p.id, summary);
+      notify(summary);
+      const details = failureDetails(run);
+      if (details) setError(`${p.name}：${details}`);
+    } catch {
+      const message = "准备过程未完成，请查看逐项进度并刷新核对已保存结果。";
+      finishPreparation(p.id, message, true);
+      setError(`${p.name}：${message}`);
     } finally {
       setJob(p.id, null);
     }
@@ -282,13 +316,18 @@ export default function AdminApp() {
     const textOnly = mode === "text" || !speech.ready;
     setPregenId(p.id);
     setError("");
+    setPreparations((runs) => ({ ...runs, [p.id]: { entries: preparationEntries(p, { includeMedia: false, photo: photoStatusForPerson(media, p.id), textOnly, audioOnly }), summary: "" } }));
     try {
       const run = await runNarration(p, textOnly, audioOnly);
-      notify(preparationSummary(run.person, run.failures.length, textOnly));
+      const summary = preparationSummary(run.person, run.failures.length, textOnly);
+      finishPreparation(p.id, summary);
+      notify(summary);
       const details = failureDetails(run);
       if (details) setError(`${p.name}：${details}`);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "预生成失败");
+    } catch {
+      const message = "准备过程未完成，请查看逐项进度并刷新核对已保存结果。";
+      finishPreparation(p.id, message, true);
+      setError(message);
     } finally {
       setPregenId(null);
       setJob(p.id, null);
@@ -487,7 +526,7 @@ export default function AdminApp() {
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="font-medium text-ink-2">{item.label}</span>
-                  {!item.ready && <span className="ml-1 text-ink-3">· {item.detail}</span>}
+                  <span className="ml-1 text-ink-3">· {item.detail}</span>
                 </span>
               </li>
             ))}
@@ -497,10 +536,10 @@ export default function AdminApp() {
 
       {/* Assets: what the digital human needs before the event */}
       <div className="rounded-lg border border-line bg-surface-2/60 p-3">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="eyebrow">素材 · Assets</span>
           {jobs[selected.id] && (
-            <span className="flex items-center gap-1.5 text-[12px] text-accent"><Spinner /> {jobs[selected.id]}</span>
+            <span role="status" className="flex min-w-0 items-center gap-1.5 text-[12px] text-accent"><Spinner /> {jobs[selected.id]}</span>
           )}
         </div>
         <button
@@ -514,6 +553,7 @@ export default function AdminApp() {
         </button>
         {!selectedPhoto.ready && <p role="status" className="mt-2 text-[12px] leading-relaxed text-ink-3">{selectedPhoto.message}</p>}
         {!selectedSpeech.ready && <p className="mt-2 text-[12px] leading-relaxed text-ink-3">{selectedSpeech.message}</p>}
+        <a href="/admin/service-check" className="mt-2 inline-block text-[12px] text-accent underline underline-offset-2">检查讲解服务</a>
         <div className="mt-2 grid grid-cols-3 gap-2">
           <button type="button" className="btn-secondary px-2 text-[12px]" onClick={() => generate(selected, "cartoon")} disabled={!selectedPhoto.ready || !!jobs[selected.id] || pregenId === selected.id || !selected.photoUrl} title={!selectedPhoto.ready ? selectedPhoto.message : undefined}>
             {selected.cartoonUrl ? "重做卡通" : "生成卡通"}
@@ -543,6 +583,26 @@ export default function AdminApp() {
           </div>
         )}
         {!selected.photoUrl && <p className="mt-2 text-[12px] text-ink-3">这位同学还没有照片，先补照片再生成卡通和视频。</p>}
+        {preparations[selected.id] && (
+          <section aria-label="逐项准备进度" className="mt-4 border-t border-line pt-3">
+            <p className="text-[12px] font-medium text-ink-2">准备进度 · {preparations[selected.id].entries.filter((entry) => entry.status === "complete").length}/{preparations[selected.id].entries.length} 步完成</p>
+            <p className="mt-1 text-[11px] leading-relaxed text-ink-3">按顺序逐项处理。已完成的结果会保留；未获准的项目仍显示为待处理。</p>
+            <ol className="mt-3 space-y-3">
+              {preparations[selected.id].entries.map((entry, index) => (
+                <li key={entry.key} className="flex items-start gap-2 text-[12px]">
+                  <span className="w-4 shrink-0 pt-0.5 font-mono text-[10px] text-ink-3">{index + 1}</span>
+                  <div className="min-w-0 flex-1">
+                    <p className="break-words text-ink-2">{entry.label}</p>
+                    <p className={`mt-0.5 leading-relaxed ${entry.status === "complete" ? "text-success" : entry.status === "failed" ? "text-danger" : entry.status === "running" ? "text-accent" : "text-ink-3"}`}>
+                      {entry.status === "complete" ? "已完成" : entry.status === "failed" ? "未完成" : entry.status === "blocked" ? "待处理" : entry.status === "running" ? "处理中" : "等待"} · {entry.detail}
+                    </p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+            {preparations[selected.id].summary && <p role="status" className="mt-3 border-t border-line pt-2 text-[12px] leading-relaxed text-ink-2">{preparations[selected.id].summary}</p>}
+          </section>
+        )}
       </div>
 
       <button type="button" className="btn-danger w-full" onClick={() => remove(selected)} disabled={busyId === selected.id}>
@@ -560,10 +620,18 @@ export default function AdminApp() {
               <div className="flex items-center gap-2.5">
                 <span className="w-5 font-mono text-[11px] text-ink-4">{pad2(i)}</span>
                 <span className="truncate text-ink-2">{s.title}</span>
-                {s.cachedAnswers && Object.keys(s.cachedAnswers).length > 0 && (
-                  <span className="dot bg-success" title={s.cachedAudio && Object.keys(s.cachedAudio).length ? "已保存讲解与音频，可展开试听" : "已预生成（无语音）"} />
-                )}
               </div>
+              <ul className="ml-7 mt-1 space-y-1">
+                {narrationLanguages(selected.language).map((lang) => {
+                  const textReady = !!s.cachedAnswers?.[lang]?.trim();
+                  const audioReady = !!s.cachedAudio?.[lang];
+                  return <li key={lang} className="flex flex-wrap gap-x-2 text-[11px]">
+                    <span className="text-ink-2">{narrationLanguageLabels[lang]}</span>
+                    <span className={textReady ? "text-success" : "text-warning-ink"}>文字{textReady ? "已保存" : "待准备"}</span>
+                    <span className={textReady && audioReady ? "text-success" : "text-warning-ink"}>语音{audioReady ? textReady ? "已保存" : "已保存，文字待准备" : "待准备"}</span>
+                  </li>;
+                })}
+              </ul>
               {Object.values(s.cachedAudio ?? {}).some((url) => url?.startsWith("/api/photo/")) && (
                 <details className="ml-7 mt-1 rounded-lg bg-surface-2 px-3 py-2">
                   <summary className="cursor-pointer text-[12px] text-accent">试听已保存配音</summary>

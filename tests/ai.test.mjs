@@ -7,9 +7,11 @@ import ts from 'typescript';
 const source = await readFile(new URL('../src/lib/ai.ts', import.meta.url), 'utf8');
 const policy = ts.transpileModule(await readFile(new URL('../src/lib/processing-policy.ts', import.meta.url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
 const policyUrl = `data:text/javascript;base64,${Buffer.from(policy).toString('base64')}`;
+const errors = ts.transpileModule(await readFile(new URL('../src/lib/ai-errors.ts', import.meta.url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
+const errorsUrl = `data:text/javascript;base64,${Buffer.from(errors).toString('base64')}`;
 const compiled = ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
-}).outputText.replace('"./processing-policy"', JSON.stringify(policyUrl));
+}).outputText.replace('"./processing-policy"', JSON.stringify(policyUrl)).replaceAll('"./ai-errors"', JSON.stringify(errorsUrl));
 const beforeApproval = process.env.EXTERNAL_AI_PROCESSING_APPROVED;
 const beforeAiApproval = process.env.AI_PROCESSING_APPROVED;
 process.env.EXTERNAL_AI_PROCESSING_APPROVED = 'false';
@@ -251,4 +253,54 @@ test('Provider error fields cannot echo confidential manuscript text into logs',
   const ai = await client();
   t.mock.method(globalThis, 'fetch', async () => json({ error: { code: 'private-manuscript', message: 'CONFIDENTIAL source text' } }, 500));
   await assert.rejects(ai.chat(opts), { message: 'AI request failed (500).' });
+});
+
+test('typed request failures retain only safe status and code, including 200 error envelopes', async t => {
+  const ai = await client();
+  const secret = 'PRIVATE-MANUSCRIPT-CANARY token=secret';
+  const cases = [
+    [json({ error: { type: 'rate_limit_error', message: secret } }, 429), { kind: 'http', httpStatus: 429, code: 'rate_limit_error' }],
+    [json({ error: { code: 'overloaded_error', message: secret } }), { kind: 'http', httpStatus: 200, code: 'overloaded_error' }],
+    [json({ error: { code: secret, type: secret, message: secret } }, 503), { kind: 'http', httpStatus: 503 }],
+    [new Response(secret), { kind: 'invalid_response', httpStatus: 200 }],
+    [json({ content: [] }), { kind: 'empty_response', httpStatus: 200 }],
+    [json({ content: [{ type: 'thinking', thinking: secret }], stop_reason: 'max_tokens' }), { kind: 'truncated_response', httpStatus: 200 }],
+  ];
+  let current;
+  t.mock.method(globalThis, 'fetch', async () => current);
+  for (const [response, diagnostic] of cases) {
+    current = response;
+    await assert.rejects(ai.chat(opts), error => {
+      assert.ok(error instanceof ai.AiRequestError);
+      assert.deepEqual(ai.safeAiFailure(error), diagnostic);
+      assert.ok(!JSON.stringify(error).includes(secret)); assert.ok(!error.message.includes(secret));
+      return true;
+    });
+  }
+});
+
+test('OpenAI length termination is a typed truncation even when no content was emitted', async t => {
+  const ai = await client({ AI_MODEL: 'gpt-test' });
+  t.mock.method(globalThis, 'fetch', async () => json({ choices: [{ message: {}, finish_reason: 'length' }] }));
+  await assert.rejects(ai.chat(opts), error => {
+    assert.deepEqual(ai.safeAiFailure(error), { kind: 'truncated_response', httpStatus: 200 }); return true;
+  });
+});
+
+test('network, timeout, cancellation and unrelated local errors stay distinct without echoing their messages', async t => {
+  const ai = await client(); const secret = 'PRIVATE-MANUSCRIPT-CANARY';
+  let raised = new TypeError(secret); let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => { calls++; throw raised; });
+  await assert.rejects(ai.chat(opts), error => { assert.deepEqual(ai.safeAiFailure(error), { kind: 'network' }); assert.ok(!error.message.includes(secret)); return true; });
+  raised = new Error(secret);
+  await assert.rejects(ai.chat(opts), error => { assert.deepEqual(ai.safeAiFailure(error), { kind: 'unknown' }); assert.ok(!error.message.includes(secret)); return true; });
+  for (const [reason, kind] of [[new DOMException(secret, 'TimeoutError'), 'timeout'], [new Error(secret), 'aborted']]) {
+    await assert.rejects(ai.chat({ ...opts, signal: AbortSignal.abort(reason) }), error => {
+      assert.deepEqual(ai.safeAiFailure(error), { kind }); assert.ok(!error.message.includes(secret)); return true;
+    });
+  }
+  assert.equal(calls, 2); // No retry or request after cancellation.
+  assert.deepEqual(ai.safeAiFailure({ name: 'AiRequestError', diagnostic: { kind: 'http', httpStatus: 503, code: secret }, message: secret }), { kind: 'unknown' });
+  const forged = new ai.AiRequestError({ kind: secret, httpStatus: 999, code: secret });
+  assert.deepEqual(ai.safeAiFailure(forged), { kind: 'unknown' }); assert.ok(!forged.message.includes(secret));
 });

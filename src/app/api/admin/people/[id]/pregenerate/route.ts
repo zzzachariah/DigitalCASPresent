@@ -8,6 +8,7 @@ import { chat } from "@/lib/ai";
 import { explainSectionPrompt, systemPrompt } from "@/lib/prompts";
 import { a2eSpeechReadiness, a2eTts } from "@/lib/a2e";
 import { splitAnswer } from "@/lib/sentences";
+import { preparationResponse, wantsPreparationStream } from "@/lib/preparation-response";
 import { AudioReadError, AudioPreparationError, beginPreparation, createPermanentNarration, prepareExistingNarration } from "@/lib/prepared-narration";
 import type { AudioAsset, PreparationPhase, PreparationResult } from "@/lib/prepared-narration";
 import type { AnswerLang, Person, Section } from "@/lib/types";
@@ -59,9 +60,12 @@ async function readAudio(url: string, signal: AbortSignal): Promise<AudioAsset> 
   return { buffer: Buffer.concat(chunks), contentType: response.headers.get("content-type") || "" };
 }
 
-function narrationDependencies(person: Person, section: Section, reviewedAnswer: string, signal: AbortSignal) {
+function narrationDependencies(person: Person, section: Section, reviewedAnswer: string, signal: AbortSignal, onPhase?: (phase: PreparationPhase) => void) {
   return {
-    getPerson, updatePerson, saveAudio,
+    signal, onPhase,
+    getPerson: async (id: string) => { signal.throwIfAborted(); return getPerson(id); },
+    updatePerson: async (id: string, patch: Partial<Person>) => { signal.throwIfAborted(); return updatePerson(id, patch); },
+    saveAudio: async (id: string, key: string, buffer: Buffer, ext: string) => { signal.throwIfAborted(); return saveAudio(id, key, buffer, ext); },
     readAudio: (url: string) => readAudio(url, signal),
     tts: async (text: string, gender: Person["gender"]) => {
       signal.throwIfAborted();
@@ -81,27 +85,35 @@ function narrationDependencies(person: Person, section: Section, reviewedAnswer:
 
 /** Only an explicit regenerateText=true replaces a populated text cache.
  *  Commit a new text/audio pair together, after the audio is permanent. */
-async function generateVariant(person: Person, section: Section, index: number, language: AnswerLang, signal: AbortSignal, includeAudio = true): Promise<PreparationResult> {
+async function generateVariant(person: Person, section: Section, index: number, language: AnswerLang, signal: AbortSignal, includeAudio = true, onPhase?: (phase: PreparationPhase) => void): Promise<PreparationResult> {
   const start = Date.now();
   let phase: PreparationPhase = "generation";
+  const progress = (next: PreparationPhase) => {
+    signal.throwIfAborted();
+    phase = next;
+    onPhase?.(phase);
+    signal.throwIfAborted();
+  };
   const result = (status: PreparationResult["status"], reason: string, extra: Partial<PreparationResult> = {}): PreparationResult =>
     ({ sectionId: section.id, language, status, reason, elapsedMs: Date.now() - start, ...(status === "failed" ? { phase } : {}), ...extra });
   try {
     let prompt = explainSectionPrompt(section, index, person.sections.length);
     if (language !== "bilingual") prompt += `\n\nSpeak in ${language === "zh" ? "Simplified Chinese (简体中文)" : "English"}.`;
+    progress("generation");
     const { answer, suggestions } = splitAnswer(await chat({
       system: systemPrompt({ ...person, script: section.content, sections: [section] }), messages: [{ role: "user", content: prompt }], temperature: 0.6, maxTokens: 600, signal,
     }));
     if (!answer.trim()) return result("failed", "empty_answer");
-    phase = "review";
+    progress("review");
     let diagnostic: SafetyReviewDiagnostic | undefined;
     const approved = await reviewExhibitionAnswer({ source: section.content, question: `Explain this selected exhibition section briefly: ${section.title}`, answer, suggestions }, (opts) => chat({ ...opts, signal }), (value) => { diagnostic = value; });
     signal.throwIfAborted();
-    if (!approved) return result("failed", "answer_not_approved", { reviewReason: diagnostic?.reason, rejectedCriteria: diagnostic?.rejectedCriteria });
+    if (!approved) return result("failed", "answer_not_approved", { reviewReason: diagnostic?.reason, rejectedCriteria: diagnostic?.rejectedCriteria,
+      upstreamKind: diagnostic?.upstreamKind, httpStatus: diagnostic?.httpStatus, upstreamCode: diagnostic?.upstreamCode });
     phase = "tts";
     const audio = includeAudio && a2eSpeechReadiness(person.id).ready
-      ? await createPermanentNarration(person, section.id, language, answer, narrationDependencies(person, section, answer, signal)) : undefined;
-    phase = "source_recheck";
+      ? await createPermanentNarration(person, section.id, language, answer, narrationDependencies(person, section, answer, signal, onPhase)) : undefined;
+    progress("source_recheck");
     const fresh = await getPerson(person.id);
     const current = fresh?.sections.find((s) => s.id === section.id);
     if (!fresh || !current) return result("failed", "person_or_section_missing");
@@ -115,9 +127,9 @@ async function generateVariant(person: Person, section: Section, index: number, 
       ...s, cachedAnswers: { ...s.cachedAnswers, [language]: answer },
       cachedSuggestions: { ...s.cachedSuggestions, [language]: suggestions }, cachedAudio,
     } : s);
-    phase = "persist";
+    progress("persist");
     if (!(await updatePerson(person.id, { sections }))) return result("failed", "person_missing");
-    phase = "persist_verification";
+    progress("persist_verification");
     const verified = (await getPerson(person.id))?.sections.find((s) => s.id === section.id);
     if (verified?.cachedAnswers?.[language] !== answer || verified.cachedAudio?.[language] !== audio?.url) {
       return result("failed", "persist_unverified");
@@ -171,55 +183,58 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   }
   const release = beginPreparation(person.id);
   if (!release) return NextResponse.json({ error: "This person's preparation is already running; wait for it to finish." }, { status: 409 });
-  try {
-    const started = Date.now();
-    // Leave time for persistence/readback before the platform's 120 s limit.
-    // Generation, review, speech and audio download share this same deadline.
-    const deadline = AbortSignal.timeout(100_000);
-    const signal = req.signal ? AbortSignal.any([req.signal, deadline]) : deadline;
-    const results: PreparationResult[] = [];
-    // Deliberately sequential: parallel read/merge/write of one Person loses
-    // other sections' freshly prepared caches. Prefer one variant per call.
-    for (const { section, index } of targets) {
-      for (const language of languages) {
-        if (signal.aborted || Date.now() - started > 25_000) {
-          results.push({ sectionId: section.id, language, status: "skipped", reason: "request_time_budget", elapsedMs: 0 });
-          continue;
-        }
-        if (body.audioOnly || (body.regenerateText !== true && section.cachedAnswers?.[language]?.trim())) {
-          const reviewStarted = Date.now();
-          let diagnostic: SafetyReviewDiagnostic | undefined;
-          const approved = await reviewExhibitionAnswer({
-            source: section.content,
-            question: `Explain this selected exhibition section briefly: ${section.title}`,
-            answer: section.cachedAnswers?.[language] || "",
-            suggestions: section.cachedSuggestions?.[language] || [],
-          }, (opts) => chat({ ...opts, signal: AbortSignal.any([signal, AbortSignal.timeout(25_000)]) }), (value) => { diagnostic = value; });
-          if (!approved) {
-            results.push({ sectionId: section.id, language, status: "failed", phase: "review", reason: signal.aborted ? "request_time_budget" : "answer_not_approved", reviewReason: diagnostic?.reason, rejectedCriteria: diagnostic?.rejectedCriteria, elapsedMs: Date.now() - reviewStarted });
+  return preparationResponse({
+    stream: wantsPreparationStream(req.headers?.get("accept") ?? null),
+    requestSignal: req.signal,
+    release,
+    async run(signal, report) {
+      const started = Date.now();
+      const results: PreparationResult[] = [];
+      // Deliberately sequential: parallel read/merge/write of one Person loses
+      // other sections' freshly prepared caches. Prefer one variant per call.
+      for (const { section, index } of targets) {
+        for (const language of languages) {
+          if (signal.aborted || Date.now() - started > 25_000) {
+            results.push({ sectionId: section.id, language, status: "skipped", reason: "request_time_budget", elapsedMs: 0 });
             continue;
           }
-          results.push(!body.textOnly && a2eSpeechReadiness(person.id).ready
-            ? await prepareExistingNarration(person.id, section.id, language, narrationDependencies(person, section, section.cachedAnswers?.[language] || "", signal))
-            : { sectionId: section.id, language, status: "skipped", reason: "text_already_cached", elapsedMs: 0 });
-        } else {
-          results.push(await generateVariant(person, section, index, language, signal, !body.textOnly));
+          if (body.audioOnly || (body.regenerateText !== true && section.cachedAnswers?.[language]?.trim())) {
+            const reviewStarted = Date.now();
+            report({ sectionId: section.id, language, phase: "review" });
+            let diagnostic: SafetyReviewDiagnostic | undefined;
+            const approved = await reviewExhibitionAnswer({
+              source: section.content,
+              question: `Explain this selected exhibition section briefly: ${section.title}`,
+              answer: section.cachedAnswers?.[language] || "",
+              suggestions: section.cachedSuggestions?.[language] || [],
+            }, (opts) => chat({ ...opts, signal: AbortSignal.any([signal, AbortSignal.timeout(25_000)]) }), (value) => { diagnostic = value; });
+            if (!approved) {
+              results.push({ sectionId: section.id, language, status: "failed", phase: "review", reason: signal.aborted ? "request_time_budget" : "answer_not_approved", reviewReason: diagnostic?.reason, rejectedCriteria: diagnostic?.rejectedCriteria,
+                upstreamKind: diagnostic?.upstreamKind, httpStatus: diagnostic?.httpStatus, upstreamCode: diagnostic?.upstreamCode, elapsedMs: Date.now() - reviewStarted });
+              continue;
+            }
+            results.push(!body.textOnly && a2eSpeechReadiness(person.id).ready
+              ? await prepareExistingNarration(person.id, section.id, language, narrationDependencies(person, section, section.cachedAnswers?.[language] || "", signal, (phase) => report({ sectionId: section.id, language, phase })))
+              : { sectionId: section.id, language, status: "skipped", reason: "text_already_cached", elapsedMs: 0 });
+          } else {
+            results.push(await generateVariant(person, section, index, language, signal, !body.textOnly, (phase) => report({ sectionId: section.id, language, phase })));
+          }
         }
       }
-    }
-    let final: Person | null;
-    try { final = await getPerson(person.id); }
-    catch {
-      // Work may already be saved. Report the failed readback without
-      // automatically repeating generation or exposing storage diagnostics.
-      return NextResponse.json({ error: "read_failed", code: "read_failed", results }, { status: 503 });
-    }
-    const failed = results.filter((r) => r.status === "failed").length;
-    return NextResponse.json({
-      mode: body.textOnly ? "text-only" : body.audioOnly ? "audio-only" : body.regenerateText ? "regenerate-text" : "reuse-existing-text",
-      sections: final?.sections ?? [], results,
-      prepared: results.filter((r) => r.status === "prepared").length,
-      skipped: results.filter((r) => r.status === "skipped").length, failed,
-    }, { status: failed === results.length && failed > 0 ? 502 : 200 });
-  } finally { release(); }
+      let final: Person | null;
+      try { final = await getPerson(person.id); }
+      catch {
+        // Work may already be saved. Report the failed readback without
+        // automatically repeating generation or exposing storage diagnostics.
+        return { status: 503, data: { error: "read_failed", code: "read_failed", results } };
+      }
+      const failed = results.filter((r) => r.status === "failed").length;
+      return { status: failed === results.length && failed > 0 ? 502 : 200, data: {
+        mode: body.textOnly ? "text-only" : body.audioOnly ? "audio-only" : body.regenerateText ? "regenerate-text" : "reuse-existing-text",
+        sections: final?.sections ?? [], results,
+        prepared: results.filter((r) => r.status === "prepared").length,
+        skipped: results.filter((r) => r.status === "skipped").length, failed,
+      } };
+    },
+  });
 }

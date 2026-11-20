@@ -7,7 +7,7 @@ import ts from 'typescript';
 function load(file, mocks, env = {}, fetch = () => assert.fail('Unexpected network request')) {
   const code = ts.transpileModule(fs.readFileSync(new URL(file, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const module = { exports: {} };
-  vm.runInNewContext(code, { module, exports: module.exports, require: name => { if (!(name in mocks)) throw new Error(`Unexpected import ${name}`); return mocks[name]; }, process: { env }, Response, Buffer, AbortSignal, URL, Date, Set, Promise, fetch, console: { error() {} } });
+  vm.runInNewContext(code, { module, exports: module.exports, require: name => { if (!(name in mocks)) throw new Error(`Unexpected import ${name}`); return mocks[name]; }, process: { env }, Response, Buffer, AbortSignal, AbortController, ReadableStream, TextEncoder, URL, Date, Set, Promise, fetch, console: { error() {} } });
   return module.exports;
 }
 
@@ -53,7 +53,8 @@ test('admin auto-sectioning stays local because anonymous drafts have no partici
 
 test('pre-generation requires the participant current receipt even when AI is enabled', async () => {
   const privacy = load('../src/lib/privacy.ts', {});
-  const safety = load('../src/lib/ai-safety.ts', {});
+  const safety = load('../src/lib/ai-safety.ts', { './ai-errors': load('../src/lib/ai-errors.ts', {}) });
+  const preparationResponse = load('../src/lib/preparation-response.ts', {});
   const answer = 'The exhibit connects a compass with checking observations.';
   const person = { id: 'synthetic', script: 'A museum compass demonstrates how observation can help people make decisions. Its needle provides a shared point of reference that people can check for themselves.', language: 'en', sections: [{ id: 'part', title: 'Compass', content: 'A museum compass demonstrates how observation can help people make decisions. Its needle provides a shared point of reference that people can check for themselves.', cachedAnswers: { en: answer } }] };
   let calls = 0;
@@ -64,7 +65,7 @@ test('pre-generation requires the participant current receipt even when AI is en
     '@/lib/auth': { isAdmin: () => true },
     '@/lib/store': { getPerson: async () => person, storageWritable: () => ({ ok: true }) },
     '@/lib/ai': { chat: async () => { calls++; return '{"safe":true,"grounded":true,"private":true,"relevant":true,"respectful":true}'; } },
-    '@/lib/prompts': {}, '@/lib/a2e': { a2eSpeechReadiness: () => ({ ready: false }) }, '@/lib/sentences': {},
+    '@/lib/prompts': {}, '@/lib/a2e': { a2eSpeechReadiness: () => ({ ready: false }) }, '@/lib/sentences': {}, '@/lib/preparation-response': preparationResponse,
     '@/lib/prepared-narration': { beginPreparation: () => () => {} },
   });
   const request = () => ({ json: async () => ({ sectionId: 'part', language: 'en' }) });

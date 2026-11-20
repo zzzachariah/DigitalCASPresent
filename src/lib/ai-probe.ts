@@ -1,5 +1,7 @@
 import { eventRetentionStatus } from "./event-retention";
 import { reviewExhibitionAnswer } from "./ai-safety";
+import type { SafetyReviewDiagnostic } from "./ai-safety";
+import { AiRequestError, aiHttpError, aiTransportError, safeAiFailure, type AiFailureDiagnostic } from "./ai-errors";
 
 /** These diagnostic requests contain only the fixed fictional material below.
  * They deliberately do not use chat(), student storage, or the manuscript
@@ -20,29 +22,36 @@ const QUESTION = "According to the fictional exhibition, which direction does th
 const EXPECTED_ANSWER = "The toy compass points north.";
 const MAX_RESPONSE_BYTES = 32_768;
 
-type ProbeStatus = "ok" | "http_error" | "invalid_response" | "network_error" | "timeout" | "aborted" | "event_closed" | "skipped";
+type ProbeStatus = "ok" | "http_error" | "invalid_response" | "network_error" | "timeout" | "aborted" | "unknown_error" | "event_closed" | "skipped";
 export interface ProbeStep {
   status: ProbeStatus;
   elapsedMs: number;
   pass: boolean;
   httpStatus?: number;
-  /** Bounded, credential-redacted response to fixed fictional content only. */
+  maxTokens?: number;
+  failure?: AiFailureDiagnostic;
+  reviewReason?: SafetyReviewDiagnostic["reason"];
+  /** Only the exact expected answer or canonical five-boolean review. */
   response?: string;
 }
 
-function cleanSyntheticResponse(text: string, key: string): string {
-  return text.split(key).join("[redacted]")
-    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
-    .replace(/\bsk-[A-Za-z0-9_-]+/g, "[redacted]")
-    .replace(/https?:\/\/\S+/gi, "[URL omitted]")
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, "")
-    .slice(0, 1200);
+function fixedSyntheticResponse(text: string): string | undefined {
+  if (text === EXPECTED_ANSWER) return EXPECTED_ANSWER;
+  try {
+    const data: unknown = JSON.parse(text);
+    const fields = ["safe", "grounded", "private", "relevant", "respectful"];
+    if (data && typeof data === "object" && !Array.isArray(data) && Object.keys(data).length === fields.length &&
+        fields.every((field) => typeof (data as Record<string, unknown>)[field] === "boolean")) {
+      return JSON.stringify(Object.fromEntries(fields.map((field) => [field, (data as Record<string, unknown>)[field]])));
+    }
+  } catch { /* never expose free-form model output */ }
+  return undefined;
 }
 
-async function responseText(response: Response): Promise<string> {
+async function responseData(response: Response): Promise<unknown> {
   if (!response.body || Number(response.headers.get("content-length")) > MAX_RESPONSE_BYTES) {
     await response.body?.cancel().catch(() => {});
-    throw new Error("Invalid diagnostic response");
+    throw new AiRequestError({ kind: "invalid_response", httpStatus: response.status });
   }
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = []; let size = 0;
@@ -50,21 +59,29 @@ async function responseText(response: Response): Promise<string> {
     while (true) {
       const next = await reader.read(); if (next.done) break;
       size += next.value.length;
-      if (size > MAX_RESPONSE_BYTES) throw new Error("Invalid diagnostic response");
+      if (size > MAX_RESPONSE_BYTES) throw new AiRequestError({ kind: "invalid_response", httpStatus: response.status });
       chunks.push(next.value);
     }
   } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
-  const data: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  if (!data || typeof data !== "object" || Array.isArray(data) || "error" in data) throw new Error("Invalid diagnostic response");
+  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+  catch { throw new AiRequestError({ kind: "invalid_response", httpStatus: response.status }); }
+}
+
+function responseText(data: unknown, httpStatus: number): string {
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new AiRequestError({ kind: "invalid_response", httpStatus });
+  if ("error" in data) throw aiHttpError(httpStatus, data);
+  // Thinking-only truncation must be distinguished from an empty response.
+  if ("stop_reason" in data && data.stop_reason === "max_tokens") throw new AiRequestError({ kind: "truncated_response", httpStatus });
   const content = (data as { content?: unknown }).content;
-  if (!Array.isArray(content)) throw new Error("Invalid diagnostic response");
+  if (!Array.isArray(content)) throw new AiRequestError({ kind: "invalid_response", httpStatus });
   const text = content.filter((block) => block && typeof block === "object" && block.type === "text" && typeof block.text === "string")
     .map((block) => block.text).join("").trim();
-  if (!text || text.length > 8000) throw new Error("Invalid diagnostic response");
+  if (!text) throw new AiRequestError({ kind: "empty_response", httpStatus });
+  if (text.length > 8000) throw new AiRequestError({ kind: "invalid_response", httpStatus });
   return text;
 }
 
-async function probeRequest(model: ProbeModel, system: string, messages: { role: "user"; content: string }[], signal: AbortSignal): Promise<{ step: ProbeStep; raw?: string }> {
+async function probeRequest(model: ProbeModel, system: string, messages: { role: "user"; content: string }[], signal: AbortSignal, maxTokens = 200): Promise<{ step: ProbeStep; raw?: string }> {
   const start = Date.now();
   if (signal.aborted) return { step: { status: "aborted", elapsedMs: 0, pass: false } };
   const state = eventRetentionStatus();
@@ -75,25 +92,26 @@ async function probeRequest(model: ProbeModel, system: string, messages: { role:
   const timeout = AbortSignal.timeout(Math.max(1, Math.min(timeoutMs, Date.parse(state.endsAt) - Date.now())));
   const requestSignal = AbortSignal.any([signal, timeout]);
   let httpStatus: number | undefined;
-  let received = false;
   try {
     const response = await fetch(ENDPOINT, {
       method: "POST", redirect: "error", cache: "no-store", signal: requestSignal,
       headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({ model, system, messages, max_tokens: 200, temperature: 0, stream: false }),
+      body: JSON.stringify({ model, system, messages, max_tokens: maxTokens, temperature: 0, stream: false }),
     });
-    received = true; httpStatus = response.status;
+    httpStatus = response.status;
     if (!response.ok) {
-      await response.body?.cancel().catch(() => {});
-      return { step: { status: "http_error", httpStatus, elapsedMs: Date.now() - start, pass: false } };
+      const data = await responseData(response).catch(() => undefined);
+      throw aiHttpError(httpStatus, data);
     }
-    const raw = await responseText(response);
+    const raw = responseText(await responseData(response), httpStatus);
     requestSignal.throwIfAborted();
     if (eventRetentionStatus().state !== "open") return { step: { status: "event_closed", elapsedMs: Date.now() - start, pass: false } };
-    return { raw, step: { status: "ok", httpStatus, elapsedMs: Date.now() - start, pass: false, response: cleanSyntheticResponse(raw, key) } };
-  } catch {
-    const status: ProbeStatus = eventRetentionStatus().state !== "open" ? "event_closed" : signal.aborted ? "aborted" : timeout.aborted ? "timeout" : received ? "invalid_response" : "network_error";
-    return { step: { status, httpStatus, elapsedMs: Date.now() - start, pass: false } };
+    return { raw, step: { status: "ok", httpStatus, maxTokens, elapsedMs: Date.now() - start, pass: false, response: fixedSyntheticResponse(raw) } };
+  } catch (error) {
+    const failure = safeAiFailure(aiTransportError(error, requestSignal));
+    const status: ProbeStatus = eventRetentionStatus().state !== "open" ? "event_closed" : failure.kind === "aborted" ? "aborted" : failure.kind === "timeout" ? "timeout" :
+      failure.kind === "http" ? "http_error" : failure.kind === "network" ? "network_error" : failure.kind === "unknown" ? "unknown_error" : "invalid_response";
+    return { step: { status, httpStatus, maxTokens, failure, elapsedMs: Date.now() - start, pass: false } };
   }
 }
 
@@ -109,11 +127,11 @@ export async function runAiProbe(model: ProbeModel, signal: AbortSignal) {
   let review: ProbeStep = { status: "skipped", elapsedMs: 0, pass: false };
   if (generation.step.status === "ok" && !signal.aborted && eventRetentionStatus().state === "open") {
     const approved = await reviewExhibitionAnswer({ source: SOURCE, question: QUESTION, answer: EXPECTED_ANSWER, suggestions: [] }, async (options) => {
-      const result = await probeRequest(model, options.system, options.messages, signal);
+      const result = await probeRequest(model, options.system, options.messages, signal, options.maxTokens);
       review = result.step;
-      if (result.raw === undefined) throw new Error("Diagnostic review unavailable");
+      if (result.raw === undefined) throw new AiRequestError(result.step.failure || { kind: "unknown" });
       return result.raw;
-    });
+    }, (diagnostic) => { review.reviewReason = diagnostic.reason; });
     review.pass = approved;
   }
   return { model, syntheticOnly: true, pass: generation.step.pass && review.pass, elapsedMs: Date.now() - start, generation: generation.step, review };
