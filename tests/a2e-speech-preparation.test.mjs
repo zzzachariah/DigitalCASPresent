@@ -308,3 +308,21 @@ test('streamed repair reports a revision phase without releasing candidate text 
   assert.ok(events.slice(0, -1).every(event => !JSON.stringify(event).includes(repairedAnswer)));
   assert.equal(events.at(-1).data.results[0].revisionAttempted, true);
 });
+
+test('cached and newly prepared narration carry the selected language through to A2E unchanged', async () => {
+  for (const cached of [true, false]) for (const [language, text, country, region] of [
+    ['en', 'The exhibit 山河 connects observations with their context.', 'en', 'US'],
+    ['zh', 'Compass 这个展品把观察与背景联系起来。', 'zh', 'CN'],
+    ['bilingual', 'This exhibit connects observation with context. 中文：这个展品联系观察与背景。', 'zh', 'CN'],
+  ]) {
+    const s = setup({ cached }); s.state.person.language = language;
+    if (cached) s.state.person.sections[0].cachedAnswers = { [language]: text };
+    else s.state.generate = () => text;
+    const response = await s.run({ language, ...(cached ? { audioOnly: true } : {}) });
+    assert.equal(response.status, 200, `${language}/${cached}`);
+    assert.equal(s.state.provider.length, 1);
+    assert.equal(s.state.provider[0].msg, text);
+    assert.equal(s.state.provider[0].country, country); assert.equal(s.state.provider[0].region, region);
+    assert.equal(s.state.person.sections[0].cachedAnswers[language], text);
+  }
+});
