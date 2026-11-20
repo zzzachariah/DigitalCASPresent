@@ -41,6 +41,7 @@ export interface PreparationResult {
   upstreamCode?: AiFailureDiagnostic["code"];
   phase?: PreparationPhase;
   reviewReason?: SafetyReviewDiagnostic["reason"];
+  formatIssue?: SafetyReviewDiagnostic["formatIssue"];
   rejectedCriteria?: SafetyReviewDiagnostic["rejectedCriteria"];
 }
 

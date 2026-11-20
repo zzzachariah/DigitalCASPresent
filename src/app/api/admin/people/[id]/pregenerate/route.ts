@@ -109,7 +109,7 @@ async function generateVariant(person: Person, section: Section, index: number, 
     const approved = await reviewExhibitionAnswer({ source: section.content, question: `Explain this selected exhibition section briefly: ${section.title}`, answer, suggestions }, (opts) => chat({ ...opts, signal }), (value) => { diagnostic = value; });
     signal.throwIfAborted();
     if (!approved) return result("failed", "answer_not_approved", { reviewReason: diagnostic?.reason, rejectedCriteria: diagnostic?.rejectedCriteria,
-      upstreamKind: diagnostic?.upstreamKind, httpStatus: diagnostic?.httpStatus, upstreamCode: diagnostic?.upstreamCode });
+      upstreamKind: diagnostic?.upstreamKind, httpStatus: diagnostic?.httpStatus, upstreamCode: diagnostic?.upstreamCode, formatIssue: diagnostic?.formatIssue });
     phase = "tts";
     const audio = includeAudio && a2eSpeechReadiness(person.id).ready
       ? await createPermanentNarration(person, section.id, language, answer, narrationDependencies(person, section, answer, signal, onPhase)) : undefined;
@@ -210,7 +210,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
             }, (opts) => chat({ ...opts, signal: AbortSignal.any([signal, AbortSignal.timeout(25_000)]) }), (value) => { diagnostic = value; });
             if (!approved) {
               results.push({ sectionId: section.id, language, status: "failed", phase: "review", reason: signal.aborted ? "request_time_budget" : "answer_not_approved", reviewReason: diagnostic?.reason, rejectedCriteria: diagnostic?.rejectedCriteria,
-                upstreamKind: diagnostic?.upstreamKind, httpStatus: diagnostic?.httpStatus, upstreamCode: diagnostic?.upstreamCode, elapsedMs: Date.now() - reviewStarted });
+              upstreamKind: diagnostic?.upstreamKind, httpStatus: diagnostic?.httpStatus, upstreamCode: diagnostic?.upstreamCode, formatIssue: diagnostic?.formatIssue, elapsedMs: Date.now() - reviewStarted });
               continue;
             }
             results.push(!body.textOnly && a2eSpeechReadiness(person.id).ready

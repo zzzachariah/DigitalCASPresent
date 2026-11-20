@@ -9,9 +9,11 @@ const policy = ts.transpileModule(await readFile(new URL('../src/lib/processing-
 const policyUrl = `data:text/javascript;base64,${Buffer.from(policy).toString('base64')}`;
 const errors = ts.transpileModule(await readFile(new URL('../src/lib/ai-errors.ts', import.meta.url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
 const errorsUrl = `data:text/javascript;base64,${Buffer.from(errors).toString('base64')}`;
+const reviewSource = ts.transpileModule(await readFile(new URL('../src/lib/review-output.ts', import.meta.url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText.replace('"./ai-errors"', JSON.stringify(errorsUrl));
+const reviewUrl = `data:text/javascript;base64,${Buffer.from(reviewSource).toString('base64')}`;
 const compiled = ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
-}).outputText.replace('"./processing-policy"', JSON.stringify(policyUrl)).replaceAll('"./ai-errors"', JSON.stringify(errorsUrl));
+}).outputText.replace('"./processing-policy"', JSON.stringify(policyUrl)).replaceAll('"./ai-errors"', JSON.stringify(errorsUrl)).replace('"./review-output"', JSON.stringify(reviewUrl));
 const beforeApproval = process.env.EXTERNAL_AI_PROCESSING_APPROVED;
 const beforeAiApproval = process.env.AI_PROCESSING_APPROVED;
 process.env.EXTERNAL_AI_PROCESSING_APPROVED = 'false';
@@ -303,4 +305,59 @@ test('network, timeout, cancellation and unrelated local errors stay distinct wi
   assert.deepEqual(ai.safeAiFailure({ name: 'AiRequestError', diagnostic: { kind: 'http', httpStatus: 503, code: secret }, message: secret }), { kind: 'unknown' });
   const forged = new ai.AiRequestError({ kind: secret, httpStatus: 999, code: secret });
   assert.deepEqual(ai.safeAiFailure(forged), { kind: 'unknown' }); assert.ok(!forged.message.includes(secret));
+});
+
+test('native structured review sends only the fixed five-boolean schema using output_config.format', async t => {
+  const ai = await client(); let calls = 0;
+  const decision = { safe: true, grounded: true, private: true, relevant: true, respectful: true };
+  t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    calls++; const body = JSON.parse(init.body);
+    assert.deepEqual(body.output_config, { format: { type: 'json_schema', schema: {
+      type: 'object', properties: Object.fromEntries(Object.keys(decision).map(key => [key, { type: 'boolean' }])),
+      required: Object.keys(decision), additionalProperties: false,
+    } } });
+    assert.equal(body.tools, undefined); assert.equal(body.output_format, undefined);
+    return json({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(decision) }] });
+  });
+  assert.equal(await ai.chat({ ...opts, reviewOutput: 'json_schema' }), JSON.stringify(decision));
+  assert.equal(calls, 1);
+});
+
+test('tool review requires exactly one named five-boolean tool input and never accepts text as a decision', async t => {
+  const ai = await client();
+  const decision = { safe: true, grounded: true, private: false, relevant: true, respectful: true };
+  const tool = { type: 'tool_use', name: 'submit_safety_review', input: decision };
+  let current = { stop_reason: 'tool_use', content: [tool] }; let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    calls++; const body = JSON.parse(init.body);
+    assert.deepEqual(body.tool_choice, { type: 'tool', name: 'submit_safety_review', disable_parallel_tool_use: true });
+    assert.equal(body.tools.length, 1); assert.equal(body.tools[0].name, 'submit_safety_review');
+    assert.equal(body.tools[0].input_schema.additionalProperties, false); assert.equal(body.output_config, undefined);
+    return json(current);
+  });
+  assert.deepEqual(JSON.parse(await ai.chat({ ...opts, reviewOutput: 'tool' })), decision); // false stays false.
+  for (const content of [
+    [{ type: 'text', text: JSON.stringify(decision) }],
+    [{ ...tool, name: 'different_tool' }], [tool, tool],
+    [{ ...tool, input: { ...decision, secret: fakeKey } }],
+    [{ ...tool, input: { ...decision, safe: 'true' } }],
+  ]) {
+    current = { stop_reason: 'tool_use', content };
+    await assert.rejects(ai.chat({ ...opts, reviewOutput: 'tool' }), error => {
+      assert.deepEqual(ai.safeAiFailure(error), { kind: 'invalid_response', httpStatus: 200 });
+      assert.ok(!error.message.includes(fakeKey)); return true;
+    });
+  }
+  assert.equal(calls, 6);
+});
+
+test('unsupported structured requests fail closed without silently falling back or making another call', async t => {
+  const ai = await client(); let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => { calls++; return json({ error: { type: 'invalid_request_error', message: fakeKey } }, 400); });
+  await assert.rejects(ai.chat({ ...opts, reviewOutput: 'json_schema' }), error => ai.safeAiFailure(error).httpStatus === 400);
+  assert.equal(calls, 1);
+  const openai = await client({ AI_MODEL: 'gpt-test' });
+  await assert.rejects(openai.chat({ ...opts, reviewOutput: 'json_schema' }), /Anthropic Messages/);
+  await assert.rejects(collect(ai.chatStream({ ...opts, reviewOutput: 'tool' })), /non-streaming/);
+  assert.equal(calls, 1);
 });

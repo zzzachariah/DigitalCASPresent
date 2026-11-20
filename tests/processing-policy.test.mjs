@@ -53,7 +53,8 @@ test('admin auto-sectioning stays local because anonymous drafts have no partici
 
 test('pre-generation requires the participant current receipt even when AI is enabled', async () => {
   const privacy = load('../src/lib/privacy.ts', {});
-  const safety = load('../src/lib/ai-safety.ts', { './ai-errors': load('../src/lib/ai-errors.ts', {}) });
+  const errors = load('../src/lib/ai-errors.ts', {});
+  const safety = load('../src/lib/ai-safety.ts', { './ai-errors': errors, './review-output': load('../src/lib/review-output.ts', { './ai-errors': errors }) });
   const preparationResponse = load('../src/lib/preparation-response.ts', {});
   const answer = 'The exhibit connects a compass with checking observations.';
   const person = { id: 'synthetic', script: 'A museum compass demonstrates how observation can help people make decisions. Its needle provides a shared point of reference that people can check for themselves.', language: 'en', sections: [{ id: 'part', title: 'Compass', content: 'A museum compass demonstrates how observation can help people make decisions. Its needle provides a shared point of reference that people can check for themselves.', cachedAnswers: { en: answer } }] };

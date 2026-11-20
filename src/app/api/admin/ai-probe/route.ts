@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isAdmin, safeEqual } from "@/lib/auth";
 import { eventRetentionStatus } from "@/lib/event-retention";
-import { isProbeModel, runAiProbe } from "@/lib/ai-probe";
+import { isProbeModel, isReviewOutputMode, runAiProbe } from "@/lib/ai-probe";
 import { rateLimit } from "@/lib/ratelimit";
 
 export const runtime = "nodejs";
@@ -24,8 +24,10 @@ export async function POST(req: NextRequest) {
   const raw = await req.text().catch(() => "");
   let body: unknown;
   try { body = raw.length <= 256 ? JSON.parse(raw) : null; } catch { body = null; }
-  if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 || !("model" in body) || !isProbeModel(body.model)) {
-    return NextResponse.json({ error: "Provide only one allowed model" }, { status: 400, headers: HEADERS });
+  if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).some((key) => !["model", "language", "reviewMode"].includes(key)) || !("model" in body) || !isProbeModel(body.model) ||
+      ("language" in body && body.language !== "en" && body.language !== "zh") ||
+      ("reviewMode" in body && !isReviewOutputMode(body.reviewMode))) {
+    return NextResponse.json({ error: "Provide only an allowed model, language and review mode" }, { status: 400, headers: HEADERS });
   }
   if (!process.env.AI_API_KEY?.trim()) return NextResponse.json({ error: "AI key is not configured" }, { status: 503, headers: HEADERS });
   // Per-instance spend brake, not an account-wide guaranteed quota.
@@ -33,7 +35,10 @@ export async function POST(req: NextRequest) {
   if (!limit.ok) return NextResponse.json({ error: "Diagnostic limit reached", retryAfter: limit.retryAfterSec }, { status: 429, headers: { ...HEADERS, "Retry-After": String(limit.retryAfterSec) } });
   try {
     const signal = bearer ? AbortSignal.any([req.signal, AbortSignal.timeout(Math.max(1, expires - Date.now()))]) : req.signal;
-    const result = await runAiProbe(body.model, signal);
+    const result = await runAiProbe(body.model, signal, {
+      language: "language" in body ? body.language as "en" | "zh" : undefined,
+      reviewMode: "reviewMode" in body && isReviewOutputMode(body.reviewMode) ? body.reviewMode : undefined,
+    });
     if (bearer && Date.now() >= expires) return NextResponse.json({ error: "Diagnostic authorization expired" }, { status: 401, headers: HEADERS });
     if (eventRetentionStatus().state !== "open") return NextResponse.json({ error: "Event has ended" }, { status: 409, headers: HEADERS });
     return NextResponse.json(result, { headers: HEADERS });

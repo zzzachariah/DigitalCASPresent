@@ -127,7 +127,8 @@ test('ready media configuration retains start/poll behavior using mocked synthet
 function preparationSetup() {
   const s = setup();
   const privacy = load('../src/lib/privacy.ts', {});
-  const safety = load('../src/lib/ai-safety.ts', { './ai-errors': load('../src/lib/ai-errors.ts', {}) });
+  const errors = load('../src/lib/ai-errors.ts', {});
+  const safety = load('../src/lib/ai-safety.ts', { './ai-errors': errors, './review-output': load('../src/lib/review-output.ts', { './ai-errors': errors }) });
   const sentences = load('../src/lib/sentences.ts', {});
   const answer = 'The exhibit connects a compass with checking observations.';
   let person = { id: 'synthetic', privacyConsent: { version: privacy.PRIVACY_VERSION, acceptedAt: 1 }, language: 'en', script: 'Synthetic source', sections: [{ id: 'part', title: 'Compass', content: 'A museum compass demonstrates how observation can help people make decisions. Its needle provides a shared point of reference that people can check for themselves.' }] };

@@ -19,8 +19,9 @@ function setup() {
   const state = { event: 'open', admin: true, blocked: false, calls: [], responses: [json(expected), json(yes)] };
   const retention = { eventRetentionStatus: () => ({ state: state.event, endsAt: '2999-01-01T00:00:00.000Z' }) };
   const errors = load('../src/lib/ai-errors.ts', {}, env);
-  const safety = load('../src/lib/ai-safety.ts', { './ai-errors': errors }, env);
-  const probe = load('../src/lib/ai-probe.ts', { './event-retention': retention, './ai-safety': safety, './ai-errors': errors }, env, async (url, init) => {
+  const reviewOutput = load('../src/lib/review-output.ts', { './ai-errors': errors }, env);
+  const safety = load('../src/lib/ai-safety.ts', { './ai-errors': errors, './review-output': reviewOutput }, env);
+  const probe = load('../src/lib/ai-probe.ts', { './event-retention': retention, './ai-safety': safety, './ai-errors': errors, './review-output': reviewOutput }, env, async (url, init) => {
     state.calls.push({ url, init, body: JSON.parse(init.body) });
     const result = state.responses.shift();
     if (typeof result === 'function') return result(init);
@@ -197,4 +198,38 @@ test('thinking-only truncation in the probe review is reported before empty cont
   assert.equal(result.review.reviewReason, 'review_format');
   assert.deepEqual(result.review.failure, { kind: 'truncated_response', httpStatus: 200 });
   assert.equal(result.review.response, undefined); assert.ok(!JSON.stringify(result).includes(fakeKey));
+});
+
+test('Chinese synthetic fixture tests the identical fixed review schema without any manuscript input', async () => {
+  const s = setup(); s.state.responses = [json('玩具指南针指向北方。'), json(yes)];
+  const result = await (await s.route.POST(request({ model: 'claude-sonnet-5', language: 'zh', reviewMode: 'json_schema' }))).json();
+  assert.equal(result.pass, true); assert.equal(result.language, 'zh'); assert.equal(result.reviewMode, 'json_schema'); assert.equal(result.configuredReviewMode, 'json_schema');
+  assert.equal(s.state.calls[0].body.output_config, undefined);
+  const review = s.state.calls[1].body;
+  assert.equal(review.output_config.format.type, 'json_schema'); assert.equal(review.output_config.format.schema.additionalProperties, false);
+  assert.ok(review.messages[0].content.includes('虚构')); assert.ok(review.messages[0].content.includes('玩具指南针指向北方。'));
+  assert.equal(result.generation.response, '玩具指南针指向北方。');
+});
+
+test('probe modes are explicit enums and false tool decisions are never retried into approval', async () => {
+  const s = setup(); s.env.AI_REVIEW_FORMAT = 'tool';
+  s.state.responses = [json(expected), Response.json({ stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'submit_safety_review', input: { ...JSON.parse(yes), grounded: false } }] })];
+  const result = await (await s.route.POST(request())).json();
+  assert.equal(result.pass, false); assert.equal(result.reviewMode, 'tool'); assert.equal(result.review.reviewReason, 'model_rejection');
+  assert.equal(s.state.calls.length, 2); assert.equal(s.state.calls[1].body.tool_choice.type, 'tool');
+  const invalid = setup();
+  for (const extra of [{ language: 'fr' }, { reviewMode: 'automatic' }, { reviewMode: {} }, { schema: {} }, { language: 'zh', prompt: 'PRIVATE-CANARY' }]) {
+    assert.equal((await invalid.route.POST(request({ model: 'claude-sonnet-5', ...extra }))).status, 400);
+  }
+  assert.equal(invalid.state.calls.length, 0);
+});
+
+test('formatIssue is one fixed category and does not expose malformed review content', async () => {
+  for (const [raw, formatIssue] of [['```json\n' + yes + '\n```', 'fenced_json'], ['PRIVATE-CANARY', 'invalid_json'], ['{}', 'wrong_fields'], [yes.replace('true', '"true"'), 'wrong_values']]) {
+    const s = setup(); s.state.responses = [json(expected), json(raw)];
+    const result = await (await s.route.POST(request({ model: 'claude-sonnet-5', reviewMode: 'text' }))).json();
+    assert.equal(result.review.formatIssue, formatIssue); assert.equal(result.review.pass, false);
+    assert.equal(result.review.response, undefined); assert.ok(!JSON.stringify(result).includes('PRIVATE-CANARY'));
+    assert.equal(s.state.calls[1].body.output_config, undefined); assert.equal(s.state.calls[1].body.tools, undefined);
+  }
 });
