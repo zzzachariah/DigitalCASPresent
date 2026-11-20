@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import type { Person } from "@/lib/types";
 import { readinessForPerson } from "@/lib/readiness";
+import { adminMediaStatus, MEDIA_LOADING, MEDIA_UNAVAILABLE, photoStatusForPerson, preparationSteps, preparationSummary, type AdminMediaHealth } from "@/lib/admin-media";
 import { readJson } from "@/lib/http";
 import { generateAsset } from "@/lib/editor-api";
 import { pad2, timeAgo } from "@/lib/format";
@@ -53,6 +54,8 @@ export default function AdminApp() {
   const router = useRouter();
   const [people, setPeople] = useState<Person[]>([]);
   const [loading, setLoading] = useState(true);
+  const [media, setMedia] = useState<AdminMediaHealth>(MEDIA_LOADING);
+  const healthRequest = useRef(0);
   const [error, setError] = useState("");
   const [view, setView] = useState<View>({ kind: "list" });
   const [qr, setQr] = useState<Qr>(null);
@@ -75,7 +78,22 @@ export default function AdminApp() {
   // Detail renders once: as a static column on wide screens, else as a sheet.
   const wide = useMediaQuery("(min-width: 1280px)");
 
+  async function loadHealth() {
+    const requestId = ++healthRequest.current;
+    setMedia(MEDIA_LOADING);
+    try {
+      const res = await fetch("/api/admin/health", { cache: "no-store", signal: AbortSignal.timeout(12_000) });
+      if (!res.ok) throw new Error("Health unavailable");
+      const data = await readJson(res);
+      if (healthRequest.current === requestId) setMedia(adminMediaStatus(data));
+    } catch {
+      if (healthRequest.current === requestId) setMedia(MEDIA_UNAVAILABLE);
+    }
+  }
+
   async function load() {
+    // Health failure must not hide existing student records or media previews.
+    void loadHealth();
     setLoading(true);
     setError("");
     try {
@@ -175,6 +193,11 @@ export default function AdminApp() {
 
   /** Cartoon / loop video straight from the detail panel. */
   async function generate(p: Person, kind: "cartoon" | "loop-video") {
+    const photo = photoStatusForPerson(media, p.id);
+    if (!photo.ready) {
+      setError(photo.message);
+      return;
+    }
     setJob(p.id, kind === "cartoon" ? "卡通生成中，约 30 秒…" : "动态视频生成中，约 1 分钟…");
     setError("");
     try {
@@ -188,39 +211,47 @@ export default function AdminApp() {
     }
   }
 
-  /** Everything a student needs before the event, in order: cartoon → loop
-   *  video → pre-generated explanations with audio. Skips what exists. */
+  /** Prepare permitted assets; unavailable media never blocks text preparation. */
   async function prepareAll(p: Person) {
     setError("");
-    const steps: string[] = [];
-    if (!p.cartoonUrl) steps.push("cartoon");
-    if (!p.loopVideoUrl) steps.push("loop-video");
-    steps.push("pregenerate");
+    const steps = preparationSteps(p, photoStatusForPerson(media, p.id).ready);
     let current = p;
+    let textOnly = !media.speech.ready;
+    let failed = 0;
+    let mediaError = "";
     try {
       for (let i = 0; i < steps.length; i++) {
         const step = steps[i];
         const prefix = `${i + 1}/${steps.length} · `;
         if (step === "cartoon" || step === "loop-video") {
+          if (mediaError) continue;
           setJob(p.id, prefix + (step === "cartoon" ? "卡通生成中…" : "动态视频生成中…"));
-          const url = await generateAsset(p.id, step);
-          current = { ...current, [step === "cartoon" ? "cartoonUrl" : "loopVideoUrl"]: url };
-          setPeople((list) => list.map((x) => (x.id === p.id ? current : x)));
+          try {
+            const url = await generateAsset(p.id, step);
+            current = { ...current, [step === "cartoon" ? "cartoonUrl" : "loopVideoUrl"]: url };
+            setPeople((list) => list.map((x) => (x.id === p.id ? current : x)));
+          } catch (e) {
+            // Approval/configuration can change after health was loaded.
+            mediaError = e instanceof Error ? e.message : "媒体生成失败";
+            textOnly = true;
+          }
         } else {
-          setJob(p.id, prefix + "讲解与语音预生成中…");
+          setJob(p.id, prefix + (textOnly ? "文字讲解预生成中…" : "讲解与语音预生成中…"));
           const res = await fetch(`/api/admin/people/${p.id}/pregenerate`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({}),
+            body: JSON.stringify({ textOnly }),
           });
           const data = await readJson(res);
           if (!res.ok) throw new Error(data.error || "预生成失败");
+          if (!Array.isArray(data.sections)) throw new Error("未收到讲解结果，请刷新后重试");
           current = { ...current, sections: data.sections };
+          failed = typeof data.failed === "number" ? data.failed : 0;
           setPeople((list) => list.map((x) => (x.id === p.id ? current : x)));
-          if (data.failed) notify(`${p.name}：有 ${data.failed} 个部分没生成成功，可再点一次`);
         }
       }
-      notify(`素材已就绪：${p.name}`);
+      notify(preparationSummary(current, failed, textOnly));
+      if (mediaError) setError(`${p.name}：媒体准备未完成（${mediaError}）；已继续处理文字讲解。`);
     } catch (e) {
       setError(`${p.name}：${e instanceof Error ? e.message : "准备素材失败"}`);
     } finally {
@@ -231,18 +262,21 @@ export default function AdminApp() {
   /** Pre-generate every part's explanation (+ audio when A2E is configured)
    *  without opening the editor. */
   async function pregenerateAll(p: Person) {
+    const textOnly = !media.speech.ready;
     setPregenId(p.id);
     setError("");
     try {
       const res = await fetch(`/api/admin/people/${p.id}/pregenerate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ textOnly }),
       });
       const data = await readJson(res);
       if (!res.ok) throw new Error(data.error || "预生成失败");
-      setPeople((list) => list.map((x) => (x.id === p.id ? { ...x, sections: data.sections } : x)));
-      notify(data.failed ? `${p.name}：有 ${data.failed} 个部分没生成成功` : `讲解与语音已就绪：${p.name}`);
+      if (!Array.isArray(data.sections)) throw new Error("未收到讲解结果，请刷新后重试");
+      const updated = { ...p, sections: data.sections };
+      setPeople((list) => list.map((x) => (x.id === p.id ? updated : x)));
+      notify(preparationSummary(updated, typeof data.failed === "number" ? data.failed : 0, textOnly));
     } catch (e) {
       setError(e instanceof Error ? e.message : "预生成失败");
     } finally {
@@ -297,6 +331,7 @@ export default function AdminApp() {
 
   const selected = people.find((p) => p.id === selectedId) || null;
   const selectedReadiness = selected ? readinessForPerson(selected) : null;
+  const selectedPhoto = photoStatusForPerson(media, selected?.id);
 
   function editLink(p: Person): string | null {
     return p.editToken ? `${base}/submit/${p.id}?token=${encodeURIComponent(p.editToken)}` : null;
@@ -460,16 +495,18 @@ export default function AdminApp() {
           type="button"
           className="btn-primary mt-2 w-full"
           onClick={() => prepareAll(selected)}
-          disabled={!!jobs[selected.id] || pregenId === selected.id || !selected.photoUrl || selected.sections.length === 0}
-          title={!selected.photoUrl ? "需要先有照片" : "卡通 → 动态视频 → 讲解与语音，已有的会跳过"}
+          disabled={!!jobs[selected.id] || pregenId === selected.id || selected.sections.length === 0}
+          title={selectedPhoto.ready ? (media.speech.ready ? "准备获准的形象、讲解及语音，已有的会跳过" : "仅生成获准的卡通、视频和文字讲解；不生成外部语音") : "照片处理未获准；可先准备文字讲解"}
         >
-          <IconSparkle size={15} /> 一键准备素材
+          <IconSparkle size={15} /> {selectedPhoto.ready ? "一键准备素材" : "一键准备文字"}
         </button>
+        {!selectedPhoto.ready && <p role="status" className="mt-2 text-[12px] leading-relaxed text-ink-3">{selectedPhoto.message}</p>}
+        {!media.speech.ready && <p className="mt-2 text-[12px] leading-relaxed text-ink-3">外部配音未启用；讲解步骤只生成文字。{selectedPhoto.ready ? "这位同学已获准生成卡通和视频。" : ""}</p>}
         <div className="mt-2 grid grid-cols-3 gap-2">
-          <button type="button" className="btn-secondary px-2 text-[12px]" onClick={() => generate(selected, "cartoon")} disabled={!!jobs[selected.id] || !selected.photoUrl}>
+          <button type="button" className="btn-secondary px-2 text-[12px]" onClick={() => generate(selected, "cartoon")} disabled={!selectedPhoto.ready || !!jobs[selected.id] || pregenId === selected.id || !selected.photoUrl} title={!selectedPhoto.ready ? selectedPhoto.message : undefined}>
             {selected.cartoonUrl ? "重做卡通" : "生成卡通"}
           </button>
-          <button type="button" className="btn-secondary px-2 text-[12px]" onClick={() => generate(selected, "loop-video")} disabled={!!jobs[selected.id] || !selected.photoUrl}>
+          <button type="button" className="btn-secondary px-2 text-[12px]" onClick={() => generate(selected, "loop-video")} disabled={!selectedPhoto.ready || !!jobs[selected.id] || pregenId === selected.id || !selected.photoUrl} title={!selectedPhoto.ready ? selectedPhoto.message : undefined}>
             {selected.loopVideoUrl ? "重做视频" : "生成视频"}
           </button>
           <button
@@ -477,10 +514,10 @@ export default function AdminApp() {
             className="btn-secondary px-2 text-[12px]"
             onClick={() => pregenerateAll(selected)}
             disabled={!!jobs[selected.id] || pregenId === selected.id || selected.sections.length === 0}
-            title="提前生成每个部分的讲解文字和语音，访客选中时零等待"
+            title={media.speech.ready ? "提前生成每个部分的讲解文字和语音" : "仅生成讲解文字，不发送到外部语音服务"}
           >
             {pregenId === selected.id ? <Spinner /> : <IconBolt size={14} />}
-            {pregenId === selected.id ? "生成中…" : "讲解与语音"}
+            {pregenId === selected.id ? "生成中…" : media.speech.ready ? "讲解与语音" : "文字讲解"}
           </button>
         </div>
         {!selected.photoUrl && <p className="mt-2 text-[12px] text-ink-3">这位同学还没有照片，先补照片再生成卡通和视频。</p>}

@@ -6,7 +6,7 @@ import { isAdmin } from "@/lib/auth";
 import { getPerson, readPhoto, saveAudio, updatePerson, storageWritable } from "@/lib/store";
 import { chat } from "@/lib/ai";
 import { explainSectionPrompt, systemPrompt } from "@/lib/prompts";
-import { a2eConfigured, a2eTts } from "@/lib/a2e";
+import { a2eConfigured, a2eReadiness, a2eTts } from "@/lib/a2e";
 import { splitAnswer } from "@/lib/sentences";
 import { AudioReadError, beginPreparation, createPermanentNarration, prepareExistingNarration } from "@/lib/prepared-narration";
 import type { AudioAsset, PreparationResult } from "@/lib/prepared-narration";
@@ -65,7 +65,7 @@ const dependencies = {
 
 /** Only an explicit regenerateText=true replaces a populated text cache.
  *  Commit a new text/audio pair together, after the audio is permanent. */
-async function generateVariant(person: Person, section: Section, index: number, language: AnswerLang): Promise<PreparationResult> {
+async function generateVariant(person: Person, section: Section, index: number, language: AnswerLang, includeAudio = true): Promise<PreparationResult> {
   const start = Date.now();
   const result = (status: PreparationResult["status"], reason: string, extra: Partial<PreparationResult> = {}): PreparationResult =>
     ({ sectionId: section.id, language, status, reason, elapsedMs: Date.now() - start, ...extra });
@@ -78,7 +78,7 @@ async function generateVariant(person: Person, section: Section, index: number, 
     if (!answer.trim()) return result("failed", "empty_answer");
     const approved = await reviewExhibitionAnswer({ source: section.content, question: `Explain this selected exhibition section briefly: ${section.title}`, answer, suggestions }, (opts) => chat(opts));
     if (!approved) return result("failed", "answer_not_approved");
-    const audio = a2eConfigured() ? await createPermanentNarration(person, section.id, language, answer, dependencies) : undefined;
+    const audio = includeAudio && a2eConfigured() ? await createPermanentNarration(person, section.id, language, answer, dependencies) : undefined;
     const fresh = await getPerson(person.id);
     const current = fresh?.sections.find((s) => s.id === section.id);
     if (!fresh || !current) return result("failed", "person_or_section_missing");
@@ -108,22 +108,29 @@ async function generateVariant(person: Person, section: Section, index: number, 
 // Existing text is reused by default. Visitors never invoke this endpoint.
 export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
   if (!isAdmin()) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  const writable = storageWritable();
-  if (!writable.ok) return NextResponse.json({ error: writable.reason }, { status: 503 });
   const body = await req.json().catch(() => null) as Record<string, unknown> | null;
   if (!body || typeof body !== "object" || Array.isArray(body) ||
       (body.audioOnly !== undefined && typeof body.audioOnly !== "boolean") ||
+      (body.textOnly !== undefined && typeof body.textOnly !== "boolean") ||
       (body.regenerateText !== undefined && typeof body.regenerateText !== "boolean") ||
       (body.sectionId !== undefined && (typeof body.sectionId !== "string" || !body.sectionId.trim())) ||
       (body.language !== undefined && (typeof body.language !== "string" || !["en", "zh", "bilingual"].includes(body.language))) ||
-      (body.audioOnly === true && body.regenerateText === true)) {
+      (body.audioOnly === true && (body.regenerateText === true || body.textOnly === true))) {
     return NextResponse.json({ error: "invalid preparation options" }, { status: 400 });
   }
+  if (body.audioOnly) {
+    const readiness = a2eReadiness();
+    if (!readiness.ready) return NextResponse.json(
+      { error: readiness.message, code: `a2e_${readiness.status}`, a2e: readiness },
+      { status: readiness.status === "privacy_disabled" ? 403 : 503 }
+    );
+  }
+  const writable = storageWritable();
+  if (!writable.ok) return NextResponse.json({ error: writable.reason }, { status: 503 });
   if (!aiProcessingAllowed()) return NextResponse.json({ error: "外部处理未获隐私批准 / External processing is disabled pending privacy review" }, { status: 503 });
   const person = await getPerson(params.id);
   if (!person) return NextResponse.json({ error: "not found" }, { status: 404 });
   if (person.privacyConsent?.version !== PRIVACY_VERSION) return NextResponse.json({ error: "请先由学生确认新版AI处理隐私协议 / The student must accept the current AI processing terms first" }, { status: 428 });
-  if (body.audioOnly && !a2eConfigured()) return NextResponse.json({ error: "narration provider is not configured" }, { status: 503 });
   const targets = person.sections.map((section, index) => ({ section, index }))
     .filter(({ section }) => !body.sectionId || section.id === body.sectionId);
   if (body.sectionId && !targets.length) return NextResponse.json({ error: "bad section" }, { status: 400 });
@@ -155,18 +162,18 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
             results.push({ sectionId: section.id, language, status: "failed", reason: "answer_not_approved", elapsedMs: 0 });
             continue;
           }
-          results.push(a2eConfigured()
+          results.push(!body.textOnly && a2eConfigured()
             ? await prepareExistingNarration(person.id, section.id, language, dependencies)
             : { sectionId: section.id, language, status: "skipped", reason: "text_already_cached", elapsedMs: 0 });
         } else {
-          results.push(await generateVariant(person, section, index, language));
+          results.push(await generateVariant(person, section, index, language, !body.textOnly));
         }
       }
     }
     const final = await getPerson(person.id);
     const failed = results.filter((r) => r.status === "failed").length;
     return NextResponse.json({
-      mode: body.audioOnly ? "audio-only" : body.regenerateText ? "regenerate-text" : "reuse-existing-text",
+      mode: body.textOnly ? "text-only" : body.audioOnly ? "audio-only" : body.regenerateText ? "regenerate-text" : "reuse-existing-text",
       sections: final?.sections ?? [], results,
       prepared: results.filter((r) => r.status === "prepared").length,
       skipped: results.filter((r) => r.status === "skipped").length, failed,

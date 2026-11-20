@@ -1,5 +1,11 @@
 # Privacy and AI operating state
 
+## November 21, 2026 photo-processing scope
+
+The organizer separately authorized one identified participant's photo for A2E cartoon and ambient-video generation. Production `A2E_PHOTO_APPROVED_PERSON_IDS` identifies that record; do not add other records without specific authorization. `EXTERNAL_AI_PROCESSING_APPROVED=false` continues to block external narration and D-ID. The existing text-AI consent does not grant photo-processing permission.
+
+Admin diagnostics distinguish a deliberate privacy block from missing provider configuration. Photo routes read authorized private image bytes directly, never forward edit/preview credentials, and bind polling tokens to the participant and task purpose. Upload object names use content hashes to avoid collisions. The admin preparation flow can continue with explicit text-only processing when media is unavailable, without claiming missing assets are ready.
+
 ## November 19, 2026 verification
 
 The original configuration used `claude-opus-4-8` through the old `.com` endpoint and returned a no-channel error during an earlier synthetic request. The organizer subsequently prioritized fast Anthropic-family replies. Production configuration now selects `AI_MODEL=AI_MODEL_LIVE=claude-sonnet-5` and `AI_BASE_URL=https://cf.api.fan/v1`, the production endpoint recommended in the logged-in Packy console. These are relay identifiers, not independent attestation of the upstream model.

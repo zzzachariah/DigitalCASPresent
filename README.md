@@ -6,7 +6,7 @@ AI 依据讲稿自然作答，数字人开口讲解。
 
 同学可以**自己提交**照片和讲稿（`/submit`），老师在后台**审核通过**后页面上线；老师也可以直接在后台录入。
 
-> 隐私与 AI（2026-11-19）：组织者已接受 Packy 及上游文字 AI 处理，使用实测可用的 `claude-sonnet-5`。学生须同意新版 `/privacy`；旧记录在作者重新确认保存前不发送给 AI。A2E / D-ID 等外部语音、形象处理仍关闭。Packy 声明自身不保存正文、不训练；上游保留规则另行适用，不能承诺活动结束时删除供应商的所有副本。详见 [隐私与 AI 运行说明](docs/privacy-and-ai.md) 和 [资料清理流程](docs/retention.md)。
+> 隐私与 AI：组织者已接受 Packy 及上游文字 AI 处理，使用实测可用的 `claude-sonnet-5`。学生须同意新版 `/privacy`；旧记录在作者重新确认保存前不发送给 AI。外部配音与 D-ID 仍关闭；A2E 照片处理仅限另行明确批准的指定记录，用于卡通与动态视频。Packy 声明自身不保存正文、不训练；上游保留规则另行适用，不能承诺活动结束时删除供应商的所有副本。详见 [隐私与 AI 运行说明](docs/privacy-and-ai.md) 和 [资料清理流程](docs/retention.md)。
 > 活动结束时间：2026-12-13 北京时间 00:00；停止访问并由每日任务尝试物理清理，必须核验清理结果。
 
 ---
@@ -77,6 +77,7 @@ npm run dev                     # http://localhost:3000
 | `AI_API_PROTOCOL` | `auto`（默认）：Claude 使用 Anthropic Messages，其他模型使用 OpenAI Chat Completions；可显式设为 `anthropic` / `openai`。 |
 | `AI_MODEL_LIVE` | 可选但**建议设置**为一个更快的模型。现场实时回答（追问、未预生成的部分）用它；分段和预生成仍用 `AI_MODEL`。 |
 | `AVATAR_PROVIDER` | `mock`（默认）/ `a2e` / `did`。 |
+| `A2E_PHOTO_APPROVED_PERSON_IDS` | 另行获得照片处理授权的记录 ID，逗号分隔。仅允许指定记录的卡通与动态视频，不启用配音或其他人的照片处理。 |
 | `A2E_API_KEY` | 选 `a2e` 时填。 |
 | `A2E_MODE` | `fast`（默认，秒回）或 `precise`（逐句口型渲染，慢）。 |
 | `A2E_TTS_ID_MALE` / `A2E_TTS_ID_FEMALE` / `A2E_TTS_ID` | 音色 id，默认为多语言男声 / 女声。 |

@@ -1,5 +1,6 @@
 import { aiProcessingAllowed, externalProcessingAllowed } from "@/lib/processing-policy";
 import { NextResponse } from "next/server";
+import { a2eReadiness, a2ePhotoReadiness, a2ePhotoApprovedPersonIds } from "@/lib/a2e";
 import { adminConfigured, isAdmin } from "@/lib/auth";
 import { storageDriverName, storageWritable } from "@/lib/store";
 import { resolveBlobToken, mediaBlobConfigured, recordsBlobConfigured, hasBlobOidcToken } from "@/lib/store-shared";
@@ -42,7 +43,13 @@ export async function GET() {
     aiKeySet: !!process.env.AI_API_KEY,
     aiModel: process.env.AI_MODEL || "(default: claude-sonnet-5)",
     avatarProvider: process.env.AVATAR_PROVIDER || "mock",
-    a2eKeySet: !!process.env.A2E_API_KEY,
+    a2eKeySet: !!process.env.A2E_API_KEY?.trim(),
+    a2e: a2eReadiness(),
+    a2ePhoto: {
+      global: a2ePhotoReadiness(),
+      approvedPersonIds: a2ePhotoApprovedPersonIds(),
+      people: Object.fromEntries(a2ePhotoApprovedPersonIds().map((id) => [id, a2ePhotoReadiness(id)])),
+    },
     didKeySet: !!process.env.DID_API_KEY,
     baseUrl: process.env.NEXT_PUBLIC_BASE_URL || "(not set)",
   });
