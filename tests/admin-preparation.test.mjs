@@ -46,6 +46,20 @@ test('interrupting a run retains complete and failed details and explains every 
   assert.ok(result.slice(3).every((entry) => entry.status === 'blocked' && entry.detail.includes('未发起')));
 });
 
+test('retry metadata binds a step to the source variant and retains one-key or audio-only mode', () => {
+  for (const mode of [{ regenerateRejectedText: true }, { audioOnly: true }]) {
+    const entries = preparationEntries(person, { includeMedia: false, photo: ready, textOnly: false, ...mode });
+    const selected = entries[3].narration;
+    assert.equal(selected.variant.sectionId, 's1'); assert.equal(selected.variant.language, 'en');
+    assert.equal(selected.regenerateRejectedText, mode.regenerateRejectedText);
+    assert.equal(selected.audioOnly, mode.audioOnly);
+    assert.equal(selected.textOnly, false);
+    assert.equal('content' in selected, false);
+    assert.equal('script' in selected, false);
+    if (mode.regenerateRejectedText) assert.match(entries[3].detail, /尝试一次修订/);
+  }
+});
+
 const expected = { sectionId: 's0', language: 'zh' };
 const phase = (value, extra = {}) => ({ type: 'phase', ...expected, phase: value, ...extra });
 function response(events) {
@@ -69,10 +83,10 @@ test('real phase labels appear before the final result, including split UTF-8 ch
 test('stream ignores other variants, unknown phases and provider text; final payload determines success', async () => {
   const labels = [];
   const result = await readNarrationResponse(response([
-    phase('tts', { sectionId: 'other' }), phase('PRIVATE-ERROR'), phase('__proto__'), phase('persist', { message: 'PRIVATE-MANUSCRIPT' }),
+    phase('tts', { sectionId: 'other' }), phase('PRIVATE-ERROR'), phase('__proto__'), phase('revision'), phase('persist', { message: 'PRIVATE-MANUSCRIPT' }),
     { type: 'result', status: 200, data: { results: [{ status: 'failed', reason: 'answer_not_approved' }] } },
   ]), expected, (label) => labels.push(label));
-  assert.deepEqual(labels, ['正在保存讲解与配音记录']);
+  assert.deepEqual(labels, ['正在修订讲解', '正在保存讲解与配音记录']);
   assert.equal(result.data.results[0].status, 'failed');
   assert.doesNotMatch(labels.join(), /PRIVATE|__proto__/);
 });

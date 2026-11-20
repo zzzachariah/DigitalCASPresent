@@ -1,6 +1,6 @@
 import type { Person } from "./types";
 import type { AdminMediaStatus } from "./admin-media";
-import { narrationLanguageLabels, narrationVariants } from "./admin-narration";
+import { narrationLanguageLabels, narrationVariants, type NarrationOptions } from "./admin-narration";
 
 export type PreparationEntry = {
   key: string;
@@ -8,13 +8,14 @@ export type PreparationEntry = {
   label: string;
   status: "pending" | "running" | "complete" | "failed" | "blocked";
   detail: string;
+  narration?: NarrationOptions;
 };
 export function narrationEntryKey(sectionId: string, language: string): string {
   return `narration:${sectionId}:${language}`;
 }
 
 /** Missing, unapproved assets stay visible in the plan but never become requests. */
-export function preparationEntries(person: Person, options: { includeMedia: boolean; photo: AdminMediaStatus; textOnly: boolean; audioOnly?: boolean }): PreparationEntry[] {
+export function preparationEntries(person: Person, options: { includeMedia: boolean; photo: AdminMediaStatus; textOnly: boolean; audioOnly?: boolean; regenerateRejectedText?: boolean }): PreparationEntry[] {
   const entries: PreparationEntry[] = [];
   if (options.includeMedia) {
     for (const [kind, label, saved] of [["cartoon", "卡通形象", person.cartoonUrl], ["loop-video", "动态视频", person.loopVideoUrl]] as const) {
@@ -25,7 +26,12 @@ export function preparationEntries(person: Person, options: { includeMedia: bool
   }
   const target = options.textOnly ? "文字讲解" : options.audioOnly ? "补齐语音" : "讲解与语音";
   for (const variant of narrationVariants(person)) {
-    entries.push({ key: narrationEntryKey(variant.sectionId, variant.language), kind: "narration", label: `${variant.title}（${narrationLanguageLabels[variant.language]}）· ${target}`, status: "pending", detail: "等待处理" });
+    entries.push({
+      key: narrationEntryKey(variant.sectionId, variant.language), kind: "narration",
+      label: `${variant.title}（${narrationLanguageLabels[variant.language]}）· ${target}`, status: "pending",
+      detail: options.regenerateRejectedText ? "等待审核；仅因依据或保密问题未通过时尝试一次修订" : "等待处理",
+      narration: { textOnly: options.textOnly, audioOnly: options.audioOnly, regenerateRejectedText: options.regenerateRejectedText, variant: { sectionId: variant.sectionId, language: variant.language } },
+    });
   }
   return entries;
 }

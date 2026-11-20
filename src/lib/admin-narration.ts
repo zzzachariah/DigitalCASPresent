@@ -39,10 +39,17 @@ export interface NarrationRequest {
   language: AnswerLang;
   textOnly?: boolean;
   audioOnly?: boolean;
+  regenerateRejectedText?: boolean;
+}
+export interface NarrationOptions {
+  textOnly: boolean;
+  audioOnly?: boolean;
+  regenerateRejectedText?: boolean;
+  variant?: Pick<NarrationVariant, "sectionId" | "language">;
 }
 export interface NarrationProgress { current: number; total: number; variant: NarrationVariant; retry: boolean }
 export interface NarrationFailure extends NarrationVariant { reason: string }
-export interface NarrationOutcome extends NarrationVariant { completed: boolean; reason: string; textReady: boolean; audioReady: boolean }
+export interface NarrationOutcome extends NarrationVariant { completed: boolean; reason: string; textReady: boolean; audioReady: boolean; revisionAttempted?: boolean }
 export interface NarrationRun {
   person: Person;
   completed: number;
@@ -62,6 +69,8 @@ interface NarrationResult {
   phase?: unknown;
   reviewReason?: unknown;
   rejectedCriteria?: unknown;
+  revisionAttempted?: unknown;
+  formatIssue?: unknown;
 }
 export interface NarrationDependencies {
   request: (body: NarrationRequest) => Promise<{ ok: boolean; status: number; data: unknown }>;
@@ -74,6 +83,7 @@ export interface NarrationDependencies {
 const FAILURE_REASONS: Record<string, string> = {
   answer_not_approved: "尚未获得有效的内容审核结论",
   generation_failed: "文字讲解生成未完成",
+  revision_failed: "讲解修订未完成，尚未确认可用的新讲解",
   empty_answer: "未生成有效的讲解文字",
   tts_failed: "配音合成失败",
   download_failed: "生成的音频下载失败",
@@ -95,7 +105,7 @@ const FAILURE_REASONS: Record<string, string> = {
   request_time_budget: "服务端时间不足，此项尚未完成",
 };
 const FAILURE_PHASES: Record<string, string> = {
-  generation: "文字生成", review: "内容审核", tts: "配音合成", download: "音频下载",
+  generation: "文字生成", revision: "讲解修订", review: "内容审核", tts: "配音合成", download: "音频下载",
   audio_save: "音频保存", audio_verification: "音频校验", source_recheck: "资料复核",
   persist: "记录保存", persist_verification: "记录校验", read: "资料读取", audio_preparation: "音频准备",
 };
@@ -108,6 +118,12 @@ const REVIEW_REASONS: Record<string, string> = {
 };
 const REVIEW_CRITERIA: Record<string, string> = {
   safe: "校园适宜性", grounded: "依据充分性", private: "保密要求", relevant: "展览相关性", respectful: "礼貌与中立",
+};
+const REVIEW_FORMAT_ISSUES: Record<string, string> = {
+  fenced_json: "审核结果多了代码围栏",
+  invalid_json: "审核结果不是有效的数据格式",
+  wrong_fields: "审核结果的字段不符合要求",
+  wrong_values: "审核结果的取值不符合要求",
 };
 const FAILURE_CODES: Record<string, string> = {
   read_failed: "资料暂时读取失败，请刷新核对已保存结果后重试",
@@ -135,6 +151,8 @@ function narrationFailureReason(result: NarrationResult | undefined, data: Respo
   const details: string[] = [];
   const phase = fixedMessage(result?.phase, FAILURE_PHASES);
   if (phase) details.push(`环节：${phase}`);
+  const formatIssue = result?.reviewReason === "review_format" ? fixedMessage(result.formatIssue, REVIEW_FORMAT_ISSUES) : undefined;
+  if (formatIssue) details.push(formatIssue);
   if (result?.reviewReason === "model_rejection" && Array.isArray(result.rejectedCriteria)) {
     const criteria = Object.keys(REVIEW_CRITERIA).filter((key) => (result.rejectedCriteria as unknown[]).includes(key)).map((key) => REVIEW_CRITERIA[key]);
     if (criteria.length) details.push(`未通过：${criteria.join("、")}`);
@@ -147,23 +165,27 @@ function narrationFailureReason(result: NarrationResult | undefined, data: Respo
  * a failed generation is never retried automatically (it may have cost money). */
 export async function prepareNarrationVariants(
   person: Person,
-  options: { textOnly: boolean; audioOnly?: boolean },
+  options: NarrationOptions,
   dependencies: NarrationDependencies,
 ): Promise<NarrationRun> {
   if (options.audioOnly && options.textOnly) throw new Error("Audio-only preparation requires speech approval");
-  const variants = narrationVariants(person);
+  if (options.audioOnly && options.regenerateRejectedText) throw new Error("Audio-only preparation cannot revise text");
+  const variants = narrationVariants(person).filter((variant) => !options.variant ||
+    (variant.sectionId === options.variant.sectionId && variant.language === options.variant.language));
+  if (options.variant && variants.length !== 1) throw new Error("Selected narration is no longer available");
   let current = person;
   let completed = 0;
   let stopReason = "";
   const failures: NarrationFailure[] = [];
-  function report(variant: NarrationVariant, reason: string) {
+  function report(variant: NarrationVariant, reason: string, revisionAttempted = false) {
     const section = current.sections.find((s) => s.id === variant.sectionId);
-    dependencies.onResult?.({ ...variant, completed: !reason, reason, textReady: !!section?.cachedAnswers?.[variant.language]?.trim(), audioReady: !!section?.cachedAudio?.[variant.language] });
+    dependencies.onResult?.({ ...variant, completed: !reason, reason, textReady: !!section?.cachedAnswers?.[variant.language]?.trim(), audioReady: !!section?.cachedAudio?.[variant.language], ...(revisionAttempted ? { revisionAttempted: true } : {}) });
   }
   for (let index = 0; index < variants.length; index++) {
     const variant = variants[index];
     if (stopReason) { failures.push({ ...variant, reason: stopReason }); report(variant, stopReason); continue; }
     let failure = "未收到可确认的准备结果";
+    let revisionAttempted = false;
     for (let attempt = 0; attempt < 2; attempt++) {
       dependencies.onProgress?.({ current: index + 1, total: variants.length, variant, retry: attempt > 0 });
       const section = current.sections.find((s) => s.id === variant.sectionId);
@@ -171,7 +193,8 @@ export async function prepareNarrationVariants(
       if (options.audioOnly && !hasText) { failure = "缺少已有讲解，请先准备文字"; break; }
       const body: NarrationRequest = {
         sectionId: variant.sectionId, language: variant.language,
-        ...(options.textOnly ? { textOnly: true } : (options.audioOnly || hasText) ? { audioOnly: true } : {}),
+        ...(options.textOnly ? { textOnly: true } : (options.audioOnly || (hasText && !options.regenerateRejectedText)) ? { audioOnly: true } : {}),
+        ...(options.regenerateRejectedText ? { regenerateRejectedText: true } : {}),
       };
       let response;
       try { response = await dependencies.request(body); }
@@ -195,6 +218,7 @@ export async function prepareNarrationVariants(
         dependencies.onUpdate?.(current);
       }
       const result = Array.isArray(data.results) ? data.results.find((r) => r && r.sectionId === variant.sectionId && r.language === variant.language) : undefined;
+      revisionAttempted ||= result?.revisionAttempted === true;
       if (response.ok && result?.status === "skipped" && result.reason === "request_time_budget" && attempt === 0) continue;
       const saved = current.sections.find((s) => s.id === variant.sectionId);
       const savedText = !!saved?.cachedAnswers?.[variant.language]?.trim();
@@ -211,7 +235,7 @@ export async function prepareNarrationVariants(
       break;
     }
     if (failure) failures.push({ ...variant, reason: failure });
-    report(variant, failure);
+    report(variant, failure, revisionAttempted);
   }
   return { person: current, completed, total: variants.length, failures };
 }

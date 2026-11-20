@@ -50,12 +50,12 @@ export default function AdminServiceCheck({ configuredModel, configuredReviewMod
     <p className="mt-3 text-sm">活动当前模型：{configuredModel}</p>
     <p className="mt-1 text-sm">当前审核方式：{Object.prototype.hasOwnProperty.call(MODES, configuredReviewMode) ? MODES[configuredReviewMode as keyof typeof MODES] : "配置待核对"}</p>
     <label className="mt-6 block text-sm" htmlFor="check-model">本次检查模型</label>
-    <select id="check-model" value={model} onChange={(event) => setModel(event.target.value)} disabled={running} className="mt-2 w-full rounded-xl border border-white/10 bg-surface-2 p-3">
+    <select id="check-model" value={model} onChange={(event) => { setModel(event.target.value); setResult(null); setError(""); }} disabled={running} className="mt-2 w-full rounded-xl border border-white/10 bg-surface-2 p-3">
       {MODELS.map((value) => <option key={value} value={value}>{value}</option>)}
     </select>
     <div className="mt-4 grid grid-cols-2 gap-3">
-      <label className="text-sm">检查语言<select aria-label="检查语言" value={language} onChange={(event) => setLanguage(event.target.value)} disabled={running} className="mt-2 w-full rounded-xl border border-white/10 bg-surface-2 p-3"><option value="zh">中文</option><option value="en">English</option></select></label>
-      <label className="text-sm">审核方式<select aria-label="审核方式" value={reviewMode} onChange={(event) => setReviewMode(event.target.value)} disabled={running} className="mt-2 w-full rounded-xl border border-white/10 bg-surface-2 p-3">{Object.entries(MODES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+      <label className="text-sm">检查语言<select aria-label="检查语言" value={language} onChange={(event) => { setLanguage(event.target.value); setResult(null); setError(""); }} disabled={running} className="mt-2 w-full rounded-xl border border-white/10 bg-surface-2 p-3"><option value="zh">中文</option><option value="en">English</option></select></label>
+      <label className="text-sm">审核方式<select aria-label="审核方式" value={reviewMode} onChange={(event) => { setReviewMode(event.target.value); setResult(null); setError(""); }} disabled={running} className="mt-2 w-full rounded-xl border border-white/10 bg-surface-2 p-3">{Object.entries(MODES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
     </div>
     <button type="button" className="btn-primary mt-4" onClick={check} disabled={running}>{running ? "正在检查生成与审核…" : "开始检查"}</button>
     <div role="status" aria-live="polite" className="mt-6">

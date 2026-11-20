@@ -8,7 +8,7 @@ export class AudioReadError extends Error {
   constructor(public code: "missing" | "invalid" | "unavailable") { super(`Audio ${code}`); }
 }
 type AudioPreparationPhase = "tts" | "download" | "audio_save" | "audio_verification";
-export type PreparationPhase = AudioPreparationPhase | "generation" | "review" | "read" | "audio_preparation" | "source_recheck" | "persist" | "persist_verification";
+export type PreparationPhase = AudioPreparationPhase | "generation" | "revision" | "review" | "read" | "audio_preparation" | "source_recheck" | "persist" | "persist_verification";
 export class AudioPreparationError extends Error {
   providerCode?: string;
   constructor(public phase: AudioPreparationPhase, cause: unknown) {
@@ -43,6 +43,7 @@ export interface PreparationResult {
   reviewReason?: SafetyReviewDiagnostic["reason"];
   formatIssue?: SafetyReviewDiagnostic["formatIssue"];
   rejectedCriteria?: SafetyReviewDiagnostic["rejectedCriteria"];
+  revisionAttempted?: true;
 }
 
 /** Reporting cannot change a successful operation; cancellation is independent. */
