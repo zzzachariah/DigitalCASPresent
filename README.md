@@ -6,7 +6,7 @@ AI 依据讲稿自然作答，数字人开口讲解。
 
 同学可以**自己提交**照片和讲稿（`/submit`），老师在后台**审核通过**后页面上线；老师也可以直接在后台录入。
 
-> 隐私与 AI：组织者已接受 Packy 及上游文字 AI 处理，使用 `claude-sonnet-5`。学生须同意 `/privacy`；旧记录在作者重新确认保存前不发送给 AI。组织者已统一批准本活动所有现有及未来同学的 A2E 照片、形象及审核后有限讲解配音；不发送全文配音、不克隆本人声音，D-ID 仍关闭。Packy 声明自身不保存正文、不训练；上游保留规则另行适用，不能承诺活动结束时删除供应商的所有副本。详见 [隐私与 AI 运行说明](docs/privacy-and-ai.md) 和 [资料清理流程](docs/retention.md)。
+> 隐私与 AI：组织者已接受 Packy 及上游文字 AI 处理，当前使用 `qwen3.7-plus`（2026 年 11 月 21 日更新）。学生须同意 `/privacy`；旧记录在作者重新确认保存前不发送给 AI。组织者已统一批准本活动所有现有及未来同学的 A2E 照片、形象及审核后有限讲解配音；不发送全文配音、不克隆本人声音，D-ID 仍关闭。Packy 声明自身不保存正文、不训练；上游保留规则另行适用，不能承诺活动结束时删除供应商的所有副本。详见 [隐私与 AI 运行说明](docs/privacy-and-ai.md) 和 [资料清理流程](docs/retention.md)。
 > 活动结束时间：2026-12-13 北京时间 00:00；停止访问并由每日任务尝试物理清理，必须核验清理结果。
 
 ---
@@ -72,10 +72,11 @@ npm run dev                     # http://localhost:3000
 | `ADMIN_SESSION_SECRET` | 可选，签发后台登录 cookie 的密钥；不填则用密码派生。 |
 | `NEXT_PUBLIC_BASE_URL` | 二维码 / 学生链接用的公开网址（本地 `http://localhost:3000`，线上填 Vercel 域名）。 |
 | `AI_API_KEY` | packyapi 的 API key。**留空 = 演示模式**。 |
-| `AI_BASE_URL` / `AI_MODEL` | 默认 `https://cf.api.fan/v1` 与 `claude-sonnet-5`。 |
+| `AI_BASE_URL` / `AI_MODEL` | 当前生产与配置示例使用 `https://cf.api.fan/v1` 与 `qwen3.7-plus`。请显式设置模型；代码在未配置时仍保留旧模型回退值。 |
 | `AI_PROCESSING_APPROVED` | 文字 AI 授权；默认关闭，开启后仍需学生新版同意。 |
-| `AI_API_PROTOCOL` | `auto`（默认）：Claude 使用 Anthropic Messages，其他模型使用 OpenAI Chat Completions；可显式设为 `anthropic` / `openai`。 |
-| `AI_MODEL_LIVE` | 可选但**建议设置**为一个更快的模型。现场实时回答（追问、未预生成的部分）用它；分段和预生成仍用 `AI_MODEL`。 |
+| `AI_API_PROTOCOL` | 当前 Qwen 配置显式设为 `openai`。代码默认 `auto`：Claude 使用 Anthropic Messages，其他模型使用 OpenAI Chat Completions；也可设为 `anthropic`。 |
+| `AI_REVIEW_FORMAT` | 当前使用 `json_schema`，严格核验固定的五项布尔审核结果；`tool` 是显式兼容选项，不因拒绝而自动切换。 |
+| `AI_MODEL_LIVE` | 现场实时回答使用的模型；当前与 `AI_MODEL` 同为 `qwen3.7-plus`。留空时沿用 `AI_MODEL`；分段和预生成始终使用 `AI_MODEL`。 |
 | `AVATAR_PROVIDER` | `mock`（默认）/ `a2e` / `did`。 |
 | `A2E_PHOTO_APPROVED_PERSON_IDS` | 另行获得照片处理授权的记录 ID，逗号分隔。仅允许指定记录的卡通与动态视频，不启用配音或其他人的照片处理。 |
 | `A2E_SPEECH_APPROVED_PERSON_IDS` | 单独获准配音的记录 ID，逗号分隔。仅将审核通过的有限讲解文字交给 A2E 合成普通语音，不发送整篇原稿，不克隆声音。 |
@@ -92,9 +93,11 @@ npm run dev                     # http://localhost:3000
 
 ### 关于 packyapi
 
-packyapi（PackyCode）是国内可直连的 OpenAI/Anthropic 兼容中转，支持 Claude 等模型。
+packyapi（PackyCode）是国内可直连的 OpenAI/Anthropic 兼容中转，支持 Qwen、Claude 等模型。
 在 <https://www.packyapi.ai> 管理 key；生产调用使用控制台推荐的 `https://cf.api.fan/v1`。Key 只存在服务器端环境变量，
 不会写入代码、也不会发送到浏览器。
+
+2026 年 11 月 21 日，生产选择 `qwen3.7-plus`，使用 Packy 的 `bailian` 0.5× 分组，按组织者要求移除 `expensive` 分组；这不是每次调用费用的保证。代码对该 Qwen 模型显式设置 `enable_thinking:false`。有限的中英虚构资料、无依据回答与原文提取反例检查符合预期，不能据此保证所有真实问题的准确性或延迟；详见运行说明中的实测记录。
 
 ---
 
