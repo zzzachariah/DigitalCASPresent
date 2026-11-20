@@ -2,6 +2,8 @@ import type { ChatTurn } from "./types";
 import { aiProcessingAllowed } from "./processing-policy";
 import { AiRequestError, aiHttpError, aiTransportError } from "./ai-errors";
 import { reviewRequestFields, reviewToolResult, type ReviewOutputMode } from "./review-output";
+import { reviewProfileFromEnv, withReviewProfile } from "./review-profile";
+import { openAiModelFields } from "./model-options";
 export { AiRequestError, safeAiFailure } from "./ai-errors";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -21,6 +23,7 @@ const MODEL_LIVE = process.env.AI_MODEL_LIVE?.trim() || MODEL;
 /** `auto` chooses Messages for Claude and Chat Completions for other models.
  *  Set explicitly when a relay uses a model alias that hides its provider. */
 const PROTOCOL = process.env.AI_API_PROTOCOL?.trim().toLowerCase() || "auto";
+const REVIEW_EFFORT = process.env.AI_REVIEW_EFFORT;
 type Protocol = "anthropic" | "openai";
 
 function protocolFor(model: string): Protocol {
@@ -55,9 +58,9 @@ function upstreamSignal(signal: AbortSignal | undefined, ms: number): AbortSigna
 function request(opts: ChatOptions, stream: boolean) {
   const model = opts.live ? MODEL_LIVE : MODEL;
   const protocol = protocolFor(model);
-  if (opts.reviewOutput && opts.reviewOutput !== "text" && protocol !== "anthropic") {
-    throw new Error("Structured review requires the Anthropic Messages protocol");
-  }
+  const reviewProfile = opts.reviewOutput ? reviewProfileFromEnv(REVIEW_EFFORT) : "default";
+  if (reviewProfile !== "default" && protocol !== "anthropic") throw new Error("Review effort requires the Anthropic Messages protocol");
+  const reviewFields = opts.reviewOutput ? withReviewProfile(reviewRequestFields(opts.reviewOutput, protocol), model, reviewProfile) : {};
   const common = {
     model,
     temperature: opts.temperature ?? 0.6,
@@ -80,9 +83,11 @@ function request(opts: ChatOptions, stream: boolean) {
       ...common,
       system: opts.system,
       messages: turns,
-      ...(opts.reviewOutput ? reviewRequestFields(opts.reviewOutput) : {}),
+      ...reviewFields,
     } : {
       ...common,
+      ...openAiModelFields(model),
+      ...reviewFields,
       store: false,
       messages: [
         { role: "system", content: opts.system },
@@ -133,7 +138,7 @@ function completionText(data: Completion, protocol: Protocol, httpStatus = 200, 
   if (protocol === "anthropic" ? data.stop_reason === "max_tokens" : data.choices?.[0]?.finish_reason === "length") {
     throw new AiRequestError({ kind: "truncated_response", httpStatus });
   }
-  if (reviewOutput === "tool") return reviewToolResult(data, httpStatus);
+  if (reviewOutput === "tool") return reviewToolResult(data, httpStatus, protocol);
   const text = protocol === "anthropic"
     ? (Array.isArray(data.content) ? data.content.filter((b) => b?.type === "text" && typeof b.text === "string").map((b) => b.text).join("") : "")
     : data.choices?.[0]?.message?.content;

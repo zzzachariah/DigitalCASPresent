@@ -20,8 +20,11 @@ function setup() {
   const retention = { eventRetentionStatus: () => ({ state: state.event, endsAt: '2999-01-01T00:00:00.000Z' }) };
   const errors = load('../src/lib/ai-errors.ts', {}, env);
   const reviewOutput = load('../src/lib/review-output.ts', { './ai-errors': errors }, env);
+  const reviewProfile = load('../src/lib/review-profile.ts', {}, env);
+  const fixtures = load('../src/lib/ai-probe-fixtures.ts', {}, env);
+  const modelOptions = load('../src/lib/model-options.ts', {}, env);
   const safety = load('../src/lib/ai-safety.ts', { './ai-errors': errors, './review-output': reviewOutput }, env);
-  const probe = load('../src/lib/ai-probe.ts', { './event-retention': retention, './ai-safety': safety, './ai-errors': errors, './review-output': reviewOutput }, env, async (url, init) => {
+  const probe = load('../src/lib/ai-probe.ts', { './event-retention': retention, './ai-safety': safety, './ai-errors': errors, './review-output': reviewOutput, './review-profile': reviewProfile, './ai-probe-fixtures': fixtures, './model-options': modelOptions }, env, async (url, init) => {
     state.calls.push({ url, init, body: JSON.parse(init.body) });
     const result = state.responses.shift();
     if (typeof result === 'function') return result(init);
@@ -36,7 +39,7 @@ function setup() {
     '@/lib/ai-probe': probe,
     '@/lib/ratelimit': { rateLimit: (key, limit, windowMs) => { assert.equal(key, 'ai-probe:*'); assert.equal(limit, 6); assert.equal(windowMs, 600000); return state.blocked ? { ok: false, retryAfterSec: 15 } : { ok: true }; } },
   }, env);
-  return { env, state, route, probe };
+  return { env, state, route, probe, fixtures, safety, reviewProfile };
 }
 function request(body = { model: 'claude-sonnet-5' }, headers = {}) { return new Request('https://synthetic.test/api/admin/ai-probe', { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) }); }
 
@@ -64,7 +67,7 @@ test('model whitelist and exact body shape cannot become a generic proxy', async
   }
   assert.equal(s.state.calls.length, 0);
   await assert.rejects(s.probe.runAiProbe('other-model', new AbortController().signal), /Unsupported/);
-  assert.deepEqual(Array.from(s.probe.PROBE_MODELS), ['claude-sonnet-5', 'claude-haiku-4-5-20251001', 'claude-fable-5-2']);
+  assert.deepEqual(Array.from(s.probe.PROBE_MODELS), ['claude-sonnet-5', 'claude-haiku-4-5-20251001', 'claude-fable-5-2', 'qwen3.7-plus', 'qwen3.8-flash']);
 });
 
 test('authorization and active event are checked before input or service access', async () => {
@@ -245,4 +248,105 @@ test('formatIssue is one fixed category and does not expose malformed review con
     assert.equal(result.review.response, undefined); assert.ok(!JSON.stringify(result).includes('PRIVATE-CANARY'));
     assert.equal(s.state.calls[1].body.output_config, undefined); assert.equal(s.state.calls[1].body.tools, undefined);
   }
+});
+
+test('fixed complex fixtures make one review, exercise model rejection and never expose their source or candidate', async () => {
+  for (const language of ['zh', 'en']) for (const fixture of ['complex-valid', 'complex-unsupported', 'complex-extraction']) {
+    const s = setup(); const candidate = s.fixtures.probeFixture(language, fixture);
+    const decision = { ...JSON.parse(yes), ...Object.fromEntries(candidate.expectedRejectedCriteria.map(field => [field, false])) };
+    s.state.responses = [json(JSON.stringify(decision))];
+    const result = await (await s.route.POST(request({ model: 'claude-sonnet-5', language, fixture }))).json();
+    assert.equal(s.state.calls.length, 1); assert.equal(result.generation.status, 'skipped'); assert.equal(result.review.status, 'ok');
+    assert.equal(result.expectedApproved, fixture === 'complex-valid'); assert.equal(result.review.pass, result.expectedApproved);
+    assert.equal(result.matchedExpectation, true); assert.equal(result.pass, true);
+    assert.equal(s.state.calls[0].body.max_tokens, 2048);
+    const sent = JSON.parse(s.state.calls[0].body.messages[0].content);
+    assert.ok(sent.source.length > (language === 'zh' ? 1400 : 4000)); assert.ok(sent.source.length < 8000);
+    assert.equal(sent.source, candidate.source); assert.equal(sent.answer, candidate.answer); assert.deepEqual(sent.suggestions, []);
+    assert.equal(s.safety.reproducesSource(candidate.answer, candidate.source), false, 'negative controls must reach semantic review');
+    assert.ok(!JSON.stringify(result).includes(candidate.answer)); assert.ok(!JSON.stringify(result).includes('LARK-271'));
+    if (!result.expectedApproved) assert.equal(result.review.reviewReason, 'model_rejection');
+  }
+});
+
+test('negative assessments cannot pass on service failure, format error, approval or rejection of the wrong criterion', async () => {
+  for (const response of [
+    json(yes), json(yes.replace('"safe":true', '"safe":false')), json('PRIVATE-OUTPUT-CANARY'),
+    Response.json({ error: { message: 'PRIVATE-OUTPUT-CANARY' } }, { status: 503 }),
+    Response.json({ stop_reason: 'max_tokens', content: [] }), new DOMException('PRIVATE-OUTPUT-CANARY', 'TimeoutError'),
+  ]) {
+    const s = setup(); s.state.responses = [response];
+    const result = await (await s.route.POST(request({ model: 'claude-sonnet-5', fixture: 'complex-unsupported' }))).json();
+    assert.equal(result.expectedApproved, false); assert.equal(result.pass, false); assert.equal(result.matchedExpectation, false);
+    assert.equal(s.state.calls.length, 1); assert.ok(!JSON.stringify(result).includes('PRIVATE-OUTPUT-CANARY'));
+  }
+});
+
+test('diagnostic profile overrides are exact, review-only and cannot become custom prompts or provider options', async () => {
+  const s = setup(); s.env.AI_REVIEW_EFFORT = 'medium';
+  const result = await (await s.route.POST(request())).json();
+  assert.equal(result.configuredReviewProfile, 'medium'); assert.equal(result.reviewProfile, 'medium');
+  assert.equal(s.state.calls[0].body.output_config, undefined);
+  assert.equal(s.state.calls[1].body.output_config.effort, 'medium');
+  assert.equal(s.state.calls[1].body.output_config.format.type, 'json_schema');
+  s.state.responses = [json(yes)];
+  const baseline = await (await s.route.POST(request({ model: 'claude-sonnet-5', fixture: 'complex-valid', reviewProfile: 'default' }))).json();
+  assert.equal(baseline.reviewProfile, 'default'); assert.equal(s.state.calls[2].body.output_config.effort, undefined);
+  s.state.responses = [json(yes)];
+  await s.route.POST(request({ model: 'claude-sonnet-5', fixture: 'complex-valid', reviewProfile: 'low' }));
+  assert.equal(s.state.calls[3].body.output_config.effort, 'low');
+  const count = s.state.calls.length;
+  for (const body of [
+    { model: 'claude-sonnet-5', fixture: 'PRIVATE-FIXTURE-CANARY' },
+    { model: 'claude-sonnet-5', reviewProfile: 'high' },
+    { model: 'qwen3.8-flash', reviewProfile: 'low' },
+    { model: 'claude-sonnet-5', fixture: 'complex-valid', source: 'PRIVATE-SOURCE-CANARY' },
+    { model: 'claude-sonnet-5', fixture: 'complex-valid', answer: 'CUSTOM' },
+    { model: 'claude-sonnet-5', output_config: { effort: 'low' } },
+  ]) assert.equal((await s.route.POST(request(body))).status, 400);
+  assert.equal(s.state.calls.length, count);
+});
+
+function openaiResult(text = yes, tool = false, finishReason) {
+  return { choices: [{ finish_reason: finishReason || (tool ? 'tool_calls' : 'stop'), message: tool
+    ? { tool_calls: [{ type: 'function', function: { name: 'submit_safety_review', arguments: text } }] }
+    : { content: text } }] };
+}
+
+test('Qwen synthetic assessments use only OpenAI auth/protocol and preserve exact review modes and decisions', async () => {
+  for (const model of ['qwen3.7-plus', 'qwen3.8-flash']) for (const reviewMode of ['json_schema', 'tool']) {
+    const s = setup(); s.state.responses = [Response.json(openaiResult(yes, reviewMode === 'tool'))];
+    const result = await (await s.route.POST(request({ model, language: 'zh', fixture: 'complex-valid', reviewMode }))).json();
+    assert.equal(result.pass, true); assert.equal(result.generation.status, 'skipped'); assert.equal(s.state.calls.length, 1);
+    const call = s.state.calls[0];
+    assert.equal(call.url, 'https://cf.api.fan/v1/chat/completions'); assert.equal(call.init.headers.Authorization, `Bearer ${fakeKey}`);
+    assert.equal(call.init.headers['x-api-key'], undefined); assert.equal(call.body.enable_thinking, false); assert.equal(call.body.store, false);
+    assert.equal(call.body.system, undefined); assert.equal(call.body.messages[0].role, 'system'); assert.equal(call.body.messages[1].role, 'user');
+    assert.equal(call.body.output_config, undefined);
+    if (reviewMode === 'json_schema') assert.equal(call.body.response_format.json_schema.strict, true);
+    else { assert.equal(call.body.tool_choice.function.name, 'submit_safety_review'); assert.equal(call.body.parallel_tool_calls, false); }
+  }
+  const s = setup(); s.state.responses = [Response.json(openaiResult(expected)), Response.json(openaiResult())];
+  const result = await (await s.route.POST(request({ model: 'qwen3.8-flash', fixture: 'basic', reviewMode: 'json_schema' }))).json();
+  assert.equal(result.pass, true); assert.equal(s.state.calls.length, 2);
+  assert.equal(s.state.calls[0].body.response_format, undefined); assert.equal(s.state.calls[0].body.max_tokens, 200);
+  const rejected = setup(); rejected.state.responses = [Response.json(openaiResult(yes.replace('"private":true', '"private":false'), true))];
+  const negative = await (await rejected.route.POST(request({ model: 'qwen3.8-flash', fixture: 'complex-extraction', reviewMode: 'tool' }))).json();
+  assert.equal(negative.review.pass, false); assert.equal(negative.matchedExpectation, true);
+});
+
+test('Qwen truncation and malformed tool results remain failed assessments and metrics cannot leak arbitrary fields', async () => {
+  for (const data of [
+    openaiResult(yes, true, 'length'), openaiResult(yes), openaiResult('```json\n' + yes + '\n```', true),
+    { choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [] } }] },
+  ]) {
+    const s = setup(); s.state.responses = [Response.json({ ...data, usage: { completion_tokens: 'PRIVATE-METRIC-CANARY' }, reasoning_content: fakeKey })];
+    const result = await (await s.route.POST(request({ model: 'qwen3.8-flash', fixture: 'complex-valid', reviewMode: 'tool' }))).json();
+    assert.equal(result.pass, false); assert.equal(result.review.outputTokens, undefined);
+    assert.ok(!JSON.stringify(result).includes('PRIVATE-METRIC-CANARY')); assert.ok(!JSON.stringify(result).includes(fakeKey));
+    assert.equal(s.state.calls.length, 1);
+  }
+  const s = setup(); s.state.responses = [Response.json({ ...openaiResult(yes, true), usage: { completion_tokens: 47 } })];
+  const result = await (await s.route.POST(request({ model: 'qwen3.8-flash', fixture: 'complex-valid', reviewMode: 'tool' }))).json();
+  assert.equal(result.review.outputTokens, 47); assert.equal(result.review.stopReason, 'tool_calls');
 });
