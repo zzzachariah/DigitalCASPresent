@@ -10,7 +10,8 @@ async function compile(file) {
 }
 const errorsUrl = `data:text/javascript;base64,${Buffer.from(await compile('../src/lib/ai-errors.ts')).toString('base64')}`;
 const aiErrors = await import(errorsUrl);
-async function load(file) { return import(`data:text/javascript;base64,${Buffer.from((await compile(file)).replace('"./ai-errors"', JSON.stringify(errorsUrl))).toString('base64')}`); }
+const reviewUrl = `data:text/javascript;base64,${Buffer.from((await compile('../src/lib/review-output.ts')).replace('"./ai-errors"', JSON.stringify(errorsUrl))).toString('base64')}`;
+async function load(file) { return import(`data:text/javascript;base64,${Buffer.from((await compile(file)).replace('"./ai-errors"', JSON.stringify(errorsUrl)).replace('"./review-output"', JSON.stringify(reviewUrl))).toString('base64')}`); }
 const safety = await load('../src/lib/ai-safety.ts');
 const sentences = await load('../src/lib/sentences.ts');
 const privacy = await load('../src/lib/privacy.ts');
@@ -51,8 +52,10 @@ test('Review diagnostics distinguish rejection, malformed output and outages wit
   const cases = [
     [{ ...input, answer: source }, async () => assert.fail('Local rejection cannot call a reviewer'), { reason: 'local_rejection' }],
     [input, async () => yes.replace('"private":true', '"private":false'), { reason: 'model_rejection', rejectedCriteria: ['private'] }],
-    [input, async () => secret, { reason: 'review_format' }],
-    [input, async () => JSON.stringify({ ...JSON.parse(yes), [secret]: false }), { reason: 'review_format' }],
+    [input, async () => secret, { reason: 'review_format', formatIssue: 'invalid_json' }],
+    [input, async () => JSON.stringify({ ...JSON.parse(yes), [secret]: false }), { reason: 'review_format', formatIssue: 'wrong_fields' }],
+    [input, async () => '```json\n' + yes + '\n```', { reason: 'review_format', formatIssue: 'fenced_json' }],
+    [input, async () => yes.replace('"safe":true', '"safe":"true"'), { reason: 'review_format', formatIssue: 'wrong_values' }],
     [input, async () => { throw new Error(secret); }, { reason: 'review_upstream_error', upstreamKind: 'unknown' }],
     [input, async () => { throw new DOMException(secret, 'TimeoutError'); }, { reason: 'review_timeout', upstreamKind: 'unknown' }],
     [input, async () => { throw new DOMException(secret, 'AbortError'); }, { reason: 'review_timeout', upstreamKind: 'unknown' }],
@@ -68,7 +71,7 @@ test('Review diagnostics distinguish rejection, malformed output and outages wit
   let invoked = false;
   assert.equal(await safety.reviewExhibitionAnswer(input, async () => yes, () => { invoked = true; }), true);
   assert.equal(invoked, false);
-  assert.equal(await safety.reviewExhibitionAnswer(input, async options => { assert.equal(options.maxTokens, 512); return yes; }), true);
+  assert.equal(await safety.reviewExhibitionAnswer(input, async options => { assert.equal(options.maxTokens, 512); assert.equal(options.reviewOutput, 'json_schema'); return yes; }), true);
   assert.equal(await safety.reviewExhibitionAnswer(input, async () => 'bad JSON', () => { throw new Error(secret); }), false);
 });
 

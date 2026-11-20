@@ -6,6 +6,8 @@ The organizer explicitly approved A2E processing for all participants in this ac
 
 Preparation handles one section/language at a time and emits only fixed generation/review/speech/persistence phase names before its final result. The admin shows a complete per-step history, per-language saved text/audio counts and exact missing variants. A service failure is not described as a content rejection, and a partial run is never called fully ready. Review output has a 512-token ceiling; truncated or malformed responses still fail closed. Safe HTTP/error categories can be diagnosed using fixed fictional material at `/admin/service-check` without reading student manuscripts or exposing provider messages.
 
+Review requests use a fixed five-boolean response schema (`AI_REVIEW_FORMAT=json_schema`), rather than relying only on prose instructions to request JSON. The same five criteria still must all be true. A forced fixed-name tool is available only as an explicitly selected compatibility mode; no review rejection triggers a fallback or automatic retry. Diagnostics support fixed fictional Chinese and English examples, and distinguish framing, malformed JSON, incorrect fields and incorrect value types without exposing model output.
+
 The earlier approvals below are historical and are superseded by this activity-wide scope.
 
 ## November 21, 2026 narration repair

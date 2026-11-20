@@ -38,6 +38,8 @@ function setup({ cached = true, approved = true } = {}) {
   const policy = load('../src/lib/processing-policy.ts');
   const retention = load('../src/lib/event-retention.ts');
   const privacy = load('../src/lib/privacy.ts');
+  const errors = load('../src/lib/ai-errors.ts');
+  const reviewOutput = load('../src/lib/review-output.ts', { './ai-errors': errors });
   const a2e = load('../src/lib/a2e.ts', { './processing-policy': policy, './event-retention': retention });
   state.person = {
     id: 'anna-fixture', name: 'Synthetic Anna', gender: 'female', language: 'en', script: source,
@@ -69,7 +71,7 @@ function setup({ cached = true, approved = true } = {}) {
     'next/server': { NextResponse: { json: (body, init) => new Response(JSON.stringify(body), init) } },
     '@/lib/auth': { isAdmin: () => state.admin }, '@/lib/store': store,
     '@/lib/processing-policy': policy, '@/lib/privacy': privacy, '@/lib/a2e': a2e,
-    '@/lib/ai-safety': load('../src/lib/ai-safety.ts', { './ai-errors': load('../src/lib/ai-errors.ts') }), '@/lib/sentences': load('../src/lib/sentences.ts'),
+    '@/lib/ai-safety': load('../src/lib/ai-safety.ts', { './ai-errors': errors, './review-output': reviewOutput }), '@/lib/sentences': load('../src/lib/sentences.ts'),
     '@/lib/preparation-response': load('../src/lib/preparation-response.ts'),
     '@/lib/prepared-narration': load('../src/lib/prepared-narration.ts'),
     '@/lib/prompts': { systemPrompt: () => 'Synthetic test', explainSectionPrompt: () => 'Explain this exhibit' },

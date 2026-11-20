@@ -547,7 +547,7 @@ export default function AdminApp() {
           className="btn-primary mt-2 w-full"
           onClick={() => prepareAll(selected)}
           disabled={!!jobs[selected.id] || pregenId === selected.id || selected.sections.length === 0}
-          title={selectedPhoto.ready ? (selectedSpeech.ready ? "准备获准的形象、讲解及语音，已有的会跳过" : "仅生成获准的卡通、视频和文字讲解；不生成外部语音") : (selectedSpeech.ready ? "照片处理未获准；可准备讲解和获准的配音" : "照片处理未获准；可先准备文字讲解")}
+          title={selectedPhoto.ready ? (selectedSpeech.ready ? "依次准备形象、视频和全部目标语言的讲解与语音，已有素材会复用" : "仅生成卡通、视频和文字讲解；配音尚未启用") : (selectedSpeech.ready ? "形象处理暂不可用；可准备讲解和配音" : "形象处理暂不可用；可先准备文字讲解")}
         >
           <IconSparkle size={15} /> {selectedPhoto.ready || selectedSpeech.ready ? "一键准备素材" : "一键准备文字"}
         </button>
@@ -586,7 +586,7 @@ export default function AdminApp() {
         {preparations[selected.id] && (
           <section aria-label="逐项准备进度" className="mt-4 border-t border-line pt-3">
             <p className="text-[12px] font-medium text-ink-2">准备进度 · {preparations[selected.id].entries.filter((entry) => entry.status === "complete").length}/{preparations[selected.id].entries.length} 步完成</p>
-            <p className="mt-1 text-[11px] leading-relaxed text-ink-3">按顺序逐项处理。已完成的结果会保留；未获准的项目仍显示为待处理。</p>
+            <p className="mt-1 text-[11px] leading-relaxed text-ink-3">按顺序逐项处理，每一步保存并校验后标为完成。已完成的结果会保留。</p>
             <ol className="mt-3 space-y-3">
               {preparations[selected.id].entries.map((entry, index) => (
                 <li key={entry.key} className="flex items-start gap-2 text-[12px]">

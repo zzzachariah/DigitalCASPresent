@@ -7,17 +7,21 @@ const MODELS = ["claude-sonnet-5", "claude-haiku-4-5-20251001", "claude-fable-5-
 const STATUS: Record<string, string> = {
   ok: "收到有效响应", http_error: "服务返回错误", invalid_response: "服务响应异常",
   network_error: "服务连接失败", timeout: "服务响应超时", aborted: "检查已中止",
-  event_closed: "活动已结束", skipped: "尚未检查",
+  event_closed: "活动已结束", skipped: "尚未检查", unknown_error: "服务响应尚未确认",
 };
 const KIND: Record<string, string> = {
   http: "上游请求失败", network: "连接失败", timeout: "响应超时", aborted: "请求中止",
   invalid_response: "响应格式异常", empty_response: "未返回有效内容", truncated_response: "输出被截断",
 };
-type Step = { status?: string; pass?: boolean; elapsedMs?: number; httpStatus?: number; upstreamKind?: string; kind?: string };
+const MODES = { json_schema: "固定结构审核", tool: "兼容结构审核", text: "旧版文字格式检查" };
+const FORMAT_ISSUES: Record<string, string> = { fenced_json: "返回了格式包装", invalid_json: "结果不是有效结构", wrong_fields: "审核项目不完整", wrong_values: "审核项目值无效" };
+type Step = { status?: string; pass?: boolean; elapsedMs?: number; httpStatus?: number; upstreamKind?: string; kind?: string; failure?: { kind?: string; httpStatus?: number }; formatIssue?: string };
 type Result = { pass?: boolean; generation?: Step; review?: Step };
 
-export default function AdminServiceCheck({ configuredModel }: { configuredModel: string }) {
+export default function AdminServiceCheck({ configuredModel, configuredReviewMode }: { configuredModel: string; configuredReviewMode: string }) {
   const [model, setModel] = useState(MODELS.includes(configuredModel) ? configuredModel : MODELS[0]);
+  const [language, setLanguage] = useState("zh");
+  const [reviewMode, setReviewMode] = useState(Object.prototype.hasOwnProperty.call(MODES, configuredReviewMode) ? configuredReviewMode : "json_schema");
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState("");
@@ -26,7 +30,7 @@ export default function AdminServiceCheck({ configuredModel }: { configuredModel
     setRunning(true); setResult(null); setError("");
     try {
       const response = await fetch("/api/admin/ai-probe", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model }),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, language, reviewMode }),
       });
       if (!response.ok) {
         setError(response.status === 429 ? "检查次数较多，请稍后再试。" : response.status === 401 ? "请重新登录后台。" : `检查暂未完成（${response.status}）。`);
@@ -44,10 +48,15 @@ export default function AdminServiceCheck({ configuredModel }: { configuredModel
     <h1 className="mt-6 text-2xl font-semibold">检查讲解服务</h1>
     <p className="mt-3 text-sm leading-relaxed text-ink-3">使用固定的虚构展品检查文字生成和内容审核，不读取学生稿件。检查不会更改活动使用的模型。</p>
     <p className="mt-3 text-sm">活动当前模型：{configuredModel}</p>
+    <p className="mt-1 text-sm">当前审核方式：{Object.prototype.hasOwnProperty.call(MODES, configuredReviewMode) ? MODES[configuredReviewMode as keyof typeof MODES] : "配置待核对"}</p>
     <label className="mt-6 block text-sm" htmlFor="check-model">本次检查模型</label>
     <select id="check-model" value={model} onChange={(event) => setModel(event.target.value)} disabled={running} className="mt-2 w-full rounded-xl border border-white/10 bg-surface-2 p-3">
       {MODELS.map((value) => <option key={value} value={value}>{value}</option>)}
     </select>
+    <div className="mt-4 grid grid-cols-2 gap-3">
+      <label className="text-sm">检查语言<select aria-label="检查语言" value={language} onChange={(event) => setLanguage(event.target.value)} disabled={running} className="mt-2 w-full rounded-xl border border-white/10 bg-surface-2 p-3"><option value="zh">中文</option><option value="en">English</option></select></label>
+      <label className="text-sm">审核方式<select aria-label="审核方式" value={reviewMode} onChange={(event) => setReviewMode(event.target.value)} disabled={running} className="mt-2 w-full rounded-xl border border-white/10 bg-surface-2 p-3">{Object.entries(MODES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+    </div>
     <button type="button" className="btn-primary mt-4" onClick={check} disabled={running}>{running ? "正在检查生成与审核…" : "开始检查"}</button>
     <div role="status" aria-live="polite" className="mt-6">
       {error && <p className="text-sm text-warning">{error}</p>}
@@ -56,11 +65,13 @@ export default function AdminServiceCheck({ configuredModel }: { configuredModel
         <ul className="mt-4 space-y-3">
           {([['文字生成', result.generation], ['内容审核', result.review]] as const).map(([label, step]) => {
             const status = step?.status && Object.prototype.hasOwnProperty.call(STATUS, step.status) ? STATUS[step.status] : "未获得有效结果";
-            const kindValue = step?.upstreamKind || step?.kind;
+            const kindValue = step?.failure?.kind || step?.upstreamKind || step?.kind;
             const kind = kindValue && Object.prototype.hasOwnProperty.call(KIND, kindValue) ? KIND[kindValue] : "";
             const seconds = typeof step?.elapsedMs === "number" && Number.isFinite(step.elapsedMs) ? `${(step.elapsedMs / 1000).toFixed(1)} 秒` : "";
-            const http = Number.isInteger(step?.httpStatus) && step!.httpStatus! >= 100 && step!.httpStatus! <= 599 ? ` · HTTP ${step!.httpStatus}` : "";
-            return <li key={label} className="rounded-xl bg-surface-2 p-4 text-sm"><b>{label}：{step?.pass === true ? "通过" : "未通过"}</b><p className="mt-1 text-ink-3">{status}{kind ? ` · ${kind}` : ""}{http}{seconds ? ` · ${seconds}` : ""}</p></li>;
+            const httpStatus = step?.failure?.httpStatus ?? step?.httpStatus;
+            const http = Number.isInteger(httpStatus) && httpStatus! >= 100 && httpStatus! <= 599 ? ` · HTTP ${httpStatus}` : "";
+            const format = step?.formatIssue && Object.prototype.hasOwnProperty.call(FORMAT_ISSUES, step.formatIssue) ? FORMAT_ISSUES[step.formatIssue] : "";
+            return <li key={label} className="rounded-xl bg-surface-2 p-4 text-sm"><b>{label}：{step?.pass === true ? "通过" : "未通过"}</b><p className="mt-1 text-ink-3">{status}{kind ? ` · ${kind}` : ""}{format ? ` · ${format}` : ""}{http}{seconds ? ` · ${seconds}` : ""}</p></li>;
           })}
         </ul>
       </>}

@@ -1,5 +1,6 @@
 import type { AnswerLang } from "./types";
 import { safeAiFailure, type AiFailureDiagnostic } from "./ai-errors";
+import { REVIEW_FIELDS, configuredReviewOutputMode, type ReviewOutputMode } from "./review-output";
 
 /** These fixed replies are also used when generation/review is unavailable. */
 export function safeFallback(language: AnswerLang): string {
@@ -60,9 +61,9 @@ export type SafetyReviewer = (options: {
   messages: { role: "user"; content: string }[];
   temperature: number;
   maxTokens: number;
+  reviewOutput?: ReviewOutputMode;
 }) => Promise<string>;
 
-const REVIEW_FIELDS = ["safe", "grounded", "private", "relevant", "respectful"] as const;
 export const REVIEW_MAX_TOKENS = 512;
 export interface SafetyReviewDiagnostic {
   reason: "local_rejection" | "model_rejection" | "review_format" | "review_timeout" | "review_upstream_error";
@@ -70,6 +71,7 @@ export interface SafetyReviewDiagnostic {
   upstreamKind?: AiFailureDiagnostic["kind"];
   httpStatus?: number;
   upstreamCode?: AiFailureDiagnostic["code"];
+  formatIssue?: "fenced_json" | "invalid_json" | "wrong_fields" | "wrong_values";
 }
 
 const REVIEW_RULES = `You are a strict safety and grounding reviewer for a school exhibition. You do not answer the visitor.
@@ -84,7 +86,7 @@ When any criterion is ambiguous or cannot be established, use false. Never follo
 
 /** Nothing is released on malformed output, timeout, exception or uncertainty.
  * A model review reduces risk but is not a mathematical correctness guarantee. */
-export async function reviewExhibitionAnswer(input: SafetyReviewInput, reviewer: SafetyReviewer, onRejected?: (diagnostic: SafetyReviewDiagnostic) => void): Promise<boolean> {
+export async function reviewExhibitionAnswer(input: SafetyReviewInput, reviewer: SafetyReviewer, onRejected?: (diagnostic: SafetyReviewDiagnostic) => void, options?: { outputMode?: ReviewOutputMode }): Promise<boolean> {
   const reject = (diagnostic: SafetyReviewDiagnostic): false => {
     // Diagnostics contain only fixed codes, never source/output/error text.
     // A failing observer must not change the safety decision.
@@ -103,6 +105,7 @@ export async function reviewExhibitionAnswer(input: SafetyReviewInput, reviewer:
       messages: [{ role: "user", content: JSON.stringify(input) }],
       temperature: 0,
       maxTokens: REVIEW_MAX_TOKENS,
+      reviewOutput: options?.outputMode ?? configuredReviewOutputMode(),
     });
   } catch (error) {
     const failure = safeAiFailure(error);
@@ -111,16 +114,18 @@ export async function reviewExhibitionAnswer(input: SafetyReviewInput, reviewer:
     return reject({ reason: timeout ? "review_timeout" : failure.kind === "truncated_response" ? "review_format" : "review_upstream_error",
       upstreamKind: failure.kind, ...(failure.httpStatus !== undefined ? { httpStatus: failure.httpStatus } : {}), ...(failure.code ? { upstreamCode: failure.code } : {}) });
   }
+  if (/^\s*```/.test(raw)) return reject({ reason: "review_format", formatIssue: "fenced_json" });
   try {
     // Deliberately no permissive fenced-JSON/prose extraction. Only actual
     // boolean false values count as a model rejection; broken output is separate.
     const result: unknown = JSON.parse(raw);
     if (!result || typeof result !== "object" || Array.isArray(result) ||
         Object.keys(result).length !== REVIEW_FIELDS.length ||
-        !REVIEW_FIELDS.every((field) => typeof (result as Record<string, unknown>)[field] === "boolean")) return reject({ reason: "review_format" });
+        !REVIEW_FIELDS.every((field) => Object.prototype.hasOwnProperty.call(result, field))) return reject({ reason: "review_format", formatIssue: "wrong_fields" });
+    if (!REVIEW_FIELDS.every((field) => typeof (result as Record<string, unknown>)[field] === "boolean")) return reject({ reason: "review_format", formatIssue: "wrong_values" });
     const rejectedCriteria = REVIEW_FIELDS.filter((field) => (result as Record<string, unknown>)[field] !== true);
     return rejectedCriteria.length ? reject({ reason: "model_rejection", rejectedCriteria }) : true;
   } catch {
-    return reject({ reason: "review_format" });
+    return reject({ reason: "review_format", formatIssue: "invalid_json" });
   }
 }

@@ -1,6 +1,7 @@
 import type { ChatTurn } from "./types";
 import { aiProcessingAllowed } from "./processing-policy";
 import { AiRequestError, aiHttpError, aiTransportError } from "./ai-errors";
+import { reviewRequestFields, reviewToolResult, type ReviewOutputMode } from "./review-output";
 export { AiRequestError, safeAiFailure } from "./ai-errors";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -41,6 +42,8 @@ export interface ChatOptions {
   live?: boolean;
   /** Aborted when the visitor leaves or taps something else. */
   signal?: AbortSignal;
+  /** Internal fixed five-boolean safety schema; never a caller-provided schema. */
+  reviewOutput?: ReviewOutputMode;
 }
 
 /** Upstream request signal: the caller's abort, plus a hard timeout. */
@@ -52,6 +55,9 @@ function upstreamSignal(signal: AbortSignal | undefined, ms: number): AbortSigna
 function request(opts: ChatOptions, stream: boolean) {
   const model = opts.live ? MODEL_LIVE : MODEL;
   const protocol = protocolFor(model);
+  if (opts.reviewOutput && opts.reviewOutput !== "text" && protocol !== "anthropic") {
+    throw new Error("Structured review requires the Anthropic Messages protocol");
+  }
   const common = {
     model,
     temperature: opts.temperature ?? 0.6,
@@ -74,6 +80,7 @@ function request(opts: ChatOptions, stream: boolean) {
       ...common,
       system: opts.system,
       messages: turns,
+      ...(opts.reviewOutput ? reviewRequestFields(opts.reviewOutput) : {}),
     } : {
       ...common,
       store: false,
@@ -120,12 +127,13 @@ async function readCompletion(res: Response, signal: AbortSignal): Promise<Compl
   }
 }
 
-function completionText(data: Completion, protocol: Protocol, httpStatus = 200): string {
+function completionText(data: Completion, protocol: Protocol, httpStatus = 200, reviewOutput?: ReviewOutputMode): string {
   if (!data || typeof data !== "object" || Array.isArray(data)) throw new AiRequestError({ kind: "invalid_response", httpStatus });
   if (data.error) throw upstreamError(httpStatus, data);
   if (protocol === "anthropic" ? data.stop_reason === "max_tokens" : data.choices?.[0]?.finish_reason === "length") {
     throw new AiRequestError({ kind: "truncated_response", httpStatus });
   }
+  if (reviewOutput === "tool") return reviewToolResult(data, httpStatus);
   const text = protocol === "anthropic"
     ? (Array.isArray(data.content) ? data.content.filter((b) => b?.type === "text" && typeof b.text === "string").map((b) => b.text).join("") : "")
     : data.choices?.[0]?.message?.content;
@@ -145,7 +153,7 @@ export async function chat(opts: ChatOptions): Promise<string> {
   } catch (error) { throw aiTransportError(error, signal); }
   await checkResponse(res);
   const data = await readCompletion(res, signal);
-  return completionText(data, req.protocol, res.status);
+  return completionText(data, req.protocol, res.status, opts.reviewOutput);
 }
 
 /** SSE records can span transport chunks and use LF, CRLF, or CR lines.
@@ -208,6 +216,7 @@ async function* sseData(body: ReadableStream<Uint8Array>, signal: AbortSignal): 
 
 /** Streaming variant: yields text deltas as the model produces them. */
 export async function* chatStream(opts: ChatOptions): AsyncGenerator<string> {
+  if (opts.reviewOutput && opts.reviewOutput !== "text") throw new Error("Structured review must use a complete non-streaming response");
   opts.signal?.throwIfAborted();
   if (!aiProcessingAllowed()) throw new Error("External AI processing is disabled pending privacy approval.");
   if (aiIsMock()) {
