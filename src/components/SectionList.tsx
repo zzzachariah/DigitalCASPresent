@@ -1,13 +1,17 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import type { Section } from "@/lib/types";
+import type { AnswerLang, Section } from "@/lib/types";
 import { pad2 } from "@/lib/format";
 import { Spinner } from "./Loading";
 import { IconBolt, IconClose, IconDown, IconUp } from "./icons";
 
+const ANSWER_LABELS: Record<AnswerLang, string> = { zh: "中文讲解", en: "English explanation", bilingual: "双语讲解 · Bilingual" };
+const ANSWER_LANGUAGES: AnswerLang[] = ["zh", "en", "bilingual"];
+
 /** Admin-only extras rendered inside each section card. */
 export interface SectionAdminTools {
+  targetLanguages: AnswerLang[];
   pregenerate: (sectionId: string) => void;
   pregenerating: Set<string>;
   bulkPregenerating: boolean;
@@ -96,26 +100,33 @@ export default function SectionList({
                     已生成 · {Object.keys(s.cachedAnswers).join(" / ")}
                     {s.cachedAudio && Object.keys(s.cachedAudio).length > 0 && " · 含语音"}
                   </span>
-                  <button type="button" className="chip" onClick={() => admin.toggleAnswersOpen(s.id)}>
-                    {admin.answersOpen.has(s.id) ? "收起讲解" : "查看 / 编辑讲解"}
-                  </button>
                 </>
               )}
+              <button
+                type="button"
+                className="chip"
+                aria-label={`${s.title || `第 ${i + 1} 部分`} · 编写 / 编辑讲解`}
+                aria-expanded={admin.answersOpen.has(s.id)}
+                onClick={() => admin.toggleAnswersOpen(s.id)}
+              >
+                {admin.answersOpen.has(s.id) ? "收起讲解" : "编写 / 编辑讲解"}
+              </button>
             </div>
           )}
-          {admin && admin.answersOpen.has(s.id) && s.cachedAnswers && (
+          {admin && admin.answersOpen.has(s.id) && (
             <div className="space-y-3 rounded-lg bg-surface-2 p-3 animate-fade">
-              {(Object.entries(s.cachedAnswers) as ["en" | "zh" | "bilingual", string][]).map(([key, text]) => (
+              {Array.from(new Set([...admin.targetLanguages, ...ANSWER_LANGUAGES.filter((key) => typeof s.cachedAnswers?.[key] === "string")])).map((key) => (
                 <div key={key}>
-                  <p className="eyebrow mb-1.5">{key === "zh" ? "中文讲解" : key === "en" ? "English" : "双语 · Bilingual"}</p>
+                  <p className="eyebrow mb-1.5">{ANSWER_LABELS[key]}</p>
                   <textarea
                     className="input min-h-[110px] resize-y text-[13px] leading-relaxed"
-                    value={text}
+                    aria-label={`${s.title || `第 ${i + 1} 部分`} · ${ANSWER_LABELS[key]}`}
+                    value={s.cachedAnswers?.[key] ?? ""}
                     onChange={(e) => admin.updateCachedAnswer(s.id, key, e.target.value)}
                   />
                 </div>
               ))}
-              <p className="text-[12px] text-ink-3">改完后点底部「保存修改」生效；清空某段文字 = 该语言恢复为现场实时生成。</p>
+              <p className="text-[12px] text-ink-3">改完后点底部「保存修改」，再准备配音；讲解仍需通过审核。清空某段文字 = 该语言恢复为现场实时生成。</p>
             </div>
           )}
         </div>

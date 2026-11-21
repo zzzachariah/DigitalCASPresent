@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Person } from "@/lib/types";
 import { adminApi, type EditorApi } from "@/lib/editor-api";
+import { narrationLanguages } from "@/lib/admin-narration";
 import { LoadingOverlay, Spinner } from "./Loading";
 import type { Draft } from "./DraftPreview";
 import SectionList from "./SectionList";
@@ -337,6 +338,7 @@ export default function PersonEditor({
           admin={
             d.isEdit
               ? {
+                  targetLanguages: narrationLanguages(d.language),
                   pregenerate: (id) => d.pregenerate(id),
                   pregenerating: d.pregenerating,
                   bulkPregenerating: d.bulkPregenerating,
