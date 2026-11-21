@@ -146,6 +146,29 @@ export interface A2eResult {
   json: any;
 }
 
+type A2ePhase = "tts" | "cartoon_start" | "cartoon_poll" | "loop_start" | "loop_poll" | "upload_prepare" | "upload" | "talking_photo_start" | "talking_photo_poll" | "request";
+
+/** Never expose upstream messages, response bodies or signed asset URLs. The
+ * numeric code remains compatible with narration's existing safe diagnostic. */
+function failureMessage(phase: A2ePhase, result?: Pick<A2eResult, "httpStatus" | "json">): string {
+  const value: unknown = result?.json?.code === 0 && taskFailed(result.json?.data)
+    ? result.json.data.failed_code : result?.json?.code;
+  const code = typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 99_999_999
+    ? value : typeof value === "string" && /^\d{1,8}$/.test(value) && Number(value) > 0 ? value : undefined;
+  const httpStatus = result && Number.isInteger(result.httpStatus) && result.httpStatus >= 100 && result.httpStatus <= 599
+    ? result.httpStatus : undefined;
+  return JSON.stringify({ phase, ...(httpStatus !== undefined ? { httpStatus } : {}), ...(code !== undefined ? { code } : {}) });
+}
+
+function requestPhase(path: string): A2ePhase {
+  if (path === "/api/v1/video/send_tts") return "tts";
+  if (path === "/api/v1/r2/upload-presigned-url") return "upload_prepare";
+  if (path.startsWith("/api/v1/userNanoBanana/")) return path.endsWith("/start") ? "cartoon_start" : "cartoon_poll";
+  if (path.startsWith("/api/v1/userImage2Video/")) return path.endsWith("/start") ? "loop_start" : "loop_poll";
+  if (path.startsWith("/api/v1/talkingPhoto/")) return path.endsWith("/start") ? "talking_photo_start" : "talking_photo_poll";
+  return "request";
+}
+
 export async function a2e(path: string, method = "POST", body?: unknown, signal?: AbortSignal, scope?: string | { speechPersonId: string }): Promise<A2eResult> {
   assertEventOpen();
   if (typeof scope === "string") {
@@ -155,21 +178,23 @@ export async function a2e(path: string, method = "POST", body?: unknown, signal?
     requireSpeechProcessing(scope.speechPersonId);
     if (method !== "POST" || path !== "/api/v1/video/send_tts") throw new Error("This operation is outside speech-only approval");
   } else requireExternalProcessing();
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: { Authorization: `Bearer ${key()}`, "Content-Type": "application/json" },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-    signal: signal ?? AbortSignal.timeout(20_000),
-  });
-  const text = await res.text();
-  let json: any;
+  let res: Response;
+  let text: string;
   try {
-    json = text ? JSON.parse(text) : {};
+    res = await fetch(`${BASE}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${key()}`, "Content-Type": "application/json" },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: signal ?? AbortSignal.timeout(20_000),
+    });
+    text = await res.text();
   } catch {
-    json = { raw: text.slice(0, 800) };
+    throw new Error(failureMessage(requestPhase(path)));
   }
-  // A2E uses code:0 for success even on HTTP 200; treat code!==0 as not-ok.
-  const ok = res.ok && (json?.code === 0 || json?.code === undefined);
+  let json: any = {};
+  try { json = JSON.parse(text); } catch { /* Invalid JSON is a failed response. */ }
+  // Current CN OpenAPI requires numeric code:0, including on HTTP 200.
+  const ok = res.ok && json !== null && typeof json === "object" && !Array.isArray(json) && json.code === 0;
   return { httpStatus: res.status, ok, json };
 }
 
@@ -232,10 +257,10 @@ export async function a2eTts(text: string, gender?: "male" | "female", signal?: 
     ? { country: "zh", region: "CN" }
     : { country: "en", region: "US" };
   const tts = await a2e("/api/v1/video/send_tts", "POST", { msg: text, tts_id: voiceFor(gender), ...locale }, signal, personId === undefined ? undefined : { speechPersonId: personId });
-  if (!tts.ok) throw new Error(`send_tts failed (${tts.httpStatus}): ${JSON.stringify(tts.json).slice(0, 200)}`);
+  if (!tts.ok) throw new Error(failureMessage("tts", tts));
   const audioUrl = typeof tts.json?.data === "string" ? tts.json.data : findUrl(tts.json?.data);
   if (!audioUrl || !/^https?:\/\//.test(audioUrl)) {
-    throw new Error("send_tts returned no audio: " + JSON.stringify(tts.json).slice(0, 200));
+    throw new Error(failureMessage("tts", tts));
   }
   return audioUrl;
 }
@@ -263,17 +288,17 @@ export async function a2eCreateTalkingPhoto(
     image_url,
     audio_url,
   });
-  const id = start.json?.data?._id;
-  if (!id) throw new Error("talkingPhoto/start failed: " + JSON.stringify(start.json).slice(0, 300));
-  return id as string;
+  const id = safeTaskId(start.json?.data?._id);
+  if (!start.ok || !id || taskFailed(start.json?.data)) throw new Error(failureMessage("talking_photo_start", start));
+  return id;
 }
 
 /** Poll a talking-photo task. Done when result_url is set; error if failed. */
 export async function a2ePollTalkingPhoto(id: string): Promise<AvatarPollResult> {
   const r = await a2e(`/api/v1/talkingPhoto/${id}`, "GET");
   const d = r.json?.data;
-  if (d?.result_url) return { status: "done", videoUrl: d.result_url as string };
-  if (d?.failed_message || d?.failed_code) return { status: "error" };
+  if (!r.ok || taskFailed(d)) return { status: "error" };
+  if ((d?.current_status === undefined || d.current_status === "completed") && assetUrl(d?.result_url)) return { status: "done", videoUrl: d.result_url as string };
   return { status: "pending" };
 }
 
@@ -296,16 +321,11 @@ export async function a2eCartoonStart(
       input_images: [cdnUrl],
       image_size: "1K",
     }, undefined, photoPersonId);
-    const id = start.json?.data?._id;
-    if (!id) {
-      const j = start.json || {};
-      return {
-        error: `start ${start.httpStatus}: ${j.msg || j.message || j.code || JSON.stringify(j).slice(0, 200)}`,
-      };
-    }
-    return { taskId: id as string };
-  } catch (e) {
-    return { error: e instanceof Error ? e.message : String(e) };
+    const id = safeTaskId(start.json?.data?._id);
+    if (!start.ok || !id || taskFailed(start.json?.data)) return { error: failureMessage("cartoon_start", start) };
+    return { taskId: id };
+  } catch {
+    return { error: failureMessage("cartoon_start") };
   }
 }
 
@@ -315,10 +335,13 @@ export async function a2eCartoonPoll(
 ): Promise<{ done: true; url: string } | { pending: true } | { error: string }> {
   const d = await a2e(`/api/v1/userNanoBanana/detail/${taskId}`, "GET", undefined, undefined, photoPersonId);
   const data = d.json?.data;
-  const urls: string[] = data?.image_urls || [];
-  if (urls.length > 0) return { done: true, url: urls[0] };
-  if (data?.failed_message) return { error: `render failed: ${data.failed_message}` };
-  return { pending: true };
+  if (!d.ok || taskFailed(data)) return { error: failureMessage("cartoon_poll", d) };
+  const status = data?.current_status;
+  if (["initialized", "processing", "seedream_fallback"].includes(status)) return { pending: true };
+  // Older successful records omitted status. Only known result fields qualify.
+  const url = extractImageUrl(data);
+  if ((status === undefined || status === "completed") && url) return { done: true, url };
+  return { error: failureMessage("cartoon_poll", d) };
 }
 
 // Ambient "talking" loop video — generated ONCE per person (not per answer).
@@ -341,19 +364,16 @@ export async function a2eLoopVideoStart(
       negative_prompt:
         "static image, no motion, frozen, blurry, low quality, distorted face, deformed, extra limbs, watermark, text overlay, camera movement, scene change",
       image_url: cdnUrl,
-      duration: "5",
-      aspect_ratio: "9:16",
-      resolution: "720p",
+      video_time: 5,
+      model_version: "a2e",
+      auto_add_audio: false,
+      number_of_images: 1,
     }, undefined, photoPersonId);
-    const id = start.json?.data?._id;
-    if (!id) {
-      const j = start.json || {};
-      const detail = j.errors ? JSON.stringify(j.errors) : j.msg || j.message || JSON.stringify(j);
-      return { error: `start ${start.httpStatus}: ${String(detail).slice(0, 300)}` };
-    }
-    return { taskId: id as string };
-  } catch (e) {
-    return { error: e instanceof Error ? e.message : String(e) };
+    const id = safeTaskId(start.json?.data?._id);
+    if (!start.ok || !id || taskFailed(start.json?.data)) return { error: failureMessage("loop_start", start) };
+    return { taskId: id };
+  } catch {
+    return { error: failureMessage("loop_start") };
   }
 }
 
@@ -363,11 +383,37 @@ export async function a2eLoopVideoStart(
  *  video" match would happily grab the INPUT PHOTO instead of the rendered
  *  clip. Only accept known result fields, and only if they look like a video
  *  file — never fall back to a generic scan. */
+function assetUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    return (url.protocol === "https:" || url.protocol === "http:") && !url.username && !url.password;
+  } catch { return false; }
+}
+
+function taskFailed(data: any): boolean {
+  return ["failed", "blocked", "block"].includes(data?.current_status) ||
+    !!data?.failed_message || (data?.failed_code !== undefined && data.failed_code !== null && data.failed_code !== "" && data.failed_code !== 0 && data.failed_code !== "0");
+}
+
+function extractImageUrl(data: any): string | null {
+  if (!data || typeof data !== "object") return null;
+  const candidates = [
+    data.result_image_url,
+    ...(Array.isArray(data.result_image_urls) ? data.result_image_urls : []),
+    ...(Array.isArray(data.image_urls) ? data.image_urls : []),
+  ];
+  // image_url/input_images can identify the source portrait, not the result.
+  return candidates.find(assetUrl) ?? null;
+}
+
 function extractVideoUrl(data: any): string | null {
   if (!data || typeof data !== "object") return null;
   const candidates = [
     data.result_url,
     data.video_url,
+    data.result_video_url,
+    data.hd_video_url,
     data.output_url,
     data.output_video_url,
     data.render_url,
@@ -376,22 +422,21 @@ function extractVideoUrl(data: any): string | null {
     ...(Array.isArray(data.video_urls) ? data.video_urls : []),
     ...(Array.isArray(data.result_urls) ? data.result_urls : []),
   ].filter((v): v is string => typeof v === "string" && v.length > 0);
-  return candidates.find((u) => /\.(mp4|mov|webm|m3u8)(\?|$)/i.test(u)) ?? null;
+  return candidates.find((u) => assetUrl(u) && /\.(mp4|mov|webm|m3u8)(\?|$)/i.test(u)) ?? null;
 }
 
-/** Poll a loop-video task once. Includes the raw status even while pending,
- *  so a client-side timeout can report something diagnosable instead of a
- *  bare "timed out" (this is what let a silent failure go unnoticed before —
- *  the error banner just wasn't visible on screen when it happened). */
+/** Poll once, exposing only documented pending states and safe diagnostics. */
 export async function a2eLoopVideoPoll(
   taskId: string, photoPersonId?: string
 ): Promise<{ done: true; url: string } | { pending: true; status?: string } | { error: string }> {
   const d = await a2e(`/api/v1/userImage2Video/${taskId}`, "GET", undefined, undefined, photoPersonId);
   const data = d.json?.data;
+  if (!d.ok || taskFailed(data)) return { error: failureMessage("loop_poll", d) };
+  const status = data?.current_status;
+  if (["initialized", "sent", "pending", "processing"].includes(status)) return { pending: true, status };
   const url = extractVideoUrl(data);
-  if (url) return { done: true, url };
-  if (data?.failed_message) return { error: `render failed: ${data.failed_message}` };
-  return { pending: true, status: data?.current_status };
+  if ((status === undefined || status === "completed") && url) return { done: true, url };
+  return { error: failureMessage("loop_poll", d) };
 }
 
 /** Legacy broad-media path only; individual photo approval never fetches a
@@ -420,12 +465,12 @@ async function uploadImageBytes(buffer: Buffer, contentType: string, personId?: 
   }, undefined, personId);
   const up = pres.json?.data;
   if (!pres.ok || typeof up?.uploadUrl !== "string" || typeof up?.cdnUrl !== "string") throw new Error("A2E image upload could not be prepared");
-  for (const value of [up.uploadUrl, up.cdnUrl]) {
-    const url = new URL(value);
-    if (url.protocol !== "https:" || url.username || url.password) throw new Error("Invalid A2E image upload location");
-  }
+  if (![up.uploadUrl, up.cdnUrl].every((value) => assetUrl(value) && value.startsWith("https://"))) throw new Error(failureMessage("upload_prepare", pres));
   if (personId !== undefined) requirePhotoProcessing(personId); else requireExternalProcessing();
-  const response = await fetch(up.uploadUrl, { method: "PUT", redirect: "error", headers: { "Content-Type": contentType }, body: buffer as BodyInit, signal: AbortSignal.timeout(20_000) });
-  if (!response.ok) throw new Error(`A2E image upload failed (${response.status})`);
+  let response: Response;
+  try {
+    response = await fetch(up.uploadUrl, { method: "PUT", redirect: "error", headers: { "Content-Type": contentType }, body: buffer as BodyInit, signal: AbortSignal.timeout(20_000) });
+  } catch { throw new Error(failureMessage("upload")); }
+  if (!response.ok) throw new Error(failureMessage("upload", { httpStatus: response.status, json: {} }));
   return up.cdnUrl;
 }

@@ -131,7 +131,10 @@ test('A2E language selection errors remain failures and do not trigger paid retr
     calls++;
     return Response.json({ code: 1005, msg: 'Language Selection Error' }, { status: 400 });
   });
-  await assert.rejects(ai.a2eTts('合成测试。'), /send_tts failed \(400\).*1005/);
+  await assert.rejects(ai.a2eTts('合成测试。'), (error) => {
+    assert.deepEqual(JSON.parse(error.message), { phase: 'tts', httpStatus: 400, code: 1005 });
+    return true;
+  });
   assert.equal(calls, 1);
 });
 
