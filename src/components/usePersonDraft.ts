@@ -6,6 +6,7 @@ import { readJson } from "@/lib/http";
 import { generateAsset, type EditorApi, type SavePayload } from "@/lib/editor-api";
 import { downscaleImage } from "@/lib/image-client";
 import { LIMITS, defaultSectionTitle } from "@/lib/validate";
+import { editCachedAnswer, serializeSectionDraft } from "@/lib/narration-cache-edit";
 import type { Draft } from "./DraftPreview";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -95,15 +96,7 @@ export function usePersonDraft({
     );
   }, []);
   const updateCachedAnswer = useCallback((id: string, key: "en" | "zh" | "bilingual", text: string) => {
-    // Edited text → the pre-generated audio for that language is stale.
-    setSections((prev) =>
-      prev.map((s) => {
-        if (s.id !== id) return s;
-        const cachedAudio = { ...(s.cachedAudio || {}) };
-        delete cachedAudio[key];
-        return { ...s, cachedAnswers: { ...(s.cachedAnswers || {}), [key]: text }, cachedAudio };
-      })
-    );
+    setSections((prev) => prev.map((s) => s.id === id ? editCachedAnswer(s, key, text) : s));
   }, []);
   const toggleAnswersOpen = useCallback((id: string) => {
     setAnswersOpen((prev) => {
@@ -335,8 +328,7 @@ export function usePersonDraft({
       (gender || "") === (base.gender || "") &&
       language === base.language &&
       script === base.script &&
-      JSON.stringify(sections.map((s) => [s.id, s.title, s.hint || "", s.content])) ===
-        JSON.stringify(base.sections.map((s) => [s.id, s.title, s.hint || "", s.content]));
+      serializeSectionDraft(sections) === serializeSectionDraft(base.sections);
     return !same;
   }, [cohort, gender, language, name, person, photoFile, script, sections, subtitle]);
 
