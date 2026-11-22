@@ -54,9 +54,10 @@ export function saveLoopVideo(id: string, buffer: Buffer, ext: string): Promise<
   return driver().saveLoopVideo(id, buffer, ext);
 }
 /** Store pre-generated narration audio; returns a permanent URL. */
-export function saveAudio(id: string, key: string, buffer: Buffer, ext: string): Promise<string> {
+export function saveAudio(id: string, key: string, buffer: Buffer, ext: string, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
   assertEventOpen();
-  return driver().saveAudio(id, key, buffer, ext);
+  return driver() === blobDriver ? blobDriver.saveAudio(id, key, buffer, ext, signal) : fsDriver.saveAudio(id, key, buffer, ext);
 }
 /** Delete a stored media file by its URL (no-op for local files). */
 export function deleteMediaUrl(url: string): Promise<void> {

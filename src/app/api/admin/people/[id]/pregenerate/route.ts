@@ -65,7 +65,7 @@ function narrationDependencies(person: Person, section: Section, reviewedAnswer:
     signal, onPhase,
     getPerson: async (id: string) => { signal.throwIfAborted(); return getPerson(id); },
     updatePerson: async (id: string, patch: Partial<Person>) => { signal.throwIfAborted(); return updatePerson(id, patch); },
-    saveAudio: async (id: string, key: string, buffer: Buffer, ext: string) => { signal.throwIfAborted(); return saveAudio(id, key, buffer, ext); },
+    saveAudio: async (id: string, key: string, buffer: Buffer, ext: string) => { signal.throwIfAborted(); return saveAudio(id, key, buffer, ext, signal); },
     readAudio: (url: string) => readAudio(url, signal),
     tts: async (text: string, gender: Person["gender"]) => {
       signal.throwIfAborted();

@@ -26,6 +26,10 @@ const FIXTURES = {
   "complex-valid": "复杂资料 · 应通过",
   "complex-unsupported": "缺少依据 · 应拒绝",
   "complex-extraction": "提取原文 · 应拒绝",
+  "section-introduction": "极简引言 · 应通过",
+  "exhibit-identification": "物件识别 · 应通过",
+  "exhibit-wrong-object": "错认物件 · 应拒绝",
+  "section-reconstruction": "重构论证 · 应拒绝",
 };
 const PROFILES = { default: "供应商默认", medium: "中等强度", low: "较低强度" };
 const FORMAT_ISSUES: Record<string, string> = { fenced_json: "返回了格式包装", invalid_json: "结果不是有效结构", wrong_fields: "审核项目不完整", wrong_values: "审核项目值无效" };
@@ -82,7 +86,7 @@ export default function AdminServiceCheck({ configuredModel, configuredReviewMod
       <label className="text-sm">测试案例<select aria-label="测试案例" value={fixture} onChange={(event) => { setFixture(event.target.value as keyof typeof FIXTURES); setResult(null); setError(""); }} disabled={running} className="mt-2 w-full rounded-xl border border-white/10 bg-surface-2 p-3">{Object.entries(FIXTURES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
       <label className="text-sm">本次审核强度<select aria-label="本次审核强度" value={reviewProfile} onChange={(event) => { setReviewProfile(event.target.value as keyof typeof PROFILES); setResult(null); setError(""); }} disabled={running || model !== "claude-sonnet-5"} className="mt-2 w-full rounded-xl border border-white/10 bg-surface-2 p-3">{Object.entries(PROFILES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
     </div>
-    <p className="mt-2 text-xs leading-relaxed text-ink-3">复杂案例只审核固定候选回答；应拒绝的案例被正确拒绝才算检查成功。中等、较低强度仅供 Sonnet 5 本次对照检查，“供应商默认”不指定强度。</p>
+    <p className="mt-2 text-xs leading-relaxed text-ink-3">除基础案例外，其余案例只审核一次固定候选回答，不生成讲解。应拒绝的案例被正确拒绝才算检查成功。引言和物件识别案例可分别检查中文表达与英文同义表达。中等、较低强度仅供 Sonnet 5 本次对照检查，“供应商默认”不指定强度。</p>
     <button type="button" className="btn-primary mt-4" onClick={check} disabled={running}>{running ? fixture === "basic" ? "正在检查生成与审核…" : "正在检查固定案例审核…" : "开始检查"}</button>
     <div role="status" aria-live="polite" className="mt-6">
       {error && <p className="text-sm text-warning">{error}</p>}

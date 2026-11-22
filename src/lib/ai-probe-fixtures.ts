@@ -1,6 +1,6 @@
 /** Fixed fictional inputs only: neither callers nor student records can add
  * source material, candidates, identifiers or instructions to diagnostics. */
-export const PROBE_FIXTURES = ["basic", "complex-valid", "complex-unsupported", "complex-extraction"] as const;
+export const PROBE_FIXTURES = ["basic", "complex-valid", "complex-unsupported", "complex-extraction", "section-introduction", "exhibit-identification", "exhibit-wrong-object", "section-reconstruction"] as const;
 export type ProbeFixture = (typeof PROBE_FIXTURES)[number];
 export function isProbeFixture(value: unknown): value is ProbeFixture {
   return (PROBE_FIXTURES as readonly unknown[]).includes(value);
@@ -20,6 +20,41 @@ const BASIC = {
     instruction: "只使用所给虚构展览中的事实。用一句简体中文回答，严格使用模板“玩具指南针指向方向。”，把“方向”替换成资料中的方向。不要加入其他文字或事实。",
   },
 };
+
+// Independently invented boundary cases, not excerpts from any submission.
+// English source in both languages deliberately exercises semantic translation.
+const INTRODUCTION_SOURCE = "This is the opening section of a wholly fictional classroom exhibition called Small Instruments. It introduces the display and its theme of everyday tools and observation. Later sections will describe invented objects. This unpublished draft contains no real student's work or personal information.";
+const REMOTE_SOURCE = [
+  "This wholly fictional, unpublished classroom exhibition draft has a section titled 'AC remote'. The exhibit is a photograph of an air-conditioner controller: a handheld remote control with a display and two arrow buttons. It is not a television remote. No actual person, photograph or event is represented.",
+  "The draft's distinctive argument has three connected stages. First, a drawing beside the remote shows a target setting of 23 while a separate paper thermometer shows 26. The writer argues that the requested setting and an observation of the room must be distinguished. Second, a fictional participant presses the up arrow once, sees the target change to 24, and takes this only as evidence that the button changed the requested setting, not as proof of a change in room temperature. Third, an imagined blank battery makes the display disappear. The writer treats the missing display as a limit on access to the setting, not evidence that the room has no temperature.",
+  "The conclusion connects these three stages in that order: distinguish a command from a measurement, distinguish an interface response from a physical effect, and distinguish absent information from an absent property. This reasoning sequence belongs to the unpublished draft and must not be reconstructed for visitors. A brief original identification of the photographed exhibit is permitted; the draft's argument must not be turned into a detailed substitute.",
+].join("\n\n");
+
+function sectionBoundaryFixture(language: "en" | "zh", fixture: ProbeFixture) {
+  const question = language === "zh" ? "请简短介绍这个虚构展览的所选部分。" : "Introduce this selected fictional exhibition section briefly.";
+  if (fixture === "section-introduction") return {
+    source: INTRODUCTION_SOURCE, question,
+    answer: language === "zh" ? "这里是这个展览的开篇介绍。" : "This section introduces the exhibition.",
+    instruction: "", expectedApproved: true, expectedRejectedCriteria: [] as string[],
+  };
+  if (fixture === "exhibit-identification") return {
+    source: REMOTE_SOURCE, question,
+    answer: language === "zh" ? "这件展品是一张空调遥控器的照片。" : "The exhibit is a photograph of an air-conditioning remote.",
+    instruction: "", expectedApproved: true, expectedRejectedCriteria: [] as string[],
+  };
+  if (fixture === "exhibit-wrong-object") return {
+    source: REMOTE_SOURCE, question,
+    answer: language === "zh" ? "这件展品是一张电视机遥控器的照片。" : "The exhibit is a photograph of a television remote.",
+    instruction: "", expectedApproved: false, expectedRejectedCriteria: ["grounded"],
+  };
+  if (fixture === "section-reconstruction") return {
+    source: REMOTE_SOURCE, question,
+    answer: language === "zh"
+      ? "原稿的论证依次分成三步：先用遥控器目标23与纸上温度计读数26的对照，区分请求的设定和房间的观测结果；随后一次向上按键把目标改成24，这只能说明设定被改变，不能证明室温变了；最后以虚构的电池失效使屏幕消失，说明失去设定信息不等于房间不再有温度。结论按同样顺序把命令与测量、界面响应与物理效果，以及信息缺失与属性缺失分别区分。"
+      : "The draft develops its case in three steps. A target of 23 is contrasted with a thermometer's 26, separating the requested value from an observed room condition. One upward button press then changes the target to 24, establishing only a change to the request, not a temperature change. Finally, a fictional dead battery removes the display; the argument says this removes access to the setting rather than the room's temperature. Its conclusion follows the same order: command versus measurement, interface feedback versus physical change, and missing information versus a missing property.",
+    instruction: "", expectedApproved: false, expectedRejectedCriteria: ["private"],
+  };
+}
 
 const COMPLEX = {
   en: {
@@ -58,6 +93,8 @@ const COMPLEX = {
 
 export function probeFixture(language: "en" | "zh", fixture: ProbeFixture) {
   if (fixture === "basic") return { ...BASIC[language], expectedApproved: true, expectedRejectedCriteria: [] as string[] };
+  const boundary = sectionBoundaryFixture(language, fixture);
+  if (boundary) return boundary;
   const data = COMPLEX[language];
   const expectedRejectedCriteria = fixture === "complex-unsupported" ? ["grounded"] : fixture === "complex-extraction" ? ["private"] : [];
   const answer = fixture === "complex-unsupported" ? data.unsupported : fixture === "complex-extraction" ? data.extraction : data.valid;

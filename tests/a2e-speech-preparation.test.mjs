@@ -54,7 +54,9 @@ function setup({ cached = true, approved = true } = {}) {
       return structuredClone(state.person);
     },
     updatePerson: async (_id, patch) => { if (state.failPhase === 'persist') throw new Error('PRIVATE-ERROR-CANARY: storage body'); state.writes++; state.person = { ...state.person, ...structuredClone(patch) }; return structuredClone(state.person); },
-    saveAudio: async (id, key, buffer) => {
+    saveAudio: async (id, key, buffer, _ext, signal) => {
+      assert.ok(signal instanceof AbortSignal, 'saving receives the same request deadline/cancellation signal');
+      signal.throwIfAborted();
       if (state.failPhase === 'audio_save') throw new Error('PRIVATE-ERROR-CANARY: credentials');
       assert.equal(id, 'anna-fixture');
       const assetId = `${id}.audio.${key}`; const asset = crypto.createHash('sha256').update(buffer).digest('hex') + '.wav';
