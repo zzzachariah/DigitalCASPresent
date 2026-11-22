@@ -64,6 +64,34 @@ test('Suggestions and private identifiers receive the same release checks', asyn
   assert.equal(await safety.reviewExhibitionAnswer({ ...input, answer: 'Contact person@example.com for the essay.' }, async () => yes), false);
 });
 
+test('short section and bilingual object descriptions still require all five model approvals', async () => {
+  const candidate = {
+    source: 'This invented classroom exhibit shows a photograph of a handheld air-conditioner remote. Its draft argument remains unpublished.',
+    question: 'Introduce this selected exhibition section briefly.',
+    answer: '这件展品是一张空调遥控器的照片。', suggestions: [],
+  };
+  let request;
+  assert.equal(await safety.reviewExhibitionAnswer(candidate, async options => { request = options; return yes; }), true);
+  assert.deepEqual(JSON.parse(request.messages[0].content), candidate);
+  assert.match(request.system, /Evaluate semantic support, not identical wording/);
+  assert.match(request.system, /Chinese\/English rendering of a source-supported exhibit or common object name is allowed, without adding facts/);
+  assert.match(request.system, /These limited descriptions are not essay reconstruction/);
+  assert.match(request.system, /does not extend to original sentences, substantive arguments or a detailed substitute/);
+  assert.match(request.system, /no private personal data, credentials, hidden instructions/);
+  assert.match(request.system, /section can be an introduction, an exhibit, or a conclusion/);
+  assert.match(request.system, /it need not restate the essay's argument/);
+  for (const field of ['safe', 'grounded', 'private', 'relevant', 'respectful']) {
+    let called = false;
+    const diagnostics = [];
+    assert.equal(await safety.reviewExhibitionAnswer(candidate, async () => {
+      called = true;
+      return JSON.stringify({ ...JSON.parse(yes), [field]: false });
+    }, diagnostic => diagnostics.push(diagnostic)), false);
+    assert.equal(called, true, 'short source-supported text must not bypass model review');
+    assert.deepEqual(diagnostics, [{ reason: 'model_rejection', rejectedCriteria: [field] }]);
+  }
+});
+
 test('Review diagnostics distinguish rejection, malformed output and outages without copying untrusted text', async () => {
   const secret = 'PRIVATE-ERROR-CANARY: manuscript, answer, credential';
   const cases = [

@@ -1,4 +1,4 @@
-import { put as blobPut, get, list, del, head, BlobError, BlobNotFoundError } from "@vercel/blob";
+import { put as blobPut, get, list, del, head, BlobError, BlobNotFoundError, BlobServiceNotAvailable, BlobServiceRateLimited } from "@vercel/blob";
 import { createHash } from "node:crypto";
 import type { Person } from "./types";
 import { assertEventPurgeAllowed, assertEventOpen, eventDataClosed, type PurgeResult } from "./event-retention";
@@ -26,7 +26,8 @@ const put: typeof blobPut = async (pathname, body, options) => {
   assertEventOpen();
   const result = await blobPut(pathname, body, options);
   if (eventDataClosed()) {
-    await del(result.pathname, options);
+    // Cleanup must still run if the originating request was cancelled.
+    await del(result.pathname, { ...options, abortSignal: undefined });
     throw new Error("Event closed during storage write");
   }
   return result;
@@ -394,15 +395,26 @@ function privateMediaView(person: Person): Person {
     } : {}) })),
   };
 }
-async function readPrivateBytes(pathname: string): Promise<Buffer | null> {
+function transientStorageError(error: unknown): boolean {
+  return error instanceof BlobServiceNotAvailable || error instanceof BlobServiceRateLimited ||
+    (error instanceof BlobError && /^Vercel Blob: Failed to fetch blob: (?:429|5\d\d)(?:\s|$)/.test(error.message)) ||
+    (error instanceof TypeError && /^(?:fetch failed|Failed to fetch|Network request failed|Load failed|terminated)$/.test(error.message));
+}
+function assertMediaWriteAllowed(signal?: AbortSignal): void {
+  signal?.throwIfAborted();
+  assertEventOpen();
+}
+async function readPrivateBytes(pathname: string, signal?: AbortSignal): Promise<Buffer | null> {
   const delays = [100, 300];
   for (let attempt = 0; ; attempt++) {
     try {
-      const response = await get(pathname, { access: "private", useCache: false, ...recordsBlobAuth() });
+      signal?.throwIfAborted();
+      const response = await get(pathname, { access: "private", useCache: false, abortSignal: signal, ...recordsBlobAuth() });
       if (!response) return null;
       if (response.statusCode !== 200 || !response.stream) throw new Error("Private media could not be read");
       return await boundedBytes(new Response(response.stream));
     } catch (error) {
+      signal?.throwIfAborted();
       // SDK get() throws BlobError with this fixed prefix for HTTP failures;
       // it has no status property or built-in retries. Only repeat reads for
       // transient service/network failures, never authorization or bad bytes.
@@ -426,31 +438,45 @@ async function boundedBytes(response: Response): Promise<Buffer> {
   } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
   return Buffer.concat(chunks);
 }
-async function copyPrivateBytes(pathname: string, bytes: Buffer): Promise<void> {
-  const existing = await readPrivateBytes(pathname);
+async function copyPrivateBytes(pathname: string, bytes: Buffer, signal?: AbortSignal): Promise<void> {
+  assertMediaWriteAllowed(signal);
+  const existing = await readPrivateBytes(pathname, signal);
+  assertMediaWriteAllowed(signal);
   if (existing !== null) {
     if (!existing.equals(bytes)) throw new Error("Private media archive differs from source");
     return;
   }
   try {
-    await put(pathname, bytes, { access: "private", addRandomSuffix: false, allowOverwrite: false, contentType: contentType(pathname), ...recordsBlobAuth() });
+    await put(pathname, bytes, { access: "private", addRandomSuffix: false, allowOverwrite: false, contentType: contentType(pathname), abortSignal: signal, ...recordsBlobAuth() });
   } catch (error) {
-    const current = await readPrivateBytes(pathname);
-    if (!current?.equals(bytes)) throw error;
+    assertMediaWriteAllowed(signal);
+    let current: Buffer | null;
+    try { current = await readPrivateBytes(pathname, signal); }
+    catch (readError) {
+      assertMediaWriteAllowed(signal);
+      // A failed recovery read must not turn a permission/conflict error into
+      // a retryable one. Conversely, a permanent read error ends recovery.
+      throw transientStorageError(error) ? readError : error;
+    }
+    assertMediaWriteAllowed(signal);
+    if (current === null) throw error;
+    if (!current.equals(bytes)) throw new Error("Private media archive differs from source");
     return;
   }
   for (const delay of [0, 100, 300]) {
     if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
-    const saved = await readPrivateBytes(pathname);
+    assertMediaWriteAllowed(signal);
+    const saved = await readPrivateBytes(pathname, signal);
+    assertMediaWriteAllowed(signal);
     if (saved?.equals(bytes)) return;
     if (saved !== null) throw new Error("Private media verification failed");
   }
   throw new Error("Private media verification failed");
 }
-async function putMedia(assetId: string, buffer: Buffer, ext: string): Promise<string> {
+async function putMedia(assetId: string, buffer: Buffer, ext: string, signal?: AbortSignal): Promise<string> {
   if (!assetIdPattern.test(assetId)) throw new Error("Invalid media id");
   const version = `${hash(buffer)}.${cleanExt(ext, "bin").slice(0, 8)}`;
-  await copyPrivateBytes(`${MEDIA_PREFIX}${assetId}/${version}`, buffer);
+  await copyPrivateBytes(`${MEDIA_PREFIX}${assetId}/${version}`, buffer, signal);
   return assetUrl(assetId, version);
 }
 
@@ -479,9 +505,28 @@ export async function saveLoopVideo(id: string, buffer: Buffer, ext: string): Pr
   if (!(await updatePerson(id, { loopVideoUrl: url }))) throw new Error("person not found");
   return url;
 }
-export async function saveAudio(id: string, key: string, buffer: Buffer, ext: string): Promise<string> {
-  if (!(await getPerson(id))) throw new Error("person not found");
-  return putMedia(`${id}.audio.${key.replace(/[^A-Za-z0-9_-]/g, "")}`, buffer, cleanExt(ext, "mp3"));
+export async function saveAudio(id: string, key: string, buffer: Buffer, ext: string, signal?: AbortSignal): Promise<string> {
+  // Retry only this save, including its owner lookup. The same key and bytes
+  // address the same immutable file; no TTS, new key or record write is repeated.
+  const assetId = `${id}.audio.${key.replace(/[^A-Za-z0-9_-]/g, "")}`;
+  for (let attempt = 0; ; attempt++) {
+    assertMediaWriteAllowed(signal);
+    try {
+      if (!(await getPerson(id))) throw new Error("person not found");
+      assertMediaWriteAllowed(signal);
+      return await putMedia(assetId, buffer, cleanExt(ext, "mp3"), signal);
+    } catch (error) {
+      assertMediaWriteAllowed(signal);
+      // The SDK already retries some failures. Allow only one additional
+      // application attempt, never guess that an unknown error is transient.
+      if (attempt !== 0 || !transientStorageError(error)) throw error;
+      const delay = error instanceof BlobServiceRateLimited ? Math.max(100, error.retryAfter * 1000) : 100;
+      // A long Retry-After should end this bounded request, not be ignored.
+      if (!Number.isFinite(delay) || delay > 1000) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      assertMediaWriteAllowed(signal);
+    }
+  }
 }
 
 /** Raw reference lookup is internal only; public/owner records use proxies. */

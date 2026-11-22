@@ -45,6 +45,8 @@ function setup(extraEnv = {}) {
   let onPut = null;
   class BlobError extends Error { constructor(message) { super(`Vercel Blob: ${message}`); } }
   class BlobNotFoundError extends Error {}
+  class BlobServiceNotAvailable extends BlobError { constructor() { super('The blob service is currently not available. Please try again.'); } }
+  class BlobServiceRateLimited extends BlobError { constructor(seconds = 0) { super('Too many requests'); this.retryAfter = seconds; } }
   function storeFor(options) {
     if (options.token === 'public-token' || options.storeId === 'store_public') return 'media';
     if (options.token === 'private-token' || options.storeId === 'store_private') return 'records';
@@ -52,7 +54,7 @@ function setup(extraEnv = {}) {
   }
   function entry(store, pathname) { return { pathname, url: `https://${store}.invalid/${pathname}` }; }
   const api = {
-    BlobError, BlobNotFoundError,
+    BlobError, BlobNotFoundError, BlobServiceNotAvailable, BlobServiceRateLimited,
     async list(options) {
       const store = storeFor(options); calls.push({ op: 'list', store, path: options.prefix });
       return { blobs: [...stores[store].keys()].filter((p) => p.startsWith(options.prefix)).map((p) => entry(store, p)), hasMore: false };
@@ -63,7 +65,8 @@ function setup(extraEnv = {}) {
       return entry(store, pathname);
     },
     async get(pathname, options) {
-      const store = storeFor(options); calls.push({ op: 'get', store, path: pathname });
+      const store = storeFor(options); calls.push({ op: 'get', store, path: pathname, signal: options.abortSignal });
+      options.abortSignal?.throwIfAborted();
       assert.equal(options.access, 'private'); assert.equal(store, 'records');
       assert.equal(options.useCache, false);
       const errors = failures.get(pathname);
@@ -78,7 +81,8 @@ function setup(extraEnv = {}) {
     },
     async put(pathname, value, options) {
       const store = storeFor(options);
-      calls.push({ op: 'put', store, path: pathname, access: options.access });
+      calls.push({ op: 'put', store, path: pathname, access: options.access, value, signal: options.abortSignal });
+      options.abortSignal?.throwIfAborted();
       assert.equal(options.access, store === 'records' ? 'private' : 'public');
       if (failures.get('put') === store) throw new Error('Simulated write failure');
       if (onPut) await onPut(pathname, options);
@@ -88,6 +92,7 @@ function setup(extraEnv = {}) {
       return entry(store, finalPath);
     },
     async del(pathname, options) {
+      options.abortSignal?.throwIfAborted();
       const store = storeFor(options); calls.push({ op: 'del', store, path: pathname });
       if (failures.get('del') === store) throw new Error('Simulated delete failure');
       stores[store].delete(pathname);
@@ -111,7 +116,7 @@ function setup(extraEnv = {}) {
     stores.records.set(`people/${p.id}/${version}`, JSON.stringify(p));
     stores.records.set(`slugs/${p.slug}`, p.id);
   }
-  return { env, shared, stores, calls, failures, driver, seedLegacy, seedPrivate, BlobError, setOnPut(fn) { onPut = fn; }, setOidcToken(token) { requestOidcToken = token; } };
+  return { env, shared, stores, calls, failures, driver, seedLegacy, seedPrivate, BlobError, BlobServiceNotAvailable, BlobServiceRateLimited, setOnPut(fn) { onPut = fn; }, setOidcToken(token) { requestOidcToken = token; } };
 }
 
 const plain = (value) => JSON.parse(JSON.stringify(value));
@@ -447,7 +452,7 @@ test('private audio transient read retries are bounded and never cause a second 
     });
     await assert.rejects(s.driver.saveAudio(person.id, 'part1-en-fixed', Buffer.from('fixture audio'), 'wav'));
     const put = s.calls.find(c => c.op === 'put' && c.path === pathname);
-    assert.equal(s.calls.slice(s.calls.indexOf(put) + 1).filter(c => c.op === 'get' && c.path === pathname).length, 3);
+    assert.equal(s.calls.slice(s.calls.indexOf(put) + 1).filter(c => c.op === 'get' && c.path === pathname).length, 6);
     assert.equal(s.calls.filter(c => c.op === 'put' && c.path === pathname).length, 1);
   }
 });
@@ -469,6 +474,138 @@ test('private audio authorization, invalid reads and mismatched bytes fail immed
     assert.equal(s.calls.slice(s.calls.indexOf(put) + 1).filter(c => c.op === 'get' && c.path === pathname).length, 1, failure);
     assert.equal(s.calls.filter(c => c.op === 'put' && c.path === pathname).length, 1, failure);
   }
+});
+
+test('one narration synthesis survives a transient audio PUT using the same key and byte buffer', async () => {
+  const s = setup(); s.seedPrivate();
+  const { createPermanentNarration } = loadTs('src/lib/prepared-narration.ts', {}, s.env);
+  const bytes = Buffer.from('RIFF0000WAVEsynthetic-audio');
+  const controller = new AbortController();
+  let ttsCalls = 0, downloads = 0, puts = 0;
+  s.setOnPut(pathname => {
+    if (pathname.startsWith('private-media/') && ++puts === 1) throw new s.BlobServiceNotAvailable();
+  });
+  const saved = await createPermanentNarration(person, 'part1', 'en', 'Synthetic narration.', {
+    signal: controller.signal,
+    tts: async () => { ttsCalls++; return 'https://synthetic.invalid/temporary.wav'; },
+    readAudio: async url => {
+      if (url.startsWith('https://synthetic.invalid/')) { downloads++; return { buffer: bytes, contentType: 'audio/wav' }; }
+      const parsed = new URL(url, 'https://local.invalid');
+      return s.driver.readPhoto(parsed.pathname.slice('/api/photo/'.length), parsed.searchParams.get('asset'));
+    },
+    saveAudio: (id, key, buffer, ext) => s.driver.saveAudio(id, key, buffer, ext, controller.signal),
+  });
+  const attempts = s.calls.filter(c => c.op === 'put' && c.path.startsWith('private-media/'));
+  assert.equal(ttsCalls, 1); assert.equal(downloads, 1); assert.equal(attempts.length, 2);
+  assert.equal(attempts[0].path, attempts[1].path);
+  for (const attempt of attempts) { assert.equal(attempt.value, bytes); assert.equal(attempt.signal, controller.signal); }
+  assert.equal(saved.bytes, bytes.length); assert.ok(s.stores.records.get(attempts[0].path).equals(bytes));
+  assert.equal(s.calls.some(c => c.op === 'put' && c.path.startsWith('people/')), false);
+});
+
+test('audio save retries transient owner reads once without losing its fixed identity', async () => {
+  for (const kind of ['http429', 'http503', 'network']) {
+    const s = setup(); s.seedPrivate();
+    const pathname = `people/${person.id}/01700000000000-current.json`;
+    s.failures.set(pathname, [kind === 'network' ? new TypeError('fetch failed') : new s.BlobError(`Failed to fetch blob: ${kind === 'http429' ? 429 : 503} transient`)]);
+    const url = await s.driver.saveAudio(person.id, 'part1-en-fixed', Buffer.from('fixture audio'), 'wav');
+    assert.match(url, /part1-en-fixed/);
+    assert.equal(s.calls.filter(c => c.op === 'get' && c.path === pathname).length, 2);
+    assert.equal(s.calls.filter(c => c.op === 'put').length, 1);
+  }
+});
+
+test('ambiguous audio PUT success is recovered by exact readback without a second PUT', async () => {
+  const s = setup(); s.seedPrivate();
+  const bytes = Buffer.from('fixture audio');
+  s.setOnPut(pathname => { s.stores.records.set(pathname, Buffer.from(bytes)); throw new TypeError('fetch failed'); });
+  await s.driver.saveAudio(person.id, 'part1-en-fixed', bytes, 'wav');
+  assert.equal(s.calls.filter(c => c.op === 'put').length, 1);
+  assert.equal([...s.stores.records.keys()].filter(p => p.startsWith('private-media/')).length, 1);
+});
+
+test('audio PUT retry is bounded to one additional attempt for known transient errors', async () => {
+  for (const kind of ['unavailable', 'rate-limit', 'network']) {
+    const s = setup(); s.seedPrivate();
+    s.setOnPut(() => { throw kind === 'unavailable' ? new s.BlobServiceNotAvailable() : kind === 'rate-limit' ? new s.BlobServiceRateLimited() : new TypeError('fetch failed'); });
+    await assert.rejects(s.driver.saveAudio(person.id, 'part1-en-fixed', Buffer.from('fixture audio'), 'wav'));
+    const attempts = s.calls.filter(c => c.op === 'put');
+    assert.equal(attempts.length, 2); assert.equal(attempts[0].path, attempts[1].path);
+    assert.equal(s.stores.records.size, 2);
+  }
+});
+
+test('audio PUT does not retry permission, conflict, unknown, local errors or long rate limits', async () => {
+  for (const kind of ['auth401', 'auth403', 'conflict', 'unknown', 'local', 'long-rate-limit']) {
+    const s = setup(); s.seedPrivate();
+    s.setOnPut(() => { throw kind === 'long-rate-limit' ? new s.BlobServiceRateLimited(60)
+      : kind === 'local' ? new TypeError('Invalid internal argument')
+      : new s.BlobError(kind.startsWith('auth') ? `Failed to fetch blob: ${kind.slice(4)} denied` : kind); });
+    await assert.rejects(s.driver.saveAudio(person.id, 'part1-en-fixed', Buffer.from('fixture audio'), 'wav'));
+    assert.equal(s.calls.filter(c => c.op === 'put').length, 1, kind);
+  }
+});
+
+test('audio recovery cannot hide a permanent error or retry conflicting saved bytes', async () => {
+  for (const kind of ['auth-then-transient-read', 'transient-then-auth-read', 'transient-then-conflict']) {
+    const s = setup(); s.seedPrivate();
+    s.setOnPut(pathname => {
+      if (kind === 'transient-then-conflict') s.stores.records.set(pathname, Buffer.from('conflicting bytes'));
+      else s.failures.set(pathname, Array.from({ length: 3 }, () => new s.BlobError(`Failed to fetch blob: ${kind === 'auth-then-transient-read' ? 503 : 403} failure`)));
+      throw kind === 'auth-then-transient-read' ? new s.BlobError('Failed to fetch blob: 403 Forbidden') : new s.BlobServiceNotAvailable();
+    });
+    await assert.rejects(s.driver.saveAudio(person.id, 'part1-en-fixed', Buffer.from('fixture audio'), 'wav'));
+    assert.equal(s.calls.filter(c => c.op === 'put').length, 1, kind);
+  }
+});
+
+test('audio retry stops after cancellation or event expiry during its backoff', async () => {
+  for (const kind of ['abort', 'expiry']) {
+    const s = setup({ EVENT_ENDS_AT: '2999-01-01T00:00:00Z' }); s.seedPrivate();
+    const controller = new AbortController();
+    s.setOnPut(() => {
+      setTimeout(() => { if (kind === 'abort') controller.abort(); else s.env.EVENT_ENDS_AT = '2000-01-01T00:00:00Z'; }, 20);
+      throw new s.BlobServiceNotAvailable();
+    });
+    await assert.rejects(s.driver.saveAudio(person.id, 'part1-en-fixed', Buffer.from('fixture audio'), 'wav', controller.signal));
+    assert.equal(s.calls.filter(c => c.op === 'put').length, 1, kind);
+    assert.equal([...s.stores.records.keys()].some(p => p.startsWith('private-media/')), false);
+  }
+});
+
+test('cancelled or expired audio saves cannot adopt an existing copy or issue a write', async () => {
+  for (const kind of ['abort', 'expiry']) {
+    const s = setup(); s.seedPrivate();
+    const controller = new AbortController();
+    const bytes = Buffer.from('fixture audio');
+    await s.driver.saveAudio(person.id, 'part1-en-fixed', bytes, 'wav');
+    const before = s.calls.length;
+    if (kind === 'abort') controller.abort(); else s.env.EVENT_ENDS_AT = '2000-01-01T00:00:00Z';
+    await assert.rejects(s.driver.saveAudio(person.id, 'part1-en-fixed', bytes, 'wav', controller.signal));
+    assert.equal(s.calls.length, before, kind);
+  }
+});
+
+test('audio byte conflicts fail without overwriting the immutable destination', async () => {
+  const s = setup(); s.seedPrivate();
+  const bytes = Buffer.from('fixture audio');
+  const version = require('node:crypto').createHash('sha256').update(bytes).digest('hex') + '.wav';
+  const pathname = `private-media/${person.id}.audio.part1-en-fixed/${version}`;
+  s.stores.records.set(pathname, Buffer.from('conflicting bytes'));
+  await assert.rejects(s.driver.saveAudio(person.id, 'part1-en-fixed', bytes, 'wav'), /differs/);
+  assert.equal(s.calls.filter(c => c.op === 'put').length, 0);
+  assert.equal(s.calls.filter(c => c.op === 'get' && c.path === pathname).length, 1);
+  assert.equal(s.stores.records.get(pathname).toString(), 'conflicting bytes');
+});
+
+test('late audio write is deleted after expiry even if its request was also cancelled', async () => {
+  const s = setup({ EVENT_ENDS_AT: '2999-01-01T00:00:00Z' }); s.seedPrivate();
+  const controller = new AbortController();
+  s.setOnPut(() => { s.env.EVENT_ENDS_AT = '2000-01-01T00:00:00Z'; controller.abort(); });
+  await assert.rejects(s.driver.saveAudio(person.id, 'part1-en-fixed', Buffer.from('fixture audio'), 'wav', controller.signal));
+  assert.equal(s.calls.filter(c => c.op === 'put').length, 1);
+  assert.equal(s.calls.filter(c => c.op === 'del').length, 1);
+  assert.equal([...s.stores.records.keys()].some(p => p.startsWith('private-media/')), false);
 });
 
 test('media privatization copies current, historical and orphan bytes before removing every public origin', async () => {

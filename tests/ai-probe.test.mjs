@@ -282,6 +282,42 @@ test('negative assessments cannot pass on service failure, format error, approva
   }
 });
 
+test('fixed introduction and bilingual exhibit boundary assessments use exact data and one private review', async () => {
+  for (const language of ['zh', 'en']) for (const fixture of ['section-introduction', 'exhibit-identification', 'exhibit-wrong-object', 'section-reconstruction']) {
+    const s = setup(); const candidate = s.fixtures.probeFixture(language, fixture);
+    const decision = { ...JSON.parse(yes), ...Object.fromEntries(candidate.expectedRejectedCriteria.map(field => [field, false])) };
+    s.state.responses = [Response.json(openaiResult(JSON.stringify(decision)))];
+    const result = await (await s.route.POST(request({ model: 'qwen3.7-plus', language, fixture, reviewMode: 'json_schema' }))).json();
+    assert.equal(s.state.calls.length, 1); assert.equal(result.generation.status, 'skipped');
+    assert.equal(result.expectedApproved, ['section-introduction', 'exhibit-identification'].includes(fixture));
+    assert.equal(result.matchedExpectation, true); assert.equal(result.pass, true);
+    assert.equal(result.review.pass, result.expectedApproved);
+    const call = s.state.calls[0];
+    assert.equal(call.body.messages[0].role, 'system'); assert.equal(call.body.messages[1].role, 'user');
+    const sent = JSON.parse(call.body.messages[1].content);
+    assert.deepEqual(sent, { source: candidate.source, question: candidate.question, answer: candidate.answer, suggestions: [] });
+    assert.match(sent.source, /fictional/); assert.ok(sent.source.length < 2500);
+    assert.equal(s.safety.reproducesSource(candidate.answer, candidate.source), false, 'semantic negative controls must reach model review');
+    assert.ok(!JSON.stringify(result).includes(candidate.answer)); assert.ok(!JSON.stringify(result).includes(candidate.source));
+    assert.equal(call.body.temperature, 0); assert.equal(call.body.max_tokens, 2048); assert.equal(call.body.enable_thinking, false);
+    assert.equal(call.body.response_format.json_schema.strict, true);
+    if (fixture === 'exhibit-wrong-object') assert.deepEqual(result.review.rejectedCriteria, ['grounded']);
+    if (fixture === 'section-reconstruction') assert.deepEqual(result.review.rejectedCriteria, ['private']);
+  }
+});
+
+test('new boundary negative assessments cannot pass on approval, wrong criterion, malformed output or outage', async () => {
+  for (const fixture of ['exhibit-wrong-object', 'section-reconstruction']) for (const response of [
+    Response.json(openaiResult(yes)), Response.json(openaiResult(yes.replace('"safe":true', '"safe":false'))),
+    Response.json(openaiResult('PRIVATE-OUTPUT-CANARY')), Response.json({ error: { message: 'PRIVATE-OUTPUT-CANARY' } }, { status: 503 }),
+  ]) {
+    const s = setup(); s.state.responses = [response];
+    const result = await (await s.route.POST(request({ model: 'qwen3.7-plus', fixture, reviewMode: 'json_schema' }))).json();
+    assert.equal(result.expectedApproved, false); assert.equal(result.pass, false); assert.equal(result.matchedExpectation, false);
+    assert.equal(s.state.calls.length, 1); assert.ok(!JSON.stringify(result).includes('PRIVATE-OUTPUT-CANARY'));
+  }
+});
+
 test('diagnostic profile overrides are exact, review-only and cannot become custom prompts or provider options', async () => {
   const s = setup(); s.env.AI_REVIEW_EFFORT = 'medium';
   const result = await (await s.route.POST(request())).json();
