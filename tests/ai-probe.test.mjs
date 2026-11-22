@@ -282,14 +282,14 @@ test('negative assessments cannot pass on service failure, format error, approva
   }
 });
 
-test('fixed introduction and bilingual exhibit boundary assessments use exact data and one private review', async () => {
-  for (const language of ['zh', 'en']) for (const fixture of ['section-introduction', 'exhibit-identification', 'exhibit-wrong-object', 'section-reconstruction']) {
+test('fixed section, bilingual exhibit and source-ambiguity assessments use exact data and one private review', async () => {
+  for (const language of ['zh', 'en']) for (const fixture of ['section-introduction', 'exhibit-identification', 'exhibit-wrong-object', 'section-reconstruction', 'source-ambiguity-common', 'source-ambiguity-disputed']) {
     const s = setup(); const candidate = s.fixtures.probeFixture(language, fixture);
     const decision = { ...JSON.parse(yes), ...Object.fromEntries(candidate.expectedRejectedCriteria.map(field => [field, false])) };
     s.state.responses = [Response.json(openaiResult(JSON.stringify(decision)))];
     const result = await (await s.route.POST(request({ model: 'qwen3.7-plus', language, fixture, reviewMode: 'json_schema' }))).json();
     assert.equal(s.state.calls.length, 1); assert.equal(result.generation.status, 'skipped');
-    assert.equal(result.expectedApproved, ['section-introduction', 'exhibit-identification'].includes(fixture));
+    assert.equal(result.expectedApproved, ['section-introduction', 'exhibit-identification', 'source-ambiguity-common'].includes(fixture));
     assert.equal(result.matchedExpectation, true); assert.equal(result.pass, true);
     assert.equal(result.review.pass, result.expectedApproved);
     const call = s.state.calls[0];
@@ -301,13 +301,13 @@ test('fixed introduction and bilingual exhibit boundary assessments use exact da
     assert.ok(!JSON.stringify(result).includes(candidate.answer)); assert.ok(!JSON.stringify(result).includes(candidate.source));
     assert.equal(call.body.temperature, 0); assert.equal(call.body.max_tokens, 2048); assert.equal(call.body.enable_thinking, false);
     assert.equal(call.body.response_format.json_schema.strict, true);
-    if (fixture === 'exhibit-wrong-object') assert.deepEqual(result.review.rejectedCriteria, ['grounded']);
+    if (fixture === 'exhibit-wrong-object' || fixture === 'source-ambiguity-disputed') assert.deepEqual(result.review.rejectedCriteria, ['grounded']);
     if (fixture === 'section-reconstruction') assert.deepEqual(result.review.rejectedCriteria, ['private']);
   }
 });
 
 test('new boundary negative assessments cannot pass on approval, wrong criterion, malformed output or outage', async () => {
-  for (const fixture of ['exhibit-wrong-object', 'section-reconstruction']) for (const response of [
+  for (const fixture of ['exhibit-wrong-object', 'section-reconstruction', 'source-ambiguity-disputed']) for (const response of [
     Response.json(openaiResult(yes)), Response.json(openaiResult(yes.replace('"safe":true', '"safe":false'))),
     Response.json(openaiResult('PRIVATE-OUTPUT-CANARY')), Response.json({ error: { message: 'PRIVATE-OUTPUT-CANARY' } }, { status: 503 }),
   ]) {
@@ -316,6 +316,23 @@ test('new boundary negative assessments cannot pass on approval, wrong criterion
     assert.equal(result.expectedApproved, false); assert.equal(result.pass, false); assert.equal(result.matchedExpectation, false);
     assert.equal(s.state.calls.length, 1); assert.ok(!JSON.stringify(result).includes('PRIVATE-OUTPUT-CANARY'));
   }
+});
+
+test('source ambiguity controls share one fictional source and differ only in asserting a disputed detail', async () => {
+  const s = setup();
+  for (const language of ['zh', 'en']) {
+    const common = s.fixtures.probeFixture(language, 'source-ambiguity-common');
+    const disputed = s.fixtures.probeFixture(language, 'source-ambiguity-disputed');
+    assert.equal(common.source, disputed.source); assert.equal(common.question, disputed.question);
+    assert.equal((common.source.match(/2024 museum calendar/g) || []).length, 2);
+    assert.match(common.source, /River edition/); assert.match(common.source, /Hill edition/);
+    assert.match(common.source, /no correction/);
+    assert.doesNotMatch(common.answer, /River|Hill|河流|山丘/);
+    assert.match(disputed.answer, /River|河流/);
+    assert.equal(common.expectedApproved, true); assert.equal(disputed.expectedApproved, false);
+    assert.deepEqual(Array.from(disputed.expectedRejectedCriteria), ['grounded']);
+  }
+  assert.equal(s.state.calls.length, 0);
 });
 
 test('diagnostic profile overrides are exact, review-only and cannot become custom prompts or provider options', async () => {

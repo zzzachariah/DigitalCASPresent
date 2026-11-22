@@ -50,7 +50,7 @@ test('review instructions define every boolean as a pass flag and judge candidat
   assert.match(request.system, /private=true means confidentiality is preserved and no private material is exposed/);
   assert.match(request.system, /private=false means the candidate exposes private material or confidentiality cannot be established/);
   assert.match(request.system, /Judge what the candidate answer and suggestions disclose, not whether the source itself contains confidential material/);
-  assert.match(request.system, /When any criterion is ambiguous or cannot be established, use false/);
+  assert.match(request.system, /When any criterion for the candidate answer or suggestions is ambiguous or cannot be established, use false/);
   assert.deepEqual(JSON.parse(request.messages[0].content), candidate);
   for (const field of ['safe', 'grounded', 'private', 'relevant', 'respectful']) {
     const diagnostics = [];
@@ -89,6 +89,36 @@ test('short section and bilingual object descriptions still require all five mod
     }, diagnostic => diagnostics.push(diagnostic)), false);
     assert.equal(called, true, 'short source-supported text must not bypass model review');
     assert.deepEqual(diagnostics, [{ reason: 'model_rejection', rejectedCriteria: [field] }]);
+  }
+});
+
+test('source conflicts are passed intact for claim-level review; disputed claims and suggestions cannot bypass a rejection', async () => {
+  const candidate = {
+    source: 'Fictional caption: a 2024 museum calendar, River edition. Fictional body: a 2024 museum calendar, Hill edition. No correction is supplied.',
+    question: 'Introduce this fictional exhibit briefly.',
+    answer: 'The exhibit is a museum calendar for 2024.', suggestions: [],
+  };
+  let request;
+  assert.equal(await safety.reviewExhibitionAnswer(candidate, async options => { request = options; return yes; }), true);
+  assert.deepEqual(JSON.parse(request.messages[0].content), candidate, 'review must see both conflicting details, not a selected or rewritten source');
+  assert.match(request.system, /Evaluate source ambiguity against the claims actually made in the candidate answer and suggestions/);
+  assert.match(request.system, /conflicting passages explicitly agree on a common fact/);
+  assert.match(request.system, /that fact may be stated while omitting the disputed detail/);
+  assert.match(request.system, /Never choose between conflicting details, guess a reconciliation, or present a disputed detail as established/);
+  assert.match(request.system, /Reject any candidate claim or suggested-question assumption whose support remains ambiguous/);
+  assert.match(request.system, /When any criterion for the candidate answer or suggestions is ambiguous or cannot be established, use false/);
+  for (const sample of [candidate,
+    { ...candidate, answer: 'The museum calendar is the River edition for 2024.' },
+    { ...candidate, suggestions: ['What does the River edition show?'] },
+  ]) {
+    let calls = 0;
+    const diagnostics = [];
+    assert.equal(await safety.reviewExhibitionAnswer(sample, async options => {
+      calls++; assert.deepEqual(JSON.parse(options.messages[0].content), sample);
+      return yes.replace('"grounded":true', '"grounded":false');
+    }, diagnostic => diagnostics.push(diagnostic)), false);
+    assert.equal(calls, 1, 'no automatic retry or approval based on a common-fact heuristic');
+    assert.deepEqual(diagnostics, [{ reason: 'model_rejection', rejectedCriteria: ['grounded'] }]);
   }
 });
 

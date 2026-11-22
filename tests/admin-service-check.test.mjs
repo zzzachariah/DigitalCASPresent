@@ -92,6 +92,23 @@ test('fixed introduction and exhibit cases retain exact IDs and expected approva
   }
 });
 
+test('source ambiguity fixtures preserve expected approval for common facts and refusal for taking sides', async () => {
+  for (const [fixture, label, expectedApproved] of [
+    ['source-ambiguity-common', '原稿歧义 · 共有事实 · 应通过', true],
+    ['source-ambiguity-disputed', '原稿歧义 · 擅自选边 · 应拒绝', false],
+  ]) {
+    for (const language of ['zh', 'en']) {
+      const ui = setup({ data: complex({ fixture, expectedApproved, matchedExpectation: true, review: { status: 'ok', pass: expectedApproved, ...(expectedApproved ? {} : { reviewReason: 'model_rejection' }) } }) });
+      const option = React.Children.toArray(ui.select('测试案例').props.children).find((item) => item.props.value === fixture);
+      assert.equal(option.props.children, label);
+      ui.change('测试案例', fixture); ui.change('检查语言', language); await ui.click();
+      assert.equal(ui.calls.length, 1); assert.equal(ui.calls[0].body.fixture, fixture); assert.equal(ui.calls[0].body.language, language);
+      assert.match(ui.html(), /审核结果符合测试预期/); assert.match(ui.html(), /本案例无需生成/);
+      assert.ok(ui.html().includes(expectedApproved ? '预期结果：应通过审核。实际结果：已通过审核' : '预期结果：应拒绝。实际结果：已拒绝'));
+    }
+  }
+});
+
 test('review service errors never count as an expected denial and show only canonical failure labels', async () => {
   const ui = setup({ data: complex({ pass: false, matchedExpectation: false, review: { status: 'http_error', pass: false, reviewReason: 'review_upstream_error', failure: { kind: 'http', httpStatus: 503, code: 'insufficient_quota', message: 'PRIVATE-UPSTREAM' }, response: 'PRIVATE-MODEL-CONTENT' } }) });
   ui.change('测试案例', 'complex-unsupported'); await ui.click();
