@@ -30,6 +30,8 @@ const FIXTURES = {
   "exhibit-identification": "物件识别 · 应通过",
   "exhibit-wrong-object": "错认物件 · 应拒绝",
   "section-reconstruction": "重构论证 · 应拒绝",
+  "source-ambiguity-common": "原稿歧义 · 共有事实 · 应通过",
+  "source-ambiguity-disputed": "原稿歧义 · 擅自选边 · 应拒绝",
 };
 const PROFILES = { default: "供应商默认", medium: "中等强度", low: "较低强度" };
 const FORMAT_ISSUES: Record<string, string> = { fenced_json: "返回了格式包装", invalid_json: "结果不是有效结构", wrong_fields: "审核项目不完整", wrong_values: "审核项目值无效" };

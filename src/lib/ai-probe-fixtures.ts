@@ -1,6 +1,6 @@
 /** Fixed fictional inputs only: neither callers nor student records can add
  * source material, candidates, identifiers or instructions to diagnostics. */
-export const PROBE_FIXTURES = ["basic", "complex-valid", "complex-unsupported", "complex-extraction", "section-introduction", "exhibit-identification", "exhibit-wrong-object", "section-reconstruction"] as const;
+export const PROBE_FIXTURES = ["basic", "complex-valid", "complex-unsupported", "complex-extraction", "section-introduction", "exhibit-identification", "exhibit-wrong-object", "section-reconstruction", "source-ambiguity-common", "source-ambiguity-disputed"] as const;
 export type ProbeFixture = (typeof PROBE_FIXTURES)[number];
 export function isProbeFixture(value: unknown): value is ProbeFixture {
   return (PROBE_FIXTURES as readonly unknown[]).includes(value);
@@ -24,6 +24,7 @@ const BASIC = {
 // Independently invented boundary cases, not excerpts from any submission.
 // English source in both languages deliberately exercises semantic translation.
 const INTRODUCTION_SOURCE = "This is the opening section of a wholly fictional classroom exhibition called Small Instruments. It introduces the display and its theme of everyday tools and observation. Later sections will describe invented objects. This unpublished draft contains no real student's work or personal information.";
+const AMBIGUOUS_CALENDAR_SOURCE = "This is a wholly fictional, unpublished classroom exhibition draft. Caption: the exhibit is a 2024 museum calendar, River edition. Body: the exhibit is a 2024 museum calendar, Hill edition. The draft gives these two incompatible edition labels for the same calendar and supplies no correction. It contains no real person, institution or event.";
 const REMOTE_SOURCE = [
   "This wholly fictional, unpublished classroom exhibition draft has a section titled 'AC remote'. The exhibit is a photograph of an air-conditioner controller: a handheld remote control with a display and two arrow buttons. It is not a television remote. No actual person, photograph or event is represented.",
   "The draft's distinctive argument has three connected stages. First, a drawing beside the remote shows a target setting of 23 while a separate paper thermometer shows 26. The writer argues that the requested setting and an observation of the room must be distinguished. Second, a fictional participant presses the up arrow once, sees the target change to 24, and takes this only as evidence that the button changed the requested setting, not as proof of a change in room temperature. Third, an imagined blank battery makes the display disappear. The writer treats the missing display as a limit on access to the setting, not evidence that the room has no temperature.",
@@ -32,6 +33,16 @@ const REMOTE_SOURCE = [
 
 function sectionBoundaryFixture(language: "en" | "zh", fixture: ProbeFixture) {
   const question = language === "zh" ? "请简短介绍这个虚构展览的所选部分。" : "Introduce this selected fictional exhibition section briefly.";
+  if (fixture === "source-ambiguity-common" || fixture === "source-ambiguity-disputed") {
+    const disputed = fixture === "source-ambiguity-disputed";
+    return {
+      source: AMBIGUOUS_CALENDAR_SOURCE, question,
+      answer: language === "zh"
+        ? disputed ? "这件展品是一册2024年的博物馆日历，版本为河流版。" : "这件展品是一册2024年的博物馆日历。"
+        : disputed ? "This exhibit presents a museum calendar for 2024, in the River edition." : "This exhibit presents a museum calendar for 2024.",
+      instruction: "", expectedApproved: !disputed, expectedRejectedCriteria: disputed ? ["grounded"] : [] as string[],
+    };
+  }
   if (fixture === "section-introduction") return {
     source: INTRODUCTION_SOURCE, question,
     answer: language === "zh" ? "这里是这个展览的开篇介绍。" : "This section introduces the exhibition.",
